@@ -1,0 +1,11 @@
+; lang.xon -- what this bundle IS.
+
+(lang "cc")
+
+; RADON for File and the exit.  Self-contained: the compiler tier
+; depends on nothing but the platform.
+(dialect rn)
+
+(requires-release "v0.9.0")
+
+(entry "run.x")
