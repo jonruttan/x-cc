@@ -9,7 +9,7 @@
 (import cc/prims)
 
 (provide cc/base cc-version cc-preprocess cc-lex cc-parse cc-run
-  cc-argv cc-main %cc-repl-print)
+  cc-build-run cc-argv cc-main %cc-repl-print)
 
 (def cc-version "0.1.0")
 
@@ -40,4 +40,5 @@
 (include-once "./lex.x")
 (include-once "./parse.x")
 (include-once "./eval.x")
+(include-once "./build.x")
 (include-once "./cli.x")

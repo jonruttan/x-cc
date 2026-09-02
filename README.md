@@ -32,9 +32,15 @@ Refused loudly, each a recorded pending: struct/union/enum/typedef,
 switch, goto, floats, function pointers, initializer lists,
 function-like macros, #ifdef, byte-accurate sizeof.
 
-`build` -- emitting through the engine's compile-asm lane instead of
-evaluating -- is the reserved next slice, and the reason this bundle
-exists.
+`build` is here, slice one: the ELIGIBLE functions -- integers all
+the way, every path a return, self-calls only (the lane's own rule) --
+lower through the engine's compile-asm lane to NATIVE machine code, no
+external toolchain, and the rest stay interpreted (sha256.x's adoption
+pattern: refuse, fall back).  `x -l cc -- build prog.c` reports each
+function's verdict (native/interp) and runs: same output as `run`,
+measured 67s -> 10.5s wall on fib(24), the compiled function itself at
+machine speed.  Pointers, loops, globals and cross-calls in the lane
+are the recorded pendings -- each one lane feature away.
 
 Paired with x-lang v0.9.0 (`lang.xon` is the checkable row).
 
@@ -51,5 +57,6 @@ Paired with x-lang v0.9.0 (`lang.xon` is the checkable row).
     cc/lex.x          C tokens, macros spliced token-wise
     cc/parse.x        the fifteen-level ladder, declarations, statements
     cc/eval.x         the cell machine: memory, frames, calls, builtins
-    cc/cli.x          run FILE.c (build: pending)
+    cc/build.x        the eligible-class lowerer onto compile-asm
+    cc/cli.x          run FILE.c | build FILE.c
     tests/            markdown specs + the platform's runner, vendored nowhere

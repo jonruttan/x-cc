@@ -29,15 +29,21 @@
 (def cc-main
   (fn (_ raw-args)
     (def argv (cc-argv raw-args))
-    (if (if (pair? argv) (string=? (first argv) "run") #f)
+    (def mode
+      (if (null? argv) ()
+        (if (string=? (first argv) "run") (lit run)
+          (if (string=? (first argv) "build") (lit build) ()))))
+    (if (null? mode)
+      (do (file-write 2 "usage: cc run|build FILE.c\n") (sys-exit 2))
       (if (null? (rest argv))
-        (do (file-write 2 "usage: cc run FILE.c\n") (sys-exit 2))
+        (do (file-write 2 "usage: cc run|build FILE.c\n") (sys-exit 2))
         (let ((path (first (rest argv))))
           (if (file-exists? path)
-            (sys-exit (cc-run (file-read-all path)))
+            (sys-exit
+              (if (eq? mode (lit build))
+                (cc-build-run (file-read-all path))
+                (cc-run (file-read-all path))))
             (do (file-write 2
                   (string-append "cc: no such file: "
                     (string-append path "\n")))
-                (sys-exit 2)))))
-      (do (file-write 2 "usage: cc run FILE.c   (build: pending)\n")
-          (sys-exit 2)))))
+                (sys-exit 2))))))))

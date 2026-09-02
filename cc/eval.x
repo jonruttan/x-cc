@@ -28,6 +28,17 @@
 (def %cc-funs ())       ; ((name params . body) ...)
 (def %cc-strtab ())     ; ((text . addr) ...), interned
 (def %cc-exit-code ())  ; set when exit() raises its sentinel
+(def %cc-natives ())    ; ((name . prim) ...) -- build's compiled twins
+
+(def %cc-native
+  (fn (_ name)
+    (def go
+      (fn (self es)
+        (if (null? es) ()
+          (if (string=? (first (first es)) name)
+            (rest (first es))
+            (self (rest es))))))
+    (go %cc-natives)))
 
 (def %cc-oops
   (fn (_ msg)
@@ -309,7 +320,9 @@
                             "printf: only %d %c %s %x %% so far"))))))))))))
     (go 0 (rest args) ())))
 
-(set! %cc-call
+; the interpreted path; %cc-call proper dispatches to a native twin
+; first when build made one
+(def %cc-call-interp
   (fn (_ name args)
     (def f (%cc-fun name))
     (if (not (null? f))
@@ -347,6 +360,13 @@
                       (Err raise (lit cc-exit) "exit" ()))
                   (%cc-oops
                     (string-append "no such function: " name)))))))))))
+
+(set! %cc-call
+  (fn (_ name args)
+    (let ((nf (%cc-native name)))
+      (if (null? nf)
+        (%cc-call-interp name args)
+        (apply nf args)))))
 
 ; --- statements --------------------------------------------------------------
 ; control: () | (return V) | (break) | (continue)
@@ -448,8 +468,11 @@
       (do (vec-set! %cc-mem i 0)
           (self (+ i 1) end)))))
 
-(def cc-run
-  (fn (_ src)
+; the shared core: jit? #t lowers the eligible functions through the
+; engine's compile-asm lane (build.x) and reports each verdict before
+; running
+(def %cc-run-core
+  (fn (_ src jit?)
     ; ONE vector for the process, and only the DIRTY ranges cleared per
     ; run (an interpreted 16K full clear out-allocated the vector it
     ; replaced; the dirty ranges are hundreds of cells)
@@ -492,6 +515,15 @@
                             %cc-genv)))))
                 (self (rest items)))))))
     (load! prog)
+    (if jit?
+      (let ((report (%cc-jit!)))
+        (map (fn (_ v)
+               (display
+                 (string-append
+                   (if (eq? (rest v) (lit native)) "native " "interp ")
+                   (string-append (first v) "\n"))))
+          report))
+      ())
     (guard (e
              (if (null? %cc-exit-code)
                ; a genuine failure: say it and answer 1, the loud way
@@ -501,3 +533,8 @@
                    1)
                (& %cc-exit-code 255)))
       (& (%cc-call "main" ()) 255))))
+
+(def cc-run
+  (fn (_ src)
+    (do (set! %cc-natives ())
+        (%cc-run-core src #f))))
