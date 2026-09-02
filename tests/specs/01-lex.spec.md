@@ -62,10 +62,20 @@ The preprocessor and lexer: C text to tokens.
 ---
     ((num 7))
 
-### function-like macros refuse loudly
+### a function-like macro substitutes its argument text
 
 ```cc
 (cc-lex "#define F(x) x\nF(1)")
 ```
 ---
-    Error: #<err:cc cc: function-like macros are not built yet>
+    ((num 1))
+
+### substitution adds no parentheses, as in C
+
+`x*x` with the argument `2+1` is `2+1*2+1`.
+
+```cc
+(cc-lex "#define SQ(x) x*x\nSQ(2+1)")
+```
+---
+    ((num 2) (op "+") (num 1) (op "*") (num 2) (op "+") (num 1))

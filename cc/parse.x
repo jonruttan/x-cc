@@ -23,9 +23,10 @@
 ;             (or A B) (assign LV E) (ternary C A B) (comma A B)
 ;             (szof E)
 ;
-; Structs and typedefs parse (see the types section).
-; Refused loudly: union/enum, switch, goto, floats,
-; function pointers, initializer lists -- each a recorded pending.
+; Structs, typedefs (the types section) and switch (clauses in order,
+; fallthrough the evaluator's) parse.
+; Refused loudly: union/enum, goto, floats, function pointers,
+; initializer lists -- each a recorded pending.
 
 (def %cc-p-err
   (fn (_ msg)
@@ -57,8 +58,7 @@
 
 ; the unimplemented keywords refuse by name
 (def %cc-p-hard
-  (list (lit union) (lit enum) (lit switch)
-        (lit case) (lit default) (lit goto) (lit float) (lit double)))
+  (list (lit union) (lit enum) (lit goto) (lit float) (lit double)))
 
 (def %cc-p-hard?
   (fn (_ toks)
@@ -524,6 +524,8 @@
               (pair (list (lit if) (first c) (first t) (first e))
                 (rest e)))
             (pair (list (lit if) (first c) (first t) ()) (rest t))))
+        (if (%cc-p-kw? toks (lit switch))
+          (%cc-p-switch toks)
         (if (%cc-p-kw? toks (lit while))
           (let ((c (%cc-e-comma (%cc-p-eat (rest toks) "("))))
             (def b (%cc-p-stmt (%cc-p-eat (rest c) ")")))
@@ -578,7 +580,36 @@
                             (pair (pair (lit decls) (first r)) (rest r)))
                           (let ((r (%cc-e-comma toks)))
                             (pair (list (lit expr) (first r))
-                              (%cc-p-eat (rest r) ";")))))))))))))))))
+                              (%cc-p-eat (rest r) ";"))))))))))))))))))
+
+; switch (E) { case V: ... default: ... } -> (switch E CLAUSES), each
+; clause (VALUE stmt...) in order, VALUE () for default; fallthrough is
+; the evaluator's, from the matched clause to the end
+(def %cc-p-switch
+  (fn (_ toks)
+    (def c (%cc-e-comma (%cc-p-eat (rest toks) "(")))
+    (def ts0 (%cc-p-eat (%cc-p-eat (rest c) ")") "{"))
+    ; cur is (VALUE . reversed-stmts), () before the first case
+    (def finish (fn (_ cur) (pair (first cur) (reverse (rest cur)))))
+    (def close (fn (_ cur clauses) (if (null? cur) clauses (pair (finish cur) clauses))))
+    (def go
+      (fn (self ts cur clauses)
+        (if (%cc-p-op? ts "}")
+          (pair (list (lit switch) (first c) (reverse (close cur clauses))) (rest ts))
+          (if (%cc-p-kw? ts (lit case))
+            (let ((v (%cc-e-assign (rest ts))))
+              (self (%cc-p-eat (rest v) ":") (pair (first v) ()) (close cur clauses)))
+            (if (%cc-p-kw? ts (lit default))
+              (self (%cc-p-eat (rest ts) ":") (pair () ()) (close cur clauses))
+              (if (null? cur)
+                (%cc-p-err "a statement before the first case")
+                (let ((r (%cc-p-stmt ts)))
+                  (if (eq? (first (first r)) (lit decls))
+                    (self (rest r)
+                      (pair (first cur) (append (reverse (rest (first r))) (rest cur)))
+                      clauses)
+                    (self (rest r) (pair (first cur) (pair (first r) (rest cur))) clauses)))))))))
+    (go ts0 () ())))
 
 ; { ... }: statements and declarations, decls flattened in
 (set! %cc-p-block

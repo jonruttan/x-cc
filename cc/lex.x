@@ -151,6 +151,88 @@
           (if (string=? (first es) s) #t (self (rest es))))))
     (go l)))
 
+; --- function-like macros ---------------------------------------------------
+; The arguments are collected as TEXT from the source (balanced parens,
+; split at top-level commas, string and char literals opaque); the body
+; text has each parameter identifier replaced by its argument text --
+; identifier boundaries respected, string literals untouched -- and the
+; result is lexed with the macro open, which is the rescan (so a macro
+; may use a macro, and an argument's own macros expand there).  No
+; parentheses are added: SQ(a+b) with x*x is a+b*a+b, as in C.
+
+; from I (at or before the `(`): ((arg-text ...) . index-after-paren),
+; or () when no `(` follows -- then the name is just an identifier
+(def %cc-macro-args
+  (fn (_ src end i)
+    (def skip (fn (self j) (if (>= j end) j
+                            (let ((c (byte-at src j)))
+                              (if (if (= c 32) #t (if (= c 9) #t (= c 10))) (self (+ j 1)) j)))))
+    (def j0 (skip i))
+    (if (not (if (< j0 end) (= (byte-at src j0) 40) #f)) ()
+      (let ((go ()))
+        (set! go
+          (fn (self j depth start acc)
+            (if (>= j end) (Err raise (lit cc) "cc: unterminated macro call" ())
+              (let ((c (byte-at src j)))
+                (if (= c 34)                                  ; a string: skip it whole
+                  (let ((skipstr (fn (self2 k)
+                                   (if (>= k end) k
+                                     (if (= (byte-at src k) 92) (self2 (+ k 2))
+                                       (if (= (byte-at src k) 34) (+ k 1) (self2 (+ k 1))))))))
+                    (self (skipstr (+ j 1)) depth start acc))
+                  (if (= c 39)                                ; a char constant
+                    (let ((k (if (= (byte-at src (+ j 1)) 92) (+ j 4) (+ j 3))))
+                      (self k depth start acc))
+                    (if (= c 40) (self (+ j 1) (+ depth 1) start acc)
+                      (if (= c 41)
+                        (if (= depth 1)
+                          (pair (reverse (pair (substring src start j) acc)) (+ j 1))
+                          (self (+ j 1) (- depth 1) start acc))
+                        (if (if (= c 44) (= depth 1) #f)
+                          (self (+ j 1) depth (+ j 1) (pair (substring src start j) acc))
+                          (self (+ j 1) depth start acc))))))))))
+        (go (+ j0 1) 1 (+ j0 1) ())))))
+
+(def %cc-trim
+  (fn (_ s)
+    (def end (byte-len s))
+    (def ws? (fn (_ c) (if (= c 32) #t (if (= c 9) #t (= c 10)))))
+    (def a (let ((go (fn (self i) (if (>= i end) i (if (ws? (byte-at s i)) (self (+ i 1)) i))))) (go 0)))
+    (def z (let ((go (fn (self i) (if (<= i a) i (if (ws? (byte-at s (- i 1))) (self (- i 1)) i))))) (go end)))
+    (substring s a z)))
+
+; the body with each parameter identifier replaced by its argument text
+(def %cc-macro-subst
+  (fn (_ body params args)
+    (def end (byte-len body))
+    (def arg-of
+      (fn (_ name)
+        (def go (fn (self ps as)
+                  (if (null? ps) ()
+                    (if (string=? (first ps) name) (first as) (self (rest ps) (rest as))))))
+        (go params args)))
+    (def go
+      (fn (self i start acc)
+        (if (>= i end) (string-concat (reverse (pair (substring body start end) acc)))
+          (let ((c (byte-at body i)))
+            (if (= c 34)
+              (let ((skipstr (fn (self2 k)
+                               (if (>= k end) k
+                                 (if (= (byte-at body k) 92) (self2 (+ k 2))
+                                   (if (= (byte-at body k) 34) (+ k 1) (self2 (+ k 1))))))))
+                (self (skipstr (+ i 1)) start acc))
+              (if (%cc-id-start? c)
+                (let ((idr (let ((g (fn (self2 j)
+                                     (if (>= j end) j
+                                       (if (%cc-id-char? (byte-at body j)) (self2 (+ j 1)) j)))))
+                             (g i))))
+                  (def a (arg-of (substring body i idr)))
+                  (if (null? a)
+                    (self idr start acc)
+                    (self idr idr (pair a (pair (substring body start i) acc)))))
+                (self (+ i 1) start acc)))))))
+    (go 0 0 ())))
+
 ; the driver: text + macros to a token list; EXPANDING carries the
 ; macro names currently open, so a self-referential define terminates
 (def %cc-lex-go
@@ -188,11 +270,30 @@
                     (def m (%cc-macro-body macros word))
                     (if (if (null? m) #f
                           (not (%cc-member-s? word expanding)))
-                      ; splice the macro body's tokens, then continue
-                      (let ((spliced
-                              (%cc-lex-go (rest m) (byte-len (rest m)) 0
-                                macros (pair word expanding) acc)))
-                        (self src end idr macros expanding spliced))
+                      (if (pair? (rest m))
+                        ; function-like: needs its `(`; without one the
+                        ; name is an ordinary identifier
+                        (let ((ar (%cc-macro-args src end idr)))
+                          (if (null? ar)
+                            (self src end idr macros expanding
+                              (pair (list (lit id) word) acc))
+                            (let ((params (first (rest (rest m)))))
+                              (def args (map (fn (_ a) (%cc-trim a)) (first ar)))
+                              (def args2
+                                (if (if (null? params) (if (pair? args) (if (null? (rest args)) (string=? (first args) "") #f) #f) #f)
+                                  () args))
+                              (if (not (= (length params) (length args2)))
+                                (Err raise (lit cc) (string-append "cc: wrong argument count for macro " word) ()))
+                              (def text (%cc-macro-subst (rest (rest (rest m))) params args2))
+                              (let ((spliced
+                                      (%cc-lex-go text (byte-len text) 0
+                                        macros (pair word expanding) acc)))
+                                (self src end (rest ar) macros expanding spliced)))))
+                        ; object-like: splice the body's tokens, then continue
+                        (let ((spliced
+                                (%cc-lex-go (rest m) (byte-len (rest m)) 0
+                                  macros (pair word expanding) acc)))
+                          (self src end idr macros expanding spliced)))
                       (self src end idr macros expanding
                         (pair
                           (if (%cc-kw? word)

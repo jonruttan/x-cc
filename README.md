@@ -38,9 +38,16 @@ from `malloc(sizeof(struct N))` -- oracle-checked.  A field access
 whose chain the evaluator cannot type (a call's result) resolves by
 the field's name when exactly one struct has it.
 
+`switch` runs its matched clause and every clause after it as one
+block -- fallthrough -- until a `break`; `return` and `continue` pass
+through to the function or the enclosing loop.  Function-like macros
+collect their arguments as text across balanced parentheses,
+substitute at identifier boundaries, and rescan with the macro open;
+no parentheses are added, as in C.
+
 Refused loudly, each a recorded pending: structs passed or returned by
-value, union/enum, switch, goto, floats, function pointers,
-initializer lists, function-like macros, #ifdef, byte-accurate sizeof.
+value, union/enum, goto, floats, function pointers, initializer lists,
+`#` and `##` in macros, #ifdef, byte-accurate sizeof.
 
 `build` lowers the ELIGIBLE functions through the engine's compile-asm
 lane to NATIVE machine code, no external toolchain; the rest stay

@@ -10,7 +10,9 @@
 ; #include drops (the runtime provides the library the tests use),
 ; object-like #define records a macro the LEXER splices token-wise --
 ; substitution never touches text, so strings are safe by construction.
-; Any other directive refuses loudly; function-like macros, #ifdef and
+; Function-like macros are collected here as (NAME %fn (PARAMS) . BODY)
+; and expanded in the lexer.  Any other directive refuses loudly; # and
+; ## in a macro body, #ifdef and
 ; friends are recorded pendings.
 
 ; comments to spaces; strings and char constants pass untouched
@@ -100,8 +102,31 @@
           (if (= n0 n1)
             (Err raise (lit cc) "cc: #define needs a name" ())
             (if (if (< n1 end) (= (byte-at line n1) 40) #f)   ; (
-              (Err raise (lit cc)
-                "cc: function-like macros are not built yet" ())
+              ; function-like: NAME(P, Q) BODY -> (NAME %fn (P Q) . BODY);
+              ; the lexer collects the arguments and substitutes.  The #
+              ; and ## operators are the recorded pending.
+              (let ((params
+                      (let ((go (fn (self i start acc)
+                                  (if (>= i end) (Err raise (lit cc) "cc: unterminated macro parameter list" ())
+                                    (let ((c (byte-at line i)))
+                                      (if (if (= c 44) #t (= c 41))          ; , or )
+                                        (let ((w0 (skip start)))
+                                          (def w1 (word w0))
+                                          (def acc2 (if (= w1 w0) acc (pair (substring line w0 w1) acc)))
+                                          (if (= c 41) (pair (reverse acc2) (+ i 1))
+                                            (self (+ i 1) (+ i 1) acc2)))
+                                        (self (+ i 1) start acc)))))))
+                        (go (+ n1 1) (+ n1 1) ()))))
+                (def body (substring line (skip (rest params)) end))
+                (def hashy
+                  (let ((go (fn (self i)
+                              (if (>= i (byte-len body)) #f
+                                (if (= (byte-at body i) 35) #t (self (+ i 1)))))))
+                    (go 0)))
+                (if hashy
+                  (Err raise (lit cc) "cc: # and ## in macros are not built yet" ())
+                  (pair (substring line n0 n1)
+                    (pair (lit %fn) (pair (first params) body)))))
               (pair (substring line n0 n1)
                 (substring line (skip n1) end)))))
         (Err raise (lit cc)

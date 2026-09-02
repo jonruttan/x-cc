@@ -566,9 +566,35 @@
         (list (lit return)
           (if (null? (first (rest stmt))) 0
             (%cc-eval (first (rest stmt)) env)))
+      (if (eq? t (lit switch))
+        ; the matched clause and every clause after it run as one block
+        ; (fallthrough); a break ends the switch, return and continue
+        ; pass through to the enclosing function or loop
+        (let ((v (%cc-eval (first (rest stmt)) env)))
+          (def clauses (first (rest (rest stmt))))
+          (def from
+            (let ((go (fn (self cs)
+                        (if (null? cs) ()
+                          (if (if (null? (first (first cs))) #f
+                                (= v (%cc-eval (first (first cs)) env)))
+                            cs (self (rest cs)))))))
+              (go clauses)))
+          (def start
+            (if (not (null? from)) from
+              (let ((go (fn (self cs)
+                          (if (null? cs) ()
+                            (if (null? (first (first cs))) cs (self (rest cs)))))))
+                (go clauses))))
+          (def body
+            (let ((go (fn (self cs)
+                        (if (null? cs) ()
+                          (append (rest (first cs)) (self (rest cs)))))))
+              (go start)))
+          (let ((c (%cc-exec-block (list (lit block) body) env)))
+            (if (%cc-ctrl? c (lit break)) () c)))
       (if (eq? t (lit break)) (list (lit break))
       (if (eq? t (lit continue)) (list (lit continue))
-        (%cc-oops "unknown statement")))))))))))))
+        (%cc-oops "unknown statement"))))))))))))))
 
 ; a block: declarations extend the env as they pass
 (set! %cc-exec-block
