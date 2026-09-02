@@ -152,20 +152,20 @@ interp main
 
 ## the refusals
 
-### a nested loop stays interpreted; the whole still runs
+### a three-deep loop stays interpreted; the whole still runs
 
-The inner loop would need its own recursion; the lane self-calls
-only -- the recorded pending (a state machine over one self-call is
-the planned shape).
+Two levels lower as a state machine over the one self-call
+(07-nested); a third level refuses in the inner fold -- the recorded
+pending.
 
 ```cc
-(display (cc-build-run "#include <stdio.h>\nint sq(int n) { int s = 0; int i; int j; for (i = 0; i < n; i++) { for (j = 0; j < n; j++) { s = s + 1; } } return s; }\nint main() { printf(\"%d\\n\", sq(7)); return 0; }"))
+(display (cc-build-run "#include <stdio.h>\nint c3(int n) { int s = 0; int i; int j; for (i = 0; i < n; i++) { for (j = 0; j < n; j++) { int k; for (k = 0; k < 2; k++) s = s + 1; } } return s; }\nint main() { printf(\"%d\\n\", c3(3)); return 0; }"))
 ```
 ---
 ```output
-interp sq
+interp c3
 interp main
-49
+18
 0
 ```
 

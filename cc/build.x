@@ -25,9 +25,11 @@
 ;      E;` guards -- and INITS over the parameters: decl inits,
 ;      pre-loop assignments and the for-INIT fold in order, and a
 ;      non-literal init pads as its own lane function over the params
-;      applied at the call boundary.  params+accs <= 4.
-; Pointers, nested loops, inits that call, globals and cross-calls
-; stay interpreted -- recorded pendings.
+;      applied at the call boundary -- and NESTED LOOPS, two deep, as
+;      a state machine over the one self-call (see the nested section
+;      in %cc-lower-loop).  params+accs <= 4.
+; Pointers, three-deep loops, a fifth threaded variable, inits that
+; call, globals and cross-calls stay interpreted -- recorded pendings.
 ;
 ; Adoption is sha256.x's pattern: the whole attempt sits in a guard;
 ; a function that will not lower or will not compile simply stays
@@ -556,9 +558,129 @@
             (if (null? vs) #t
               (if (%cc-member-str? (first vs) params)
                 (self2 (rest vs)) #f))))
+        (def ext (append params accs))
+        (def lcond (%cc-lower-e cond-node name ext))
+        (def lret (%cc-lower-e ret-e name ext))
+        (def body-stmts (%cc-loop-body-stmts body-stmt))
+        ; a self-call cexpr from map M: every threadable variable takes
+        ; its folded value, or rides through unchanged
+        (def call-from
+          (fn (_ m)
+            (list (lit call) name (map (fn (_ v) (%cc-var-of v m)) ext))))
+        ; the exits, last to first, wrap a plain self-call in ifs; an
+        ; unconditional exit replaces everything after it
+        (def wrap-with
+          (fn (self2 plain es)
+            (if (null? es) plain
+              (let ((e (first es)))
+                (if (eq? (first (first e)) (lit num))
+                  (%cc-lower-e (rest e) name ext)
+                  (list (lit if)
+                    (%cc-lower-e (first e) name ext)
+                    (%cc-lower-e (rest e) name ext)
+                    (self2 plain (rest es))))))))
+        ; --- NESTED LOOPS: a state machine over the one self-call ----
+        ; The outer body splits at its first top-level loop into PRE,
+        ; the inner loop, and POST.  Each re-entry runs one step of
+        ; whichever loop is active:
+        ;   (if I-cond (if J-cond INNER-STEP TRANSITION) R)
+        ; INNER-STEP folds the inner body + J-step; TRANSITION folds
+        ; POST + I-step + (if I-cond' { PRE; J-init }) -- guarded, so
+        ; PRE and J-init never leak into R on the last exit.  The same
+        ; guarded reset, folded onto the init map, gives the entry
+        ; pads (J-init may read i).  An inner `break` is the transition
+        ; call and an inner `continue` the inner self-call: folding
+        ; from a map equals folding from identity then substituting,
+        ; so the transition is a STATIC cexpr the fold's break already
+        ; substitutes.  Two levels deep; a third refuses in the fold.
+        (def split-inner
+          (fn (self2 ss pre)
+            (if (null? ss) ()
+              (if (if (eq? (first (first ss)) (lit for)) #t
+                    (eq? (first (first ss)) (lit while)))
+                (list (reverse pre) (first ss) (rest ss))
+                (self2 (rest ss) (pair (first ss) pre))))))
+        (def nest (split-inner body-stmts ()))
+        (def no-exits!
+          (fn (_ st2 what)
+            (if (null? (%cc-st-exits st2)) st2
+              (%cc-no (string-append what " may not exit")))))
+        (def outer-step-stmts
+          (if (null? step-node) () (list (list (lit expr) step-node))))
+        ; the two paths meet at (upd . st): the outer-level fold state
+        ; that shapes the self-call, plus imap-final and body-expr
+        (def nested
+          (if (null? nest) ()
+            (let ((pre-stmts (first nest)))
+              (def inner (first (rest nest)))
+              (def post-stmts (first (rest (rest nest))))
+              (def j-for (eq? (first inner) (lit for)))
+              (def j-init (if j-for (first (rest inner)) ()))
+              (def j-cond (if j-for (first (rest (rest inner)))
+                            (first (rest inner))))
+              (def j-step (if j-for (first (rest (rest (rest inner)))) ()))
+              (def j-body (%cc-loop-body-stmts
+                            (if j-for
+                              (first (rest (rest (rest (rest inner)))))
+                              (first (rest (rest inner))))))
+              (if (null? j-cond) (%cc-no "inner loop needs a condition"))
+              ; the guarded reset: (if I-cond (block PRE... J-init))
+              (def reset-stmts
+                (append pre-stmts
+                  (if (null? j-init) ()
+                    (list (list (lit expr) j-init)))))
+              (def reset
+                (if (null? reset-stmts) ()
+                  (list (list (lit if) cond-node
+                          (list (lit block) reset-stmts) ()))))
+              ; the transition from identity, as a static cexpr
+              (def st-t
+                (no-exits!
+                  (%cc-fold-stmts (append post-stmts
+                                    (append outer-step-stmts reset))
+                    (%cc-st () () () ()) ext (list ret-e step-node name))
+                  "the outer body around the inner loop"))
+              (def transition (call-from (first st-t)))
+              ; the inner step, its break aimed at the transition
+              (def st-in
+                (%cc-fold-stmts
+                  (append j-body
+                    (if (null? j-step) () (list (list (lit expr) j-step))))
+                  (%cc-st () () () ()) ext (list transition j-step name)))
+              (def inner-expr
+                (wrap-with (%cc-lower-e (call-from (first st-in)) name ext)
+                  (%cc-st-exits st-in)))
+              ; entry pads: the reset folded onto the init map
+              (def imap-final
+                (first (no-exits!
+                         (%cc-fold-stmts reset (%cc-st imap () () ())
+                           ext (list ret-e step-node name))
+                         "the reset")))
+              (list imap-final
+                (list (lit if) lcond
+                  (list (lit if) (%cc-lower-e j-cond name ext)
+                    inner-expr
+                    (%cc-lower-e transition name ext))
+                  lret)
+                (append (first (rest (rest st-in)))
+                  (first (rest (rest st-t))))))))
+        ; --- the single-loop path ------------------------------------
+        (def st
+          (if (null? nested)
+            (%cc-fold-stmts (append body-stmts outer-step-stmts)
+              (%cc-st () () () ()) ext (list ret-e step-node name))
+            ()))
+        (def imap-final (if (null? nested) imap (first nested)))
+        (def loop-expr
+          (if (null? nested)
+            (list (lit if) lcond
+              (wrap-with (%cc-lower-e (call-from (first st)) name ext)
+                (%cc-st-exits st))
+              lret)
+            (first (rest nested))))
         (def inits
           (map (fn (_ a)
-                 (let ((e (%cc-var-of a imap)))
+                 (let ((e (%cc-var-of a imap-final)))
                    ; NOT `lit` -- a def in a called body binds globally
                    ; and `lit` is the quote operative
                    (def litv (%cc-int-lit e))
@@ -571,46 +693,13 @@
                            (map (fn (_ p) (convert p %symbol)) params))
                          (%cc-lower-e e "" params))))))
             accs))
-        (def ext (append params accs))
-        ; per-iteration updates: the body, then the for-step (wrapped
-        ; as the statement it is), through one fold
-        (def stmts
-          (append (%cc-loop-body-stmts body-stmt)
-            (if (null? step-node) ()
-              (list (list (lit expr) step-node)))))
-        (def ctx (list ret-e step-node name))
-        (def st (%cc-fold-stmts stmts (%cc-st () () () ()) ext ctx))
-        (def upd (first st))
-        (def lcond (%cc-lower-e cond-node name ext))
-        (def lret (%cc-lower-e ret-e name ext))
-        ; every threadable variable -- params included -- takes its
-        ; folded value into the self-call, or rides through unchanged
-        (def plain-call
-          (pair (convert name %symbol)
-            (map (fn (_ v)
-                   (let ((u (%cc-assoc-str v upd)))
-                     (if (null? u) (convert v %symbol)
-                       (%cc-lower-e (rest u) name ext))))
-              ext)))
-        ; the exits, last to first, wrap the plain self-call in ifs;
-        ; an unconditional exit replaces everything after it
-        (def wrap
-          (fn (self2 es)
-            (if (null? es) plain-call
-              (let ((e (first es)))
-                (if (eq? (first (first e)) (lit num))
-                  (%cc-lower-e (rest e) name ext)
-                  (list (lit if)
-                    (%cc-lower-e (first e) name ext)
-                    (%cc-lower-e (rest e) name ext)
-                    (self2 (rest es))))))))
-        (def self-call (wrap (%cc-st-exits st)))
-        (def loop-expr (list (lit if) lcond self-call lret))
         ; pre-loop guards re-run on every self-call re-entry, so each
         ; must be LOOP-INVARIANT: it may read only parameters the body
         ; never assigns (an accumulator holds its init only on first
         ; entry).  Guards wrap the loop outermost-first.
-        (def assigned (first (rest (rest st))))
+        (def assigned
+          (if (null? nested) (first (rest (rest st)))
+            (first (rest (rest nested)))))
         (def invariant?
           (fn (self2 vs)
             (if (null? vs) #t

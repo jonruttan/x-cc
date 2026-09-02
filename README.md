@@ -44,13 +44,17 @@ included -- `gcd` compiles to recursive gcd), body-local temps
 (substitution-only), `if`/`else` (each written variable merges as a
 ternary), early exits -- `return`/`break`/`continue` inside the loop
 as guarded exits, plus loop-invariant pre-loop guards, so search loops
-and `isprime` go native -- and inits over the parameters (a non-literal
-init pads as its own tiny lane function, applied at the call boundary).
-`x -l cc -- build prog.c` reports each function's verdict and runs,
-same output as `run`: fib(24) 67s -> 10.5s wall, a 2,000,000-iteration
-loop 79s -> 9.5s (the loop itself at machine speed under the boot).
-Pointers, nested loops, globals and cross-calls stay interpreted -- the
-recorded pendings.
+and `isprime` go native -- inits over the parameters (a non-literal
+init pads as its own tiny lane function, applied at the call boundary)
+-- and nested loops, two deep, as a state machine over the one
+self-call (each re-entry runs a step of whichever loop is active; an
+inner `break` is the transition to the outer step).  `x -l cc -- build
+prog.c` reports each function's verdict and runs, same output as
+`run`: fib(24) 67s -> 10.5s wall, a 2,000,000-iteration loop 79s ->
+9.5s (the loop itself at machine speed under the boot).  Pointers,
+three-deep loops, more than four threaded variables (the lane's arg
+limit), globals and cross-calls stay interpreted -- the recorded
+pendings.
 
 Paired with x-lang v0.10.0 (`lang.xon` is the checkable row).
 
