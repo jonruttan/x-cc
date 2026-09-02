@@ -46,15 +46,22 @@ ternary), early exits -- `return`/`break`/`continue` inside the loop
 as guarded exits, plus loop-invariant pre-loop guards, so search loops
 and `isprime` go native -- inits over the parameters (a non-literal
 init pads as its own tiny lane function, applied at the call boundary)
--- and nested loops, two deep, as a state machine over the one
-self-call (each re-entry runs a step of whichever loop is active; an
-inner `break` is the transition to the outer step).  `x -l cc -- build
-prog.c` reports each function's verdict and runs, same output as
-`run`: fib(24) 67s -> 10.5s wall, a 2,000,000-iteration loop 79s ->
-9.5s (the loop itself at machine speed under the boot).  Pointers,
-three-deep loops, more than four threaded variables (the lane's arg
-limit), globals and cross-calls stay interpreted -- the recorded
-pendings.
+-- nested loops, two deep, as a state machine over the one self-call
+(each re-entry runs a step of whichever loop is active; an inner
+`break` is the transition to the outer step) -- and POINTERS.  The
+program's memory is one raw buffer that the interpreter and the native
+twins address alike (the lane's `%mem-ref-at`/`%mem-set-at!` with the
+buffer's data address baked in), so a pointer is a cell index on both
+sides and arrays cross the boundary for free: **a native bubble sort
+sorts main's array**.  In a loop body, memory reads become load temps
+at their evaluation point and stores become effects, emitted in
+program order before the tail.  `x -l cc -- build prog.c` reports each
+function's verdict and runs, same output as `run`: fib(24) 67s ->
+10.5s wall, a 2,000,000-iteration loop 79s -> 9.5s (the loop itself at
+machine speed under the boot).  Stores mixed with early exits, reads
+under a short circuit, two sequential top-level loops, three-deep
+loops, more than four threaded variables (the lane's arg limit),
+globals and cross-calls stay interpreted -- the recorded pendings.
 
 Paired with x-lang v0.10.0 (`lang.xon` is the checkable row).
 

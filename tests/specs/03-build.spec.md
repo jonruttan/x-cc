@@ -47,14 +47,17 @@ interp main
 0
 ```
 
-### pointers stay interpreted, loudly classified
+### a dereference reads the shared memory natively
+
+The memory is one raw buffer both sides address (08-pointers), so a
+pointer parameter is a cell index the native twin reads directly.
 
 ```cc
 (display (cc-build-run "#include <stdio.h>\nint deref(int *p) { return *p; }\nint main() { int x = 9; printf(\"%d\\n\", deref(&x)); return 0; }"))
 ```
 ---
 ```output
-interp deref
+native deref
 interp main
 9
 0

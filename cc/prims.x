@@ -17,6 +17,7 @@
   string-length substring string-append string-concat string=?
   list->string convert length reverse append map filter set-first!
   vec-make vec-ref vec-set!
+  mem-make mem-ptr ptr-int word-ref word-set!
   file-read-all file-exists? file-write
   sys-exit)
 
@@ -53,6 +54,15 @@
 (def vec-make (fn (_ n fill) (Vector make n fill)))
 (def vec-ref (fn (_ v i) (Vector ref i v)))
 (def vec-set! (fn (_ v i x) (Vector set! i x v)))
+
+; raw memory: a string is the buffer, its data pointer the base that
+; the interpreter (ptr ref-word/set-word!, one prim per access) and
+; compile-asm's %mem-ref-at/%mem-set-at! (the base as an int) share
+(def mem-make (prim-ref (lit str) (lit make)))
+(def mem-ptr (prim-ref (lit str) (lit ->ptr)))
+(def ptr-int (prim-ref (lit ptr) (lit ->int)))
+(def word-ref (prim-ref (lit ptr) (lit ref-word)))
+(def word-set! (prim-ref (lit ptr) (lit set-word!)))
 
 (def file-read-all (fn (_ path) (File read-all path)))
 (def file-exists? (fn (_ path) (File exists? path)))

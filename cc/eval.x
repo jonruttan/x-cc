@@ -17,11 +17,24 @@
 ; C division truncates toward zero -- the tower's / answers rationals,
 ; so the evaluator owns its own div and mod.
 
-(def %cc-mem ())
-; 16K cells: ample for the tool-scale programs this tier runs, and
-; small enough to live inside the spec runner's allocation ceiling
-; (a 256K vector alone tripped it).  Grows the day a program needs it.
+; THE MEMORY IS RAW AND SHARED.  One string is the buffer; every
+; cell is one 8-byte word at byte offset 8*cell.  The interpreter
+; reads and writes through ptr ref-word/set-word! (one prim each);
+; build's native twins address the SAME bytes through %mem-ref-at /
+; %mem-set-at! with the buffer's data address baked in as a literal --
+; so a pointer is just a cell index on both sides and arrays cross the
+; native/interpreted boundary for free.  The collector is non-moving
+; (the whole reflection layer rides raw object pointers); the base is
+; still refreshed every run.
+(def %cc-mem ())        ; the buffer string, held so it stays alive
+(def %cc-memp ())       ; its ptr object, for the interpreter's words
+(def %cc-membase 0)     ; its data address, for the native twins
+; 16K cells for programs, plus a scratch region above them for the
+; native twins' local arrays and load temps.
 (def %cc-memsize 16384)
+(def %cc-scratch-cells 4096)
+(def %cc-raw-ref (fn (_ i) (word-ref %cc-memp (* 8 i))))
+(def %cc-raw-set! (fn (_ i v) (word-set! %cc-memp (* 8 i) v)))
 (def %cc-sp 0)          ; stack pointer, grows down
 (def %cc-hp 0)          ; heap bump, grows up
 (def %cc-genv ())       ; ((name addr . kind) ...)
@@ -47,12 +60,12 @@
 (def %cc-load
   (fn (_ addr)
     (if (<= addr 0) (%cc-oops "null or negative address read")
-      (vec-ref %cc-mem addr))))
+      (%cc-raw-ref addr))))
 
 (def %cc-store
   (fn (_ addr v)
     (if (<= addr 0) (%cc-oops "null or negative address write")
-      (vec-set! %cc-mem addr v))))
+      (%cc-raw-set! addr v))))
 
 ; stack cells, zero-filled; answers the base address
 (def %cc-alloca
@@ -62,7 +75,7 @@
     (if (<= %cc-sp %cc-hp) (%cc-oops "stack overflow (cell memory)")
       (let ((clear (fn (self i)
                      (if (>= i n) ()
-                       (do (vec-set! %cc-mem (+ %cc-sp i) 0)
+                       (do (%cc-raw-set! (+ %cc-sp i) 0)
                            (self (+ i 1)))))))
         (do (clear 0) %cc-sp)))))
 
@@ -88,8 +101,8 @@
         (def base (%cc-heap (+ n 1)))
         (def fill
           (fn (self i)
-            (if (>= i n) (vec-set! %cc-mem (+ base i) 0)
-              (do (vec-set! %cc-mem (+ base i) (+ 0 (byte-at text i)))
+            (if (>= i n) (%cc-raw-set! (+ base i) 0)
+              (do (%cc-raw-set! (+ base i) (+ 0 (byte-at text i)))
                   (self (+ i 1))))))
         (fill 0)
         (set! %cc-strtab (pair (pair text base) %cc-strtab))
@@ -473,7 +486,7 @@
 (def %cc-mem-clear
   (fn (self i end)
     (if (>= i end) ()
-      (do (vec-set! %cc-mem i 0)
+      (do (%cc-raw-set! i 0)
           (self (+ i 1) end)))))
 
 ; the shared core: jit? #t lowers the eligible functions through the
@@ -485,9 +498,11 @@
     ; run (an interpreted 16K full clear out-allocated the vector it
     ; replaced; the dirty ranges are hundreds of cells)
     (if (null? %cc-mem)
-      (set! %cc-mem (vec-make %cc-memsize 0))
+      (set! %cc-mem (mem-make (* 8 (+ %cc-memsize %cc-scratch-cells))))
       (do (%cc-mem-clear 0 %cc-hp)
           (%cc-mem-clear %cc-sp-min %cc-memsize)))
+    (set! %cc-memp (mem-ptr %cc-mem))
+    (set! %cc-membase (ptr-int %cc-memp))
     (set! %cc-sp-min %cc-memsize)
     (set! %cc-sp %cc-memsize)
     (set! %cc-hp 16)
