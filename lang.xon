@@ -4,7 +4,12 @@
 
 ; RADON for File and the exit.  Self-contained: the compiler tier
 ; depends on nothing but the platform.
-(dialect rn)
+; HELIUM, plus exactly the libraries this bundle imports and nothing
+; ambient.  Radon is only a particular set of libraries to load, and
+; the set it loads (the numeric tower, JIT-compiled tokenizer
+; analysers) costs ~9s of every invocation that a tool never uses
+; (measured 2026-09-02; the x-coreutils manifest has the numbers).
+(dialect he)
 
 (requires-release "v0.10.0")
 
