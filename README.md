@@ -42,7 +42,7 @@ measured 67s -> 10.5s wall on fib(24), the compiled function itself at
 machine speed.  Pointers, loops, globals and cross-calls in the lane
 are the recorded pendings -- each one lane feature away.
 
-Paired with x-lang v0.9.0 (`lang.xon` is the checkable row).
+Paired with x-lang v0.10.0 (`lang.xon` is the checkable row).
 
 ## Tests
 
