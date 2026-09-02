@@ -58,17 +58,17 @@ is the cell model on the record.
 0
 ```
 
-## the refusal
+## by value
 
-### a struct passed by value stays pending, loudly
+### a struct passed by value is a copy in the callee's frame
 
 ```cc
-(display (cc-run "#include <stdio.h>\nstruct P { int x; int y; };\nint sum(struct P p) { return p.x + p.y; }\nint main() { struct P q; q.x = 1; q.y = 2; printf(\"%d\\n\", sum(q)); return 0; }"))
+(display (cc-run "#include <stdio.h>\nstruct P { int x; int y; };\nint sum(struct P p) { p.x = p.x + p.y; return p.x; }\nint main() { struct P q; q.x = 1; q.y = 2; printf(\"%d %d\\n\", sum(q), q.x); return 0; }"))
 ```
 ---
 ```output
-cc: run failed: #<err:cc cc: run: a struct passed by value stays pending>
-1
+3 1
+0
 ```
 
 ## the cell model, on the record

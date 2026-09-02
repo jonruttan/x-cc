@@ -12,7 +12,7 @@
 ; misnesting lesson applied from the start.
 ;
 ; THE AST:
-;   toplevel  (fun NAME PARAMS BODY) (gdecl NAME KIND INIT|())
+;   toplevel  (fun NAME PARAMS BODY KINDS RET-KIND) (gdecl NAME KIND INIT|())
 ;   stmts     (block ITEMS) (if C T E|()) (while C B) (do B C)
 ;             (for I|() C|() U|() B) (return E|()) (break) (continue)
 ;             (expr E) (decl NAME KIND INIT|())
@@ -842,7 +842,8 @@
                 (convert (first (rest (first ts))) %string)))
           (if (%cc-p-kw? ts (lit typedef))
             (self (%cc-p-typedef (rest ts)) acc)
-            (let ((ts2 (%cc-p-skip-type ts)))
+            (let ((tr (%cc-p-type ts)))
+              (def ts2 (rest tr))
               (if (%cc-p-op? ts2 ";")
                 ; `struct S { ... };` -- a definition, nothing declared
                 (self (rest ts2) acc)
@@ -856,9 +857,10 @@
                         (self (rest (rest pr)) acc)
                         (let ((b (%cc-p-block
                                    (%cc-p-eat (rest pr) "{"))))
+                          ; (fun NAME PARAMS BODY KINDS RET-KIND)
                           (self (rest b)
                             (pair (list (lit fun) name (first (first pr))
-                                    (first b) (rest (first pr)))
+                                    (first b) (rest (first pr)) (first tr))
                               acc)))))
                     ; globals: reuse the declarator line from ts
                     (let ((r (%cc-p-decl-line ts)))

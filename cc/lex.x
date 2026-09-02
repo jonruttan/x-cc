@@ -201,7 +201,11 @@
     (def z (let ((go (fn (self i) (if (<= i a) i (if (ws? (byte-at s (- i 1))) (self (- i 1)) i))))) (go end)))
     (substring s a z)))
 
-; the body with each parameter identifier replaced by its argument text
+; the body with each parameter identifier replaced by its argument text;
+; #PARAM becomes the argument's text as a string literal (quotes and
+; backslashes escaped), and A ## B pastes: the operator and the
+; whitespace either side drop out, so the neighbours' text joins and
+; the rescan lexes the joined token
 (def %cc-macro-subst
   (fn (_ body params args)
     (def end (byte-len body))
@@ -211,6 +215,23 @@
                   (if (null? ps) ()
                     (if (string=? (first ps) name) (first as) (self (rest ps) (rest as))))))
         (go params args)))
+    (def ws? (fn (_ c) (if (= c 32) #t (if (= c 9) #t (= c 10)))))
+    (def skip-ws (fn (self j) (if (>= j end) j (if (ws? (byte-at body j)) (self (+ j 1)) j))))
+    (def id-end (fn (self j) (if (>= j end) j (if (%cc-id-char? (byte-at body j)) (self (+ j 1)) j))))
+    (def trim-right
+      (fn (_ s)
+        (def go (fn (self k) (if (<= k 0) 0 (if (ws? (byte-at s (- k 1))) (self (- k 1)) k))))
+        (substring s 0 (go (byte-len s)))))
+    (def stringize
+      (fn (_ s)
+        (def n (byte-len s))
+        (def go (fn (self i acc)
+                  (if (>= i n) (string-concat (reverse (pair "\"" acc)))
+                    (let ((c (byte-at s i)))
+                      (self (+ i 1)
+                        (pair (substring s i (+ i 1))
+                          (if (if (= c 34) #t (= c 92)) (pair "\\" acc) acc)))))))
+        (go 0 (list "\""))))
     (def go
       (fn (self i start acc)
         (if (>= i end) (string-concat (reverse (pair (substring body start end) acc)))
@@ -221,6 +242,18 @@
                                  (if (= (byte-at body k) 92) (self2 (+ k 2))
                                    (if (= (byte-at body k) 34) (+ k 1) (self2 (+ k 1))))))))
                 (self (skipstr (+ i 1)) start acc))
+              (if (= c 35)                                            ; #
+                (if (if (< (+ i 1) end) (= (byte-at body (+ i 1)) 35) #f)
+                  ; ##: paste
+                  (let ((j (skip-ws (+ i 2))))
+                    (self j j (pair (trim-right (substring body start i)) acc)))
+                  ; #PARAM: stringize; a # before anything else passes through
+                  (let ((j (skip-ws (+ i 1))))
+                    (def idr (if (if (< j end) (%cc-id-start? (byte-at body j)) #f) (id-end j) j))
+                    (def a (if (> idr j) (arg-of (substring body j idr)) ()))
+                    (if (null? a)
+                      (self (+ i 1) start acc)
+                      (self idr idr (pair (stringize (%cc-trim a)) (pair (substring body start i) acc))))))
               (if (%cc-id-start? c)
                 (let ((idr (let ((g (fn (self2 j)
                                      (if (>= j end) j
@@ -230,7 +263,7 @@
                   (if (null? a)
                     (self idr start acc)
                     (self idr idr (pair a (pair (substring body start i) acc)))))
-                (self (+ i 1) start acc)))))))
+                (self (+ i 1) start acc))))))))
     (go 0 0 ())))
 
 ; the driver: text + macros to a token list; EXPANDING carries the

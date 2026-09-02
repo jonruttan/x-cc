@@ -68,12 +68,15 @@ oracle row from /usr/bin/cc.
 0
 ```
 
-## the refusal
+## the operators
 
-### # and ## in a macro body stay pending
+### # stringizes (the full story is 13-byvalue-paste)
 
 ```cc
-(display (guard (e (do (display "refused: ") (write e) "")) (cc-run "#define STR(x) #x\nint main() { return 0; }")))
+(display (cc-run "#include <stdio.h>\n#define STR(x) #x\nint main() { puts(STR(ok)); return 0; }"))
 ```
 ---
-    refused: #<err:cc cc: # and ## in macros are not built yet>
+```output
+ok
+0
+```

@@ -1036,9 +1036,20 @@
           (let ((name (first (first fs))))
             (def params (first (rest (first fs))))
             (def body (first (rest (rest (first fs)))))
+            ; (name params body kinds ret): a struct passed or returned
+            ; by value stays interpreted
+            (def struct-kind?
+              (fn (_ k) (if (pair? k) (eq? (first k) (lit struct)) #f)))
+            (def structy?
+              (let ((tail (rest (rest (rest (first fs))))))
+                (if (null? tail) #f
+                  (if (struct-kind? (if (null? (rest tail)) () (first (rest tail)))) #t
+                    (not (null? (filter struct-kind? (first tail))))))))
             (def verdict
               (guard (e (lit interpreted))
-                (let ((lowered (%cc-lower-fun name params body)))
+                (let ((lowered
+                        (if structy? (%cc-no "struct kinds stay interpreted")
+                          (%cc-lower-fun name params body))))
                   (def prim (compile-asm (first lowered)))
                   ; the table entry is (name pad . prim); each pad slot
                   ; is an accumulator's literal init, or its init

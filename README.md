@@ -28,7 +28,8 @@ break, continue, return; functions with recursion and prototypes;
 globals; string literals (interned); character constants; `#include`
 (dropped -- the runtime provides putchar, puts, printf %d %c %s %x,
 malloc, free, exit), object-like `#define` spliced token-wise; // and
-/* */ comments.
+/* */ comments.  By-value struct functions stay interpreted under
+`build`; a scalar function they call still lowers.
 
 Structs, too: `struct S { ... };`, `typedef struct { ... } T;`,
 fields by `.` and `->`, nested structs, arrays of structs, pointers to
@@ -63,9 +64,16 @@ NULL), and `f(x)`, `(*f)(x)`, `ops[i](x)`, `p->fn(x)` all dispatch as
 the named call would -- a native twin called through a pointer from
 interpreted code stays native.
 
-Refused loudly, each a recorded pending: structs passed or returned by
-value, goto, floats, casts to function-pointer types, `#` and `##` in
-macros, byte-accurate sizeof.
+Structs go by value too: a struct parameter takes its size in the
+callee's frame and copies from the argument; a struct returned by
+value moves out of the popped frame into a fresh slot in the caller's
+(alive until the caller returns), so `make(1, 2).x` and `add(make(1,
+2), make(3, 4))` are safe.  In a macro body `#PARAM` is the argument's
+text as a string literal and `A ## B` pastes, the rescan lexing the
+joined token.
+
+Refused loudly, each a recorded pending: goto, floats, casts to
+function-pointer types, byte-accurate sizeof.
 
 `build` lowers the ELIGIBLE functions through the engine's compile-asm
 lane to NATIVE machine code, no external toolchain; the rest stay

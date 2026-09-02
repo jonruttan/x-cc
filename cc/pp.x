@@ -13,8 +13,7 @@
 ; Function-like macros are collected here as (NAME %fn (PARAMS) . BODY)
 ; and expanded in the lexer.  #ifdef/#ifndef/#elif/#else/#endif/#undef
 ; and the #if forms a build header needs (0, 1, defined) select lines.
-; Any other directive refuses loudly; # and ## in a macro body are the
-; recorded pending.
+; Any other directive refuses loudly.
 
 ; comments to spaces; strings and char constants pass untouched
 (def %cc-strip-comments
@@ -112,8 +111,8 @@
             (Err raise (lit cc) "cc: #define needs a name" ())
             (if (if (< n1 end) (= (byte-at line n1) 40) #f)   ; (
               ; function-like: NAME(P, Q) BODY -> (NAME %fn (P Q) . BODY);
-              ; the lexer collects the arguments and substitutes.  The #
-              ; and ## operators are the recorded pending.
+              ; the lexer collects the arguments and substitutes (# and
+              ; ## included)
               (let ((params
                       (let ((go (fn (self i start acc)
                                   (if (>= i end) (Err raise (lit cc) "cc: unterminated macro parameter list" ())
@@ -127,16 +126,9 @@
                                         (self (+ i 1) start acc)))))))
                         (go (+ n1 1) (+ n1 1) ()))))
                 (def body (substring line (skip (rest params)) end))
-                (def hashy
-                  (let ((go (fn (self i)
-                              (if (>= i (byte-len body)) #f
-                                (if (= (byte-at body i) 35) #t (self (+ i 1)))))))
-                    (go 0)))
-                (if hashy
-                  (Err raise (lit cc) "cc: # and ## in macros are not built yet" ())
-                  (pair (lit define)
-                    (pair (substring line n0 n1)
-                      (pair (lit %fn) (pair (first params) body))))))
+                (pair (lit define)
+                  (pair (substring line n0 n1)
+                    (pair (lit %fn) (pair (first params) body)))))
               (pair (lit define)
                 (pair (substring line n0 n1)
                   (substring line (skip n1) end))))))

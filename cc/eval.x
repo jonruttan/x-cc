@@ -292,6 +292,11 @@
       (if (eq? t (lit idx)) (%cc-kind-elem (self (first (rest node)) env))
       (if (if (eq? t (lit un)) (string=? (first (rest node)) "*") #f)
         (%cc-kind-elem (self (first (rest (rest node))) env))
+      (if (eq? t (lit call))
+        ; a named call's kind is the function's declared return kind
+        (let ((f (if (null? (%cc-find (first (rest node)) env)) (%cc-fun (first (rest node))) ())))
+          (if (null? f) (lit scalar)
+            (let ((r (rest (rest (rest f))))) (if (null? r) (lit scalar) (first r)))))
       (if (if (eq? t (lit bin)) (if (string=? (first (rest node)) "+") #t (string=? (first (rest node)) "-")) #f)
         ; pointer arithmetic keeps the pointer's kind
         (let ((ka (self (first (rest (rest node))) env)))
@@ -299,7 +304,7 @@
             (if (if (pair? ka) (eq? (first ka) (lit array)) #f)
               (list (lit ptr) (%cc-kind-elem ka))
               (lit scalar))))
-        (lit scalar))))))))))
+        (lit scalar)))))))))))
 
 ; cells one step of pointer arithmetic moves, for a node's kind
 (def %cc-step-of
@@ -350,6 +355,25 @@
                 (do (%cc-store (+ dst i) (%cc-load (+ src i))) (self (+ i 1))))))
     (go 0)))
 
+; cells out as a list, and back in: a returned struct is READ before
+; its frame pops -- the caller's fresh slot can be the very cells the
+; callee's first parameter held, and alloca zero-fills them (the bug:
+; `return a;` of a mutated struct parameter came back all zero)
+(def %cc-read-cells
+  (fn (_ src n)
+    (def go (fn (self i acc)
+              (if (< i 0) acc (self (- i 1) (pair (%cc-load (+ src i)) acc)))))
+    (go (- n 1) ())))
+(def %cc-write-cells!
+  (fn (_ dst vals)
+    (def go (fn (self i vs)
+              (if (null? vs) ()
+                (do (%cc-store (+ dst i) (first vs)) (self (+ i 1) (rest vs))))))
+    (go 0 vals)))
+
+(def %cc-struct-kind?
+  (fn (_ k) (if (pair? k) (eq? (first k) (lit struct)) #f)))
+
 (def %cc-lval
   (fn (_ node env)
     (let ((t (first node)))
@@ -378,7 +402,11 @@
               (if (if (eq? t (lit un))
                     (string=? (first (rest node)) "*") #f)
                 (%cc-eval (first (rest (rest node))) env)
-                (%cc-oops "not an lvalue")))))))))
+                ; a struct returned by value lives at the address the
+                ; call answers: make(1, 2).x
+                (if (if (eq? t (lit call)) #t (eq? t (lit callx)))
+                  (%cc-eval node env)
+                  (%cc-oops "not an lvalue"))))))))))
 
 (def %cc-call ())
 
@@ -438,7 +466,10 @@
       (if (eq? t (lit un))
         (let ((op (first (rest node))))
           (if (string=? op "*")
-            (%cc-load (%cc-eval (first (rest (rest node))) env))
+            ; *p of a pointer to a struct is the struct: its address
+            (let ((a (%cc-eval (first (rest (rest node))) env)))
+              (if (%cc-kind-decays? (%cc-kind-elem (%cc-kind-of (first (rest (rest node))) env)))
+                a (%cc-load a)))
             (if (string=? op "&")
               ; &f of a function name is the function's value
               (let ((sub (first (rest (rest node)))))
@@ -544,27 +575,35 @@
   (fn (_ name args)
     (def f (%cc-fun name))
     (if (not (null? f))
-      ; a user function: params get stack cells, the body runs, a
-      ; return control carries the value; the frame frees wholesale
+      ; a user function: params get stack cells (a struct parameter its
+      ; size, copied from the argument's address), the body runs, a
+      ; return control carries the value; the frame frees wholesale.  A
+      ; struct returned by value moves out of the popped frame into a
+      ; fresh slot in the caller's, which lives until the caller returns
       (let ((saved-sp %cc-sp))
         (def bind
           (fn (self ps ks as env)
             (if (null? ps) env
               (let ((k (if (null? ks) (lit scalar) (first ks))))
-                (if (if (pair? k) (eq? (first k) (lit struct)) #f)
-                  (%cc-oops "a struct passed by value stays pending"))
-                (def a (%cc-alloca 1))
-                (do (%cc-store a (if (null? as) 0 (first as)))
+                (def size (if (%cc-struct-kind? k) (%cc-kind-size k) 1))
+                (def a (%cc-alloca size))
+                (do (if (%cc-struct-kind? k)
+                      (if (null? as) () (%cc-copy-cells! a (first as) size))
+                      (%cc-store a (if (null? as) 0 (first as))))
                     (self (rest ps) (if (null? ks) () (rest ks))
                       (if (null? as) () (rest as))
                       (pair (pair (first ps) (pair a k)) env)))))))
-        ; f is (params body kinds)
+        ; f is (params body kinds ret)
         (def env (bind (first f) (first (rest (rest f))) args ()))
+        (def ret (let ((r (rest (rest (rest f))))) (if (null? r) (lit scalar) (first r))))
         (def c (%cc-exec-block (first (rest f)) env))
-        (do (set! %cc-sp saved-sp)
-            (if (if (pair? c) (eq? (first c) (lit return)) #f)
-              (first (rest c))
-              0)))
+        (def v (if (if (pair? c) (eq? (first c) (lit return)) #f) (first (rest c)) 0))
+        (if (%cc-struct-kind? ret)
+          (let ((vals (%cc-read-cells v (%cc-kind-size ret))))
+            (set! %cc-sp saved-sp)
+            (let ((tmp (%cc-alloca (%cc-kind-size ret))))
+              (do (%cc-write-cells! tmp vals) tmp)))
+          (do (set! %cc-sp saved-sp) v)))
       (if (string=? name "putchar")
         (do (display (list->string (list (integer->char (first args)))))
             (first args))
