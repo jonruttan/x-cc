@@ -79,12 +79,18 @@
                            (self (+ i 1)))))))
         (do (clear 0) %cc-sp)))))
 
+; heap cells, zero-filled like the stack's: the raw buffer behind the
+; memory is SPACE-filled at birth (0x20 bytes), and a global array's
+; uninitialized tail read 0x2020202020202020 until this cleared it
 (def %cc-heap
   (fn (_ n)
     (def base %cc-hp)
     (set! %cc-hp (+ %cc-hp n))
     (if (>= %cc-hp %cc-sp) (%cc-oops "heap exhausted (cell memory)")
-      base)))
+      (let ((clear (fn (self i)
+                     (if (>= i n) ()
+                       (do (%cc-raw-set! (+ base i) 0) (self (+ i 1)))))))
+        (do (clear 0) base)))))
 
 ; a C string into memory, interned; answers its address
 (def %cc-intern
@@ -270,6 +276,43 @@
 (def %cc-step-of
   (fn (_ node env)
     (%cc-kind-size (%cc-kind-elem (%cc-kind-of node env)))))
+
+; an initializer laid into cells at A by KIND: a braced list fills an
+; array's elements or a struct's fields in order (nested lists recurse;
+; missing trailing items stay zero); a string fills a char array with
+; its bytes and a NUL; a struct value copies; a scalar stores
+(def %cc-init-into! ())
+(set! %cc-init-into!
+  (fn (self a kind init env)
+    (if (eq? (first init) (lit initlist))
+      (let ((items (first (rest init))))
+        (if (if (pair? kind) (eq? (first kind) (lit array)) #f)
+          (let ((ek (%cc-kind-elem kind)))
+            (def es (%cc-kind-size ek))
+            (def go (fn (self2 is i)
+                      (if (null? is) ()
+                        (do (self (+ a (* i es)) ek (first is) env)
+                            (self2 (rest is) (+ i 1))))))
+            (go items 0))
+          (if (if (pair? kind) (eq? (first kind) (lit struct)) #f)
+            (let ((e (%cc-p-struct-entry (first (rest kind)))))
+              (def go (fn (self2 is fs)
+                        (if (null? is) ()
+                          (if (null? fs) (%cc-oops "too many initializers for a struct")
+                            (do (self (+ a (first (rest (first fs)))) (first (rest (rest (first fs)))) (first is) env)
+                                (self2 (rest is) (rest fs)))))))
+              (go items (rest (rest e))))
+            (if (null? items) () (self a kind (first items) env)))))
+      (if (if (eq? (first init) (lit str)) (if (pair? kind) (eq? (first kind) (lit array)) #f) #f)
+        (let ((text (first (rest init))))
+          (def n (byte-len text))
+          (def go (fn (self2 i)
+                    (if (>= i n) (%cc-store (+ a i) 0)
+                      (do (%cc-store (+ a i) (+ 0 (byte-at text i))) (self2 (+ i 1))))))
+          (go 0))
+        (if (if (pair? kind) (eq? (first kind) (lit struct)) #f)
+          (%cc-copy-cells! a (%cc-eval init env) (%cc-kind-size kind))
+          (%cc-store a (%cc-eval init env)))))))
 
 (def %cc-copy-cells!
   (fn (_ dst src n)
@@ -610,9 +653,7 @@
                 (def size (%cc-kind-size kind))
                 (def a (%cc-alloca size))
                 (do (if (null? init) ()
-                      (if (if (pair? kind) (eq? (first kind) (lit struct)) #f)
-                        (%cc-copy-cells! a (%cc-eval init env) size)
-                        (%cc-store a (%cc-eval init env))))
+                      (%cc-init-into! a kind init env))
                     (self (rest items)
                       (pair (pair name (pair a kind)) env))))
               (let ((c (%cc-exec item env)))
@@ -664,7 +705,7 @@
                     (def size (%cc-kind-size kind))
                     (def a (%cc-heap size))
                     (do (if (null? init) ()
-                          (%cc-store a (%cc-eval init ())))
+                          (%cc-init-into! a kind init ()))
                         (set! %cc-genv
                           (pair (pair name (pair a kind)) %cc-genv)))))
                 (self (rest items)))))))

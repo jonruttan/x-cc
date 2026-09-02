@@ -45,9 +45,16 @@ collect their arguments as text across balanced parentheses,
 substitute at identifier boundaries, and rescan with the macro open;
 no parentheses are added, as in C.
 
+`#ifdef`/`#ifndef`/`#else`/`#endif`/`#undef` and the `#if` forms a
+build header needs (`0`, `1`, `defined`) select lines; an inactive
+region still tracks its nesting.  Initializer lists lay values into
+cells by kind -- `int a[] = {…}` sized by the list, `struct P p =
+{…}`, nested lists for arrays of structs, missing trailing items
+zero, `char s[] = "…"` from the string's bytes.
+
 Refused loudly, each a recorded pending: structs passed or returned by
-value, union/enum, goto, floats, function pointers, initializer lists,
-`#` and `##` in macros, #ifdef, byte-accurate sizeof.
+value, union/enum, goto, floats, function pointers, `#` and `##` in
+macros, `#elif`, byte-accurate sizeof.
 
 `build` lowers the ELIGIBLE functions through the engine's compile-asm
 lane to NATIVE machine code, no external toolchain; the rest stay

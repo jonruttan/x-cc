@@ -731,6 +731,10 @@
     (check-kinds stmts0)
     (def arr-sub
       (map (fn (_ d)
+             ; the array's name substitutes away and its decl is dropped,
+             ; so an initializer would be lost: refuse, stay interpreted
+             (if (not (null? (first (rest (rest (rest d))))))
+               (%cc-no "an initialized local array stays interpreted"))
              (pair (first (rest d))
                (list (lit num)
                  (%cc-new-cells (first (rest (first (rest (rest d)))))))))

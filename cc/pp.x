@@ -11,8 +11,9 @@
 ; object-like #define records a macro the LEXER splices token-wise --
 ; substitution never touches text, so strings are safe by construction.
 ; Function-like macros are collected here as (NAME %fn (PARAMS) . BODY)
-; and expanded in the lexer.  Any other directive refuses loudly; # and
-; ## in a macro body, #ifdef and
+; and expanded in the lexer.  #ifdef/#ifndef/#else/#endif/#undef and the
+; #if forms a build header needs (0, 1, defined) select lines.  Any
+; other directive refuses loudly; # and ## in a macro body, #elif and
 ; friends are recorded pendings.
 
 ; comments to spaces; strings and char constants pass untouched
@@ -94,8 +95,17 @@
     (def d0 (skip 0))
     (def d1 (word d0))
     (def dname (substring line d0 d1))
+    (def arg (%cc-trim-ws (substring line (skip d1) end)))
     (if (string=? dname "include")
-      ()
+      (list (lit include))
+    (if (string=? dname "ifdef") (pair (lit ifdef) arg)
+    (if (string=? dname "ifndef") (pair (lit ifndef) arg)
+    (if (string=? dname "else") (list (lit else))
+    (if (string=? dname "endif") (list (lit endif))
+    (if (string=? dname "undef") (pair (lit undef) arg)
+    (if (string=? dname "if") (pair (lit if) arg)
+    (if (string=? dname "elif")
+      (Err raise (lit cc) "cc: #elif is not built yet" ())
       (if (string=? dname "define")
         (let ((n0 (skip d1)))
           (def n1 (word n0))
@@ -125,12 +135,54 @@
                     (go 0)))
                 (if hashy
                   (Err raise (lit cc) "cc: # and ## in macros are not built yet" ())
-                  (pair (substring line n0 n1)
-                    (pair (lit %fn) (pair (first params) body)))))
-              (pair (substring line n0 n1)
-                (substring line (skip n1) end)))))
+                  (pair (lit define)
+                    (pair (substring line n0 n1)
+                      (pair (lit %fn) (pair (first params) body))))))
+              (pair (lit define)
+                (pair (substring line n0 n1)
+                  (substring line (skip n1) end))))))
         (Err raise (lit cc)
-          (string-append "cc: unsupported directive #" dname) ())))))
+          (string-append "cc: unsupported directive #" dname) ()))))))))))))
+
+(def %cc-trim-ws
+  (fn (_ s)
+    (def end (byte-len s))
+    (def ws? (fn (_ c) (if (= c 32) #t (if (= c 9) #t (= c 13)))))
+    (def z (let ((go (fn (self i) (if (<= i 0) 0 (if (ws? (byte-at s (- i 1))) (self (- i 1)) i))))) (go end)))
+    (substring s 0 z)))
+
+(def %cc-defined?
+  (fn (_ name macros)
+    (def go (fn (self es)
+              (if (null? es) #f
+                (if (string=? (first (first es)) name) #t (self (rest es))))))
+    (go macros)))
+
+; #if takes only what a build header needs: 0, 1, defined(NAME),
+; defined NAME, and !defined(...).  Anything else refuses loudly.
+(def %cc-if-cond
+  (fn (_ text macros)
+    (def end (byte-len text))
+    (def name-in
+      (fn (_ from)
+        ; the identifier after `defined`, with or without parentheses
+        (def skip (fn (self i) (if (>= i end) i (let ((c (byte-at text i))) (if (if (= c 32) #t (if (= c 40) #t (= c 9))) (self (+ i 1)) i)))))
+        (def a (skip from))
+        (def word (fn (self i) (if (>= i end) i
+                                 (let ((c (byte-at text i)))
+                                   (if (if (if (>= c 97) (<= c 122) #f) #t
+                                         (if (if (>= c 65) (<= c 90) #f) #t
+                                           (if (if (>= c 48) (<= c 57) #f) #t (= c 95))))
+                                     (self (+ i 1)) i)))))
+        (substring text a (word a))))
+    (if (string=? text "0") #f
+      (if (string=? text "1") #t
+        (if (if (>= end 7) (string=? (substring text 0 7) "defined") #f)
+          (%cc-defined? (name-in 7) macros)
+          (if (if (>= end 8) (string=? (substring text 0 8) "!defined") #f)
+            (not (%cc-defined? (name-in 8) macros))
+            (Err raise (lit cc)
+              (string-append "cc: unsupported #if condition: " text) ())))))))
 
 ; every line, empties kept, trailing newline or not
 (def %cc-split-lines
@@ -159,23 +211,52 @@
 
 ; source to (clean-text . macro-alist): comments stripped, # lines
 ; pulled out and replaced with blanks (token separation kept)
+; the walk carries a STACK of conditional flags: a line lives when
+; every open conditional is true.  An inactive region still tracks its
+; own nesting, so its #endif pairs; its defines and undefs are ignored.
 (def cc-preprocess
   (fn (_ src)
     (def lines (%cc-split-lines (%cc-strip-comments src)))
+    (def live?
+      (fn (self st) (if (null? st) #t (if (first st) (self (rest st)) #f))))
+    (def undef
+      (fn (_ name macros)
+        (filter (fn (_ e) (not (string=? (first e) name))) macros)))
     (def go
-      (fn (self ls macros acc)
+      (fn (self ls macros stack acc)
         (if (null? ls)
-          (pair (%cc-join-nl (reverse acc)) (reverse macros))
+          (if (not (null? stack))
+            (Err raise (lit cc) "cc: unterminated #if" ())
+            (pair (%cc-join-nl (reverse acc)) (reverse macros)))
           (let ((line (first ls)))
             (def hash (%cc-hash-at line))
+            (def on (live? stack))
             (if (< hash 0)
-              (self (rest ls) macros (pair line acc))
-              (let ((m (%cc-directive
-                         (substring line (+ hash 1) (byte-len line)))))
-                (self (rest ls)
-                  (if (null? m) macros (pair m macros))
-                  (pair "" acc))))))))
-    (go lines () ())))
+              (self (rest ls) macros stack (pair (if on line "") acc))
+              (let ((m (%cc-directive (substring line (+ hash 1) (byte-len line)))))
+                (def k (first m))
+                (if (eq? k (lit ifdef))
+                  (self (rest ls) macros (pair (if on (%cc-defined? (rest m) macros) #f) stack) (pair "" acc))
+                (if (eq? k (lit ifndef))
+                  (self (rest ls) macros (pair (if on (not (%cc-defined? (rest m) macros)) #f) stack) (pair "" acc))
+                (if (eq? k (lit if))
+                  (self (rest ls) macros (pair (if on (%cc-if-cond (rest m) macros) #f) stack) (pair "" acc))
+                (if (eq? k (lit else))
+                  (if (null? stack) (Err raise (lit cc) "cc: #else without #if" ())
+                    (self (rest ls) macros
+                      (pair (if (live? (rest stack)) (not (first stack)) #f) (rest stack))
+                      (pair "" acc)))
+                (if (eq? k (lit endif))
+                  (if (null? stack) (Err raise (lit cc) "cc: #endif without #if" ())
+                    (self (rest ls) macros (rest stack) (pair "" acc)))
+                (if (not on)
+                  (self (rest ls) macros stack (pair "" acc))
+                (if (eq? k (lit define))
+                  (self (rest ls) (pair (rest m) macros) stack (pair "" acc))
+                (if (eq? k (lit undef))
+                  (self (rest ls) (undef (rest m) macros) stack (pair "" acc))
+                  (self (rest ls) macros stack (pair "" acc))))))))))))))))
+    (go lines () () ())))
 
 (def %cc-join-nl
   (fn (self ls)

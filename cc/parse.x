@@ -23,10 +23,11 @@
 ;             (or A B) (assign LV E) (ternary C A B) (comma A B)
 ;             (szof E)
 ;
-; Structs, typedefs (the types section) and switch (clauses in order,
-; fallthrough the evaluator's) parse.
-; Refused loudly: union/enum, goto, floats, function pointers,
-; initializer lists -- each a recorded pending.
+; Structs, typedefs (the types section), switch (clauses in order,
+; fallthrough the evaluator's) and initializer lists (INIT may be
+; (initlist ITEMS); an unsized array takes its size from one) parse.
+; Refused loudly: union/enum, goto, floats, function pointers -- each
+; a recorded pending.
 
 (def %cc-p-err
   (fn (_ msg)
@@ -448,16 +449,50 @@
         (def ts2 (rest ts))
         (def kindr
           (if (%cc-p-op? ts2 "[")
-            (let ((n (first (rest (first (rest ts2))))))
-              (pair (if (pair? kind0) (list (lit array) n kind0) (list (lit array) n))
-                (%cc-p-eat (rest (rest ts2)) "]")))
+            (if (%cc-p-op? (rest ts2) "]")
+              ; int a[] = ...: the initializer sizes it
+              (pair (if (pair? kind0) (list (lit array) () kind0) (list (lit array) ()))
+                (rest (rest ts2)))
+              (let ((n (first (rest (first (rest ts2))))))
+                (pair (if (pair? kind0) (list (lit array) n kind0) (list (lit array) n))
+                  (%cc-p-eat (rest (rest ts2)) "]"))))
             (pair kind0 ts2)))
         (def ts3 (rest kindr))
         (if (%cc-p-op? ts3 "=")
-          (let ((ir (%cc-e-assign (rest ts3))))
-            (pair (list (lit decl) name (first kindr) (first ir))
+          (let ((ir (if (%cc-p-op? (rest ts3) "{")
+                      (%cc-p-initlist (rest (rest ts3)))
+                      (%cc-e-assign (rest ts3)))))
+            (pair (list (lit decl) name (%cc-p-size-kind (first kindr) (first ir)) (first ir))
               (rest ir)))
-          (pair (list (lit decl) name (first kindr) ()) ts3))))))
+          (if (if (pair? (first kindr)) (if (eq? (first (first kindr)) (lit array)) (null? (first (rest (first kindr)))) #f) #f)
+            (%cc-p-err "an array without a size needs an initializer")
+            (pair (list (lit decl) name (first kindr) ()) ts3)))))))
+
+; { init (, init)* [,] } -> (initlist ITEMS), items nested lists or exprs
+(def %cc-p-initlist
+  (fn (self toks)
+    (def go
+      (fn (self2 ts acc)
+        (if (%cc-p-op? ts "}")
+          (pair (list (lit initlist) (reverse acc)) (rest ts))
+          (let ((r (if (%cc-p-op? ts "{") (self (rest ts)) (%cc-e-assign ts))))
+            (if (%cc-p-op? (rest r) ",")
+              (self2 (rest (rest r)) (pair (first r) acc))
+              (if (%cc-p-op? (rest r) "}")
+                (pair (list (lit initlist) (reverse (pair (first r) acc))) (rest (rest r)))
+                (%cc-p-err "expected , or } in an initializer")))))))
+    (go toks ())))
+
+; an unsized array takes its size from the initializer: the list's
+; length, or a string's bytes plus its NUL
+(def %cc-p-size-kind
+  (fn (_ kind init)
+    (if (if (pair? kind) (if (eq? (first kind) (lit array)) (null? (first (rest kind))) #f) #f)
+      (let ((n (if (eq? (first init) (lit initlist)) (length (first (rest init)))
+                 (if (eq? (first init) (lit str)) (+ 1 (byte-len (first (rest init))))
+                   (%cc-p-err "an unsized array needs a list or string initializer")))))
+        (if (null? (rest (rest kind))) (list (lit array) n) (list (lit array) n (first (rest (rest kind))))))
+      kind)))
 
 ; TYPE declarator (, declarator)* ; -- a list of decl nodes
 (def %cc-p-decl-line
