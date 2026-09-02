@@ -30,9 +30,17 @@ globals; string literals (interned); character constants; `#include`
 malloc, free, exit), object-like `#define` spliced token-wise; // and
 /* */ comments.
 
-Refused loudly, each a recorded pending: struct/union/enum/typedef,
-switch, goto, floats, function pointers, initializer lists,
-function-like macros, #ifdef, byte-accurate sizeof.
+Structs, too: `struct S { ... };`, `typedef struct { ... } T;`,
+fields by `.` and `->`, nested structs, arrays of structs, pointers to
+structs stepping by the struct's size, struct assignment as a cell
+copy, `sizeof` a struct as its cell count, and the linked list built
+from `malloc(sizeof(struct N))` -- oracle-checked.  A field access
+whose chain the evaluator cannot type (a call's result) resolves by
+the field's name when exactly one struct has it.
+
+Refused loudly, each a recorded pending: structs passed or returned by
+value, union/enum, switch, goto, floats, function pointers,
+initializer lists, function-like macros, #ifdef, byte-accurate sizeof.
 
 `build` lowers the ELIGIBLE functions through the engine's compile-asm
 lane to NATIVE machine code, no external toolchain; the rest stay

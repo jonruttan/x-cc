@@ -717,6 +717,18 @@
     (def array-decl?
       (fn (_ st1)
         (if (eq? (first st1) (lit decl)) (pair? (first (rest (rest st1)))) #f)))
+    ; a struct-kinded or struct-element local stays interpreted
+    (def check-kinds
+      (fn (self ss)
+        (if (null? ss) ()
+          (let ((st1 (first ss)))
+            (if (if (eq? (first st1) (lit decl)) (pair? (first (rest (rest st1)))) #f)
+              (let ((k (first (rest (rest st1)))))
+                (if (if (eq? (first k) (lit array)) (null? (rest (rest k))) #f)
+                  (self (rest ss))
+                  (%cc-no "struct kinds stay interpreted")))
+              (self (rest ss)))))))
+    (check-kinds stmts0)
     (def arr-sub
       (map (fn (_ d)
              (pair (first (rest d))
@@ -1019,7 +1031,7 @@
         (if (null? fs) (reverse acc)
           (let ((name (first (first fs))))
             (def params (first (rest (first fs))))
-            (def body (rest (rest (first fs))))
+            (def body (first (rest (rest (first fs)))))
             (def verdict
               (guard (e (lit interpreted))
                 (let ((lowered (%cc-lower-fun name params body)))
