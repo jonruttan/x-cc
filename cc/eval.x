@@ -363,10 +363,13 @@
 
 (set! %cc-call
   (fn (_ name args)
-    (let ((nf (%cc-native name)))
-      (if (null? nf)
+    ; a native twin's entry is (pad . prim): the accumulator inits (from
+    ; build's loop transform) pad the call, so a C call of arity k
+    ; reaches a k+m-param lane function
+    (let ((entry (%cc-native name)))
+      (if (null? entry)
         (%cc-call-interp name args)
-        (apply nf args)))))
+        (apply (rest entry) (append args (first entry)))))))
 
 ; --- statements --------------------------------------------------------------
 ; control: () | (return V) | (break) | (continue)

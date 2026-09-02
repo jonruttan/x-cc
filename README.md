@@ -32,15 +32,17 @@ Refused loudly, each a recorded pending: struct/union/enum/typedef,
 switch, goto, floats, function pointers, initializer lists,
 function-like macros, #ifdef, byte-accurate sizeof.
 
-`build` is here, slice one: the ELIGIBLE functions -- integers all
-the way, every path a return, self-calls only (the lane's own rule) --
-lower through the engine's compile-asm lane to NATIVE machine code, no
-external toolchain, and the rest stay interpreted (sha256.x's adoption
-pattern: refuse, fall back).  `x -l cc -- build prog.c` reports each
-function's verdict (native/interp) and runs: same output as `run`,
-measured 67s -> 10.5s wall on fib(24), the compiled function itself at
-machine speed.  Pointers, loops, globals and cross-calls in the lane
-are the recorded pendings -- each one lane feature away.
+`build` lowers the ELIGIBLE functions through the engine's compile-asm
+lane to NATIVE machine code, no external toolchain; the rest stay
+interpreted (sha256.x's adoption pattern: refuse, fall back).  Two body
+shapes lower: `if`/`return` recursion (fib), and **loops** -- a
+`{ decls; while|for; return }` function transforms into tail self-
+recursion, its accumulators riding as extra parameters with literal
+inits supplied by arg-padding.  `x -l cc -- build prog.c` reports each
+function's verdict and runs, same output as `run`: fib(24) 67s -> 10.5s
+wall, a 2,000,000-iteration loop 79s -> 9.5s (the loop itself at machine
+speed under the boot).  Pointers, param mutation, nested loop control,
+globals and cross-calls stay interpreted -- the recorded pendings.
 
 Paired with x-lang v0.10.0 (`lang.xon` is the checkable row).
 

@@ -60,14 +60,18 @@ interp main
 0
 ```
 
-### a loop keeps its function interpreted; the whole still runs
+### a for loop compiles native beside a recursive function
+
+The loop transform: `{ decls; for; return }` becomes tail self-recursion
+with the accumulators as extra parameters, so tri is native now (main,
+which prints, stays interpreted).
 
 ```cc
 (display (cc-build-run "#include <stdio.h>\nint tri(int n) { int s = 0; int i; for (i = 1; i <= n; i++) s += i; return s; }\nint fib(int n) { if (n < 2) return n; return fib(n-1) + fib(n-2); }\nint main() { printf(\"%d %d\\n\", tri(10), fib(11)); return 0; }"))
 ```
 ---
 ```output
-interp tri
+native tri
 native fib
 interp main
 55 89
