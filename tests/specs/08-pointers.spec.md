@@ -72,16 +72,16 @@ interp main
 0
 ```
 
-## the refusals
+## stores with an exit
 
-### stores with an early return stay interpreted
+### a store after an early return lowers as the stream (14-lowering has the story)
 
 ```cc
 (display (cc-build-run "#include <stdio.h>\nint findz(int *a, int n) { int i; for (i = 0; i < n; i++) { if (a[i] == 0) return i; a[i] = 0; } return -1; }\nint main() { int b[5]; int i; for (i = 0; i < 5; i++) b[i] = i * i; printf(\"%d\\n\", findz(b, 5)); return 0; }"))
 ```
 ---
 ```output
-interp findz
+native findz
 interp main
 0
 0

@@ -33,11 +33,19 @@
 ;      load temps and stores become effects, emitted in program order
 ;      before the tail (%cc-extract, %cc-effects-do); a top-level
 ;      local array takes scratch cells and its name substitutes away.
-;      params+accs <= 4.
-; Stores with early exits, reads under a short circuit, two sequential
-; top-level loops, three-deep loops, a fifth threaded variable, inits
-; that call, globals and cross-calls stay interpreted -- recorded
-; pendings.
+;      A body that both stores and exits lowers as the ordered STREAM,
+;      each exit tested in its place among the stores (%cc-stream-do).
+;      SEQUENTIAL LOOPS run as phases of the one self-call: a phase
+;      counter rides as one more threaded variable and each loop's
+;      exit is the transition call into the next.  params+accs <= 4.
+;   3. CROSS-CALLS inline: a non-recursive callee of the if/return
+;      shape lowers with its own parameters, which then substitute to
+;      the lowered arguments (%cc-inline); in a loop body a cross-call
+;      evaluates at its program point through a temp, so its reads
+;      order against the stores.
+; Reads or cross-calls under a short circuit, three-deep loops, a
+; fifth threaded variable, callees with loops or recursion, globals
+; and calls through pointers stay interpreted -- recorded pendings.
 ;
 ; Adoption is sha256.x's pattern: the whole attempt sits in a guard;
 ; a function that will not lower or will not compile simply stays
@@ -142,15 +150,78 @@
         (let ((callee (first (rest node))))
           (def args (first (rest (rest node))))
           (if (not (string=? callee fname))
-            (%cc-no "only self-calls lower")
+            ; another function: inline its lowered body
+            (%cc-inline callee (map (fn (_ a) (self a fname params)) args))
             (if (> (length args) 4)
               (%cc-no "the lane takes at most 4 args")
               (pair (convert fname %symbol)
                 (map (fn (_ a) (self a fname params)) args)))))
         (%cc-no "form stays interpreted")))))))))))))))
 
+; --- cross-calls: inlining ---------------------------------------------------
+; The lane calls only the function it is compiling, so a call to
+; ANOTHER function inlines: a callee of the if/return shape lowers
+; with its own parameters as the variables, then each parameter symbol
+; substitutes to the lowered argument -- all at once, so a callee
+; parameter named like one of the caller's cannot capture.  Mutual
+; recursion is caught by the inline stack (the function being lowered
+; is on it from the start); a self-recursive callee by its lowered
+; body mentioning its own name.  A callee with a loop refuses in
+; %cc-lower-body, as does one with struct kinds here.
+(def %cc-inline-stack ())
+(def %cc-fold-name "")     ; the function a loop fold is lowering
+
+(def %cc-lane-subst
+  (fn (self form al)
+    (if (pair? form) (map (fn (_ x) (self x al)) form)
+      (if (symbol? form)
+        (let ((go (fn (self2 es)
+                    (if (null? es) form
+                      (if (eq? (first (first es)) form) (rest (first es))
+                        (self2 (rest es)))))))
+          (go al))
+        form))))
+
+(def %cc-lane-mentions?
+  (fn (self form sym)
+    (if (pair? form)
+      (let ((go (fn (self2 xs)
+                  (if (null? xs) #f
+                    (if (self (first xs) sym) #t (self2 (rest xs)))))))
+        (go form))
+      (eq? form sym))))
+
+(def %cc-lower-body ())
+
+(def %cc-inline
+  (fn (_ callee largs)
+    (def f (%cc-fun callee))
+    (if (null? f) (%cc-no "a call to no lowerable function")
+      (if (%cc-member-str? callee %cc-inline-stack)
+        (%cc-no "a recursive callee does not inline")
+        (let ((cparams (first f)))
+          (def kinds (first (rest (rest f))))
+          (def ret (let ((r (rest (rest (rest f))))) (if (null? r) (lit scalar) (first r))))
+          (if (not (= (length cparams) (length largs)))
+            (%cc-no "a call with the wrong arity"))
+          (if (if (pair? ret) #t (not (null? (filter pair? kinds))))
+            (%cc-no "struct kinds stay interpreted"))
+          (%cc-check-names callee cparams)
+          (set! %cc-inline-stack (pair callee %cc-inline-stack))
+          (def lowered
+            (%cc-lower-body (first (rest (first (rest f)))) callee cparams))
+          (set! %cc-inline-stack (rest %cc-inline-stack))
+          (if (%cc-lane-mentions? lowered (convert callee %symbol))
+            (%cc-no "a recursive callee does not inline"))
+          (%cc-lane-subst lowered
+            (let ((go (fn (self2 ps as)
+                        (if (null? ps) ()
+                          (pair (pair (convert (first ps) %symbol) (first as))
+                            (self2 (rest ps) (rest as)))))))
+              (go cparams largs))))))))
+
 ; a statement list where every path returns, as one expression
-(def %cc-lower-body
+(set! %cc-lower-body
   (fn (self stmts fname params)
     (if (null? stmts)
       (%cc-no "a path falls off the end")
@@ -358,10 +429,12 @@
           (if (if (eq? t (lit var)) #t (if (eq? t (lit num)) #t (eq? t (lit mt))))
             #f
             (if (eq? t (lit call))
-              (let ((go (fn (self2 as)
-                          (if (null? as) #f
-                            (if (self (first as)) #t (self2 (rest as)))))))
-                (go (first (rest (rest node)))))
+              ; a cross-call evaluates at its point, like a read
+              (if (not (string=? (first (rest node)) %cc-fold-name)) #t
+                (let ((go (fn (self2 as)
+                            (if (null? as) #f
+                              (if (self (first as)) #t (self2 (rest as)))))))
+                  (go (first (rest (rest node))))))
               ; bin cmp un and or ternary: any child
               (let ((go (fn (self2 kids)
                           (if (null? kids) #f
@@ -408,7 +481,15 @@
                       (let ((r (self (first as) m effs2)))
                         (self2 (rest as) (rest r) (pair (first r) acc)))))))
           (let ((r (go (first (rest (rest node))) effs ())))
-            (pair (list (lit call) (first (rest node)) (first r)) (rest r))))
+            (if (string=? (first (rest node)) %cc-fold-name)
+              (pair (list (lit call) (first (rest node)) (first r)) (rest r))
+              ; a cross-call: computed at its program point into a temp
+              ; (calc K CALL), the expression reading (mt K)
+              (let ((k (%cc-new-cells 1)))
+                (pair (list (lit mt) k)
+                  (append (rest r)
+                    (list (list (lit calc) k
+                            (%cc-subst (list (lit call) (first (rest node)) (first r)) m)))))))))
         (pair node effs)))))))))))
 
 ; the address a memory lvalue names, with its own reads extracted
@@ -484,26 +565,29 @@
                         (%cc-st (%cc-put-str (first a) (%cc-subst (first r) m) m)
                           locals (pair (first a) assigned) exits (rest r))
                         ext ctx)))))))
-        ; the three exits end their sequence: what follows is dead
+        ; the three exits end their sequence: what follows is dead.
+        ; Each is recorded twice: in EXITS with its guard (for the
+        ; exits-only wrap) and as an (exit GUARD VALUE) marker in the
+        ; effects stream at its program point (for the stream lowering
+        ; when stores are among them)
         (if (eq? t (lit return))
           (if (null? (first (rest s))) (%cc-no "bare return in a loop")
             (let ((r (%cc-extract (first (rest s)) m effs)))
+              (def v (%cc-subst (first r) m))
               (%cc-st m locals assigned
-                (append exits
-                  (list (pair (list (lit num) 1) (%cc-subst (first r) m))))
-                (rest r))))
+                (append exits (list (pair (list (lit num) 1) v)))
+                (append (rest r) (list (list (lit exit) (list (lit num) 1) v))))))
         (if (eq? t (lit break))
           (if (null? (first ctx)) (%cc-no "break into a transition that stores")
-            (%cc-st m locals assigned
-              (append exits
-                (list (pair (list (lit num) 1) (%cc-subst (first ctx) m))))
-              effs))
+            (let ((v (%cc-subst (first ctx) m)))
+              (%cc-st m locals assigned
+                (append exits (list (pair (list (lit num) 1) v)))
+                (append effs (list (list (lit exit) (list (lit num) 1) v))))))
         (if (eq? t (lit continue))
-          (%cc-st m locals assigned
-            (append exits
-              (list (pair (list (lit num) 1)
-                      (%cc-continue-call m locals ext ctx))))
-            effs)
+          (let ((v (%cc-continue-call m locals ext ctx)))
+            (%cc-st m locals assigned
+              (append exits (list (pair (list (lit num) 1) v)))
+              (append effs (list (list (lit exit) (list (lit num) 1) v)))))
         (if (eq? t (lit if))
           (let ((rc (%cc-extract (first (rest s)) m effs)))
             (def c (%cc-subst (first rc) m))
@@ -613,29 +697,39 @@
               (pair (first (rest s)) (first (rest ret)))))
           ())))))
 
-; split { decls*; pre*; (while|for); return R }
-;   -> (decls pre loop return) or nil.  PRE is the statements between
-;   the decls and the loop, in order, each (guard C . E) for a pre-loop
-;   `if (C) return E;` or (init NAME . E) for a pre-loop assignment --
-;   the lowerer checks guards are loop-invariant and inits target
-;   accumulators.
+; split { decls*; pre*; (while|for) (assign*; (while|for))*; return R }
+;   -> (decls pre loops return) or nil.  PRE is the statements between
+;   the decls and the first loop, in order, each (guard C . E) for a
+;   pre-loop `if (C) return E;` or (init NAME . E) for a pre-loop
+;   assignment -- the lowerer checks guards are loop-invariant and
+;   inits target accumulators.  LOOPS is one (between-stmts . loop)
+;   per loop in sequence, the between-stmts assignments only.
 (def %cc-loop-split
   (fn (_ stmts)
+    (def loop?
+      (fn (_ s) (if (eq? (first s) (lit while)) #t (eq? (first s) (lit for)))))
+    ; from the first loop on: the loops, then the lone return
+    (def loops
+      (fn (self ss between acc)
+        (if (null? ss) ()
+          (let ((s (first ss)))
+            (if (loop? s)
+              (self (rest ss) () (pair (pair (reverse between) s) acc))
+              (if (if (eq? (first s) (lit return)) (null? (rest ss)) #f)
+                (if (null? between) (list (reverse acc) s) ())
+                (if (null? (%cc-stmt-assign s)) ()
+                  (self (rest ss) (pair s between) acc))))))))
     (def go
       (fn (self ss decls pre)
         (if (null? ss) ()
           (let ((s (first ss)))
             (if (if (eq? (first s) (lit decl)) (null? pre) #f)
               (self (rest ss) (pair s decls) pre)
-              (if (if (eq? (first s) (lit while)) #t
-                    (eq? (first s) (lit for)))
-                (if (if (pair? (rest ss))
-                      (if (null? (rest (rest ss)))
-                        (eq? (first (first (rest ss))) (lit return)) #f)
-                      #f)
-                  (list (reverse decls) (reverse pre) s
-                    (first (rest ss)))
-                  ())
+              (if (loop? s)
+                (let ((r (loops ss () ())))
+                  (if (null? r) ()
+                    (list (reverse decls) (reverse pre) (first r)
+                      (first (rest r)))))
                 (let ((g (%cc-guard-of s)))
                   (if (not (null? g))
                     (self (rest ss) decls (pair (pair (lit guard) g) pre))
@@ -685,7 +779,8 @@
   (fn (_ ss sub) (map (fn (_ s) (%cc-subst-stmt s sub)) ss)))
 
 ; effects to lane forms: a load fills its temp from the address, a
-; store writes, a cond runs one arm's effects (0 when an arm is empty)
+; calc fills its temp from an expression (a cross-call), a store
+; writes, a cond runs one arm's effects (0 when an arm is empty)
 (def %cc-effects-do ())
 (def %cc-lower-eff
   (fn (_ e name ext)
@@ -694,13 +789,16 @@
         (list (lit %mem-set-at!) %cc-membase (first (rest e))
           (list (lit %mem-ref-at) %cc-membase
             (%cc-lower-e (first (rest (rest e))) name ext)))
+        (if (eq? t (lit calc))
+          (list (lit %mem-set-at!) %cc-membase (first (rest e))
+            (%cc-lower-e (first (rest (rest e))) name ext))
         (if (eq? t (lit store))
           (list (lit %mem-set-at!) %cc-membase
             (%cc-lower-e (first (rest e)) name ext)
             (%cc-lower-e (first (rest (rest e))) name ext))
           (list (lit if) (%cc-lower-e (first (rest e)) name ext)
             (%cc-effects-do (first (rest (rest e))) name ext 0)
-            (%cc-effects-do (first (rest (rest (rest e)))) name ext 0)))))))
+            (%cc-effects-do (first (rest (rest (rest e)))) name ext 0))))))))
 (set! %cc-effects-do
   (fn (_ effs name ext tail)
     (if (null? effs) tail
@@ -708,9 +806,56 @@
         (append (map (fn (_ e) (%cc-lower-eff e name ext)) effs)
           (list tail))))))
 
+; does a stream hold a real effect (a load, calc or store), or an exit?
+(def %cc-real-effects?
+  (fn (self effs)
+    (if (null? effs) #f
+      (let ((e (first effs)))
+        (def t (first e))
+        (if (if (eq? t (lit load)) #t (if (eq? t (lit calc)) #t (eq? t (lit store)))) #t
+          (if (eq? t (lit cond))
+            (if (self (first (rest (rest e)))) #t
+              (if (self (first (rest (rest (rest e))))) #t (self (rest effs))))
+            (self (rest effs))))))))
+(def %cc-has-exit?
+  (fn (self effs)
+    (if (null? effs) #f
+      (let ((e (first effs)))
+        (if (eq? (first e) (lit exit)) #t
+          (if (eq? (first e) (lit cond))
+            (if (self (first (rest (rest e)))) #t
+              (if (self (first (rest (rest (rest e))))) #t (self (rest effs))))
+            (self (rest effs))))))))
+
+; THE STREAM: effects and exits in program order, lowered with each
+; exit tested in its place -- (if GUARD VALUE REST); an unconditional
+; exit ends the stream.  A cond whose arms hold no exit is one
+; statement; one that exits inside an arm carries the REST into both
+; arms (the continuation is small: the stores after it and the tail).
+(def %cc-stream-do
+  (fn (self effs name ext tail)
+    (if (null? effs) tail
+      (let ((e (first effs)))
+        (def t (first e))
+        (if (eq? t (lit exit))
+          (let ((g (first (rest e))))
+            (def v (%cc-lower-e (first (rest (rest e))) name ext))
+            (if (eq? (first g) (lit num)) v
+              (list (lit if) (%cc-lower-e g name ext) v
+                (self (rest effs) name ext tail))))
+          (if (if (eq? t (lit cond)) (%cc-has-exit? (list e)) #f)
+            (let ((k (self (rest effs) name ext tail)))
+              (list (lit if) (%cc-lower-e (first (rest e)) name ext)
+                (self (first (rest (rest e))) name ext k)
+                (self (first (rest (rest (rest e)))) name ext k)))
+            (list (lit do) (%cc-lower-eff e name ext)
+              (self (rest effs) name ext tail))))))))
+
 ; the loop lowerer: (fn-expr . pad-inits), or a refusal
 (def %cc-lower-loop
   (fn (_ name params body)
+    (set! %cc-inline-stack (list name))
+    (set! %cc-fold-name name)
     ; local ARRAYS: cells in the native scratch region, their names
     ; substituted away as literal bases before anything else looks
     (def stmts0 (first (rest body)))
@@ -743,7 +888,7 @@
       (%cc-subst-stmts (filter (fn (_ st1) (not (array-decl? st1))) stmts0)
         arr-sub))
     (def split (%cc-loop-split stmts1))
-    (if (null? split) (%cc-no "not a decls+guards+loop+return shape")
+    (if (null? split) (%cc-no "not a decls+guards+loops+return shape")
       (let ((decls (first split)))
         (def pre (first (rest split)))
         (def guards
@@ -752,29 +897,42 @@
         (def pre-inits
           (map (fn (_ p) (rest p))
             (filter (fn (_ p) (eq? (first p) (lit init))) pre)))
-        (def loop (first (rest (rest split))))
+        ; the loops in sequence, each (between-stmts . loop-stmt)
+        (def loops (first (rest (rest split))))
         (def ret (first (rest (rest (rest split)))))
         (def ret-e (first (rest ret)))
         (if (null? ret-e) (%cc-no "loop fn has a bare return"))
-        (def accs (map (fn (_ d) (first (rest d))) decls))
-        (def is-for (eq? (first loop) (lit for)))
-        (def init-node (if is-for (first (rest loop)) ()))
-        (def cond-node (if is-for (first (rest (rest loop)))
-                         (first (rest loop))))
-        (def step-node (if is-for (first (rest (rest (rest loop)))) ()))
-        (def body-stmt (if is-for
-                         (first (rest (rest (rest (rest loop)))))
-                         (first (rest (rest loop)))))
-        (if (null? cond-node) (%cc-no "loop needs a condition"))
+        ; SEQUENTIAL LOOPS run as PHASES of the one self-call: a phase
+        ; counter rides as one more threaded variable (%ph -- no C name
+        ; can collide), each loop's exit is the transition call into
+        ; the next (the statements between them, its init and its
+        ; inner reset folded, the phase advanced), and the body
+        ; selects on the phase.  One loop needs no counter.
+        (def multi (pair? (rest loops)))
+        (def accs0 (map (fn (_ d) (first (rest d))) decls))
+        (def accs (if multi (append accs0 (list "%ph")) accs0))
+        (def loop1 (rest (first loops)))
+        (def loop-for? (fn (_ l) (eq? (first l) (lit for))))
+        (def loop-init (fn (_ l) (if (loop-for? l) (first (rest l)) ())))
+        (def loop-cond
+          (fn (_ l) (if (loop-for? l) (first (rest (rest l))) (first (rest l)))))
+        (def loop-step
+          (fn (_ l) (if (loop-for? l) (first (rest (rest (rest l)))) ())))
+        (def loop-body
+          (fn (_ l)
+            (%cc-loop-body-stmts
+              (if (loop-for? l) (first (rest (rest (rest (rest l)))))
+                (first (rest (rest l)))))))
+        (def init-node (loop-init loop1))
         (if (> (+ (length params) (length accs)) 4)
           (%cc-no "loop needs more than 4 lane args"))
-        ; THE INITS: decl inits, pre-loop assignments and the for-INIT
-        ; fold in order into a map over the PARAMETERS (each later init
-        ; substitutes the earlier ones away), so every accumulator's
-        ; entry value is an expression over params alone.  A literal
-        ; pads as an int; anything else pads as its own tiny lane
-        ; function over the params, applied to the args at the call
-        ; boundary -- once, at entry, native.
+        ; THE INITS: decl inits, pre-loop assignments and the first
+        ; loop's for-INIT fold in order into a map over the PARAMETERS
+        ; (each later init substitutes the earlier ones away), so every
+        ; accumulator's entry value is an expression over params alone.
+        ; A literal pads as an int; anything else pads as its own tiny
+        ; lane function over the params, applied to the args at the
+        ; call boundary -- once, at entry, native.
         (def set-init
           (fn (_ a imap)
             (if (not (%cc-member-str? (first a) accs))
@@ -790,7 +948,7 @@
                               (if (null? iv) (list (lit num) 0)
                                 (%cc-subst iv imap))
                               imap)))))))
-            (go decls ())))
+            (go decls (if multi (list (pair "%ph" (list (lit num) 0))) ()))))
         (def imap1
           (let ((go (fn (self2 as imap)
                       (if (null? as) imap
@@ -807,9 +965,7 @@
               (if (%cc-member-str? (first vs) params)
                 (self2 (rest vs)) #f))))
         (def ext (append params accs))
-        (def lcond (%cc-lower-e cond-node name ext))
         (def lret (%cc-lower-e ret-e name ext))
-        (def body-stmts (%cc-loop-body-stmts body-stmt))
         ; a self-call cexpr from map M: every threadable variable takes
         ; its folded value, or rides through unchanged
         (def call-from
@@ -827,28 +983,13 @@
                     (%cc-lower-e (first e) name ext)
                     (%cc-lower-e (rest e) name ext)
                     (self2 plain (rest es))))))))
-        ; --- NESTED LOOPS: a state machine over the one self-call ----
-        ; The outer body splits at its first top-level loop into PRE,
-        ; the inner loop, and POST.  Each re-entry runs one step of
-        ; whichever loop is active:
-        ;   (if I-cond (if J-cond INNER-STEP TRANSITION) R)
-        ; INNER-STEP folds the inner body + J-step; TRANSITION folds
-        ; POST + I-step + (if I-cond' { PRE; J-init }) -- guarded, so
-        ; PRE and J-init never leak into R on the last exit.  The same
-        ; guarded reset, folded onto the init map, gives the entry
-        ; pads (J-init may read i).  An inner `break` is the transition
-        ; call and an inner `continue` the inner self-call: folding
-        ; from a map equals folding from identity then substituting,
-        ; so the transition is a STATIC cexpr the fold's break already
-        ; substitutes.  Two levels deep; a third refuses in the fold.
         (def split-inner
-          (fn (self2 ss pre)
+          (fn (self2 ss pre2)
             (if (null? ss) ()
               (if (if (eq? (first (first ss)) (lit for)) #t
                     (eq? (first (first ss)) (lit while)))
-                (list (reverse pre) (first ss) (rest ss))
-                (self2 (rest ss) (pair (first ss) pre))))))
-        (def nest (split-inner body-stmts ()))
+                (list (reverse pre2) (first ss) (rest ss))
+                (self2 (rest ss) (pair (first ss) pre2))))))
         (def no-exits!
           (fn (_ st2 what)
             (if (null? (%cc-st-exits st2)) st2
@@ -858,93 +999,146 @@
             (if (null? (%cc-st-effects st2)) st2
               (%cc-no (string-append what " may not store")))))
         ; a body's effects run in a `do` before its tail; a body that
-        ; both stores and exits early is the recorded refusal
+        ; both stores and exits lowers as the ordered STREAM, each exit
+        ; tested in its place among the stores (%cc-stream-do)
         (def with-effects
           (fn (_ effs exits tail)
-            (if (if (pair? effs) (pair? exits) #f)
-              (%cc-no "stores with early exits")
-              (%cc-effects-do effs name ext tail))))
-        (def outer-step-stmts
-          (if (null? step-node) () (list (list (lit expr) step-node))))
-        ; the two paths meet at (upd . st): the outer-level fold state
-        ; that shapes the self-call, plus imap-final and body-expr
-        (def nested
-          (if (null? nest) ()
-            (let ((pre-stmts (first nest)))
-              (def inner (first (rest nest)))
-              (def post-stmts (first (rest (rest nest))))
-              (def j-for (eq? (first inner) (lit for)))
-              (def j-init (if j-for (first (rest inner)) ()))
-              (def j-cond (if j-for (first (rest (rest inner)))
-                            (first (rest inner))))
-              (def j-step (if j-for (first (rest (rest (rest inner)))) ()))
-              (def j-body (%cc-loop-body-stmts
-                            (if j-for
-                              (first (rest (rest (rest (rest inner)))))
-                              (first (rest (rest inner))))))
-              (if (null? j-cond) (%cc-no "inner loop needs a condition"))
-              ; the guarded reset: (if I-cond (block PRE... J-init))
-              (def reset-stmts
-                (append pre-stmts
-                  (if (null? j-init) ()
-                    (list (list (lit expr) j-init)))))
-              (def reset
+            (if (null? exits) (%cc-effects-do effs name ext tail)
+              (if (%cc-real-effects? effs) (%cc-stream-do effs name ext tail)
+                (wrap-with tail exits)))))
+        ; a loop's guarded reset of its inner loop, for entry and for
+        ; the transition into it: (if I-cond (block PRE... J-init)) --
+        ; guarded, so PRE and J-init never leak into R on the last exit
+        (def reset-of
+          (fn (_ loop)
+            (def nest (split-inner (loop-body loop) ()))
+            (if (null? nest) ()
+              (let ((j-init (loop-init (first (rest nest)))))
+                (def reset-stmts
+                  (append (first nest)
+                    (if (null? j-init) () (list (list (lit expr) j-init)))))
                 (if (null? reset-stmts) ()
-                  (list (list (lit if) cond-node
-                          (list (lit block) reset-stmts) ()))))
-              ; the transition from identity, as a static cexpr
-              (def st-t
+                  (list (list (lit if) (loop-cond loop)
+                          (list (lit block) reset-stmts) ())))))))
+        ; ONE LOOP, given what it answers when its condition fails --
+        ; R for the last loop, the transition call into the next for
+        ; the others; also what a break aims at.  Answers (expr . assigned).
+        ; --- NESTED LOOPS: a state machine over the one self-call ----
+        ; The body splits at its first top-level loop into PRE, the
+        ; inner loop, and POST.  Each re-entry runs one step of
+        ; whichever loop is active:
+        ;   (if I-cond (if J-cond INNER-STEP TRANSITION) EXIT)
+        ; INNER-STEP folds the inner body + J-step; TRANSITION folds
+        ; POST + I-step + the guarded reset.  An inner `break` is the
+        ; transition call and an inner `continue` the inner self-call:
+        ; folding from a map equals folding from identity then
+        ; substituting, so the transition is a STATIC cexpr the fold's
+        ; break already substitutes.  Two levels deep; a third refuses
+        ; in the fold.
+        (def one-loop
+          (fn (_ loop exit-c)
+            (def cond-node (loop-cond loop))
+            (def step-node (loop-step loop))
+            (def body-stmts (loop-body loop))
+            (if (null? cond-node) (%cc-no "loop needs a condition"))
+            (def lcond (%cc-lower-e cond-node name ext))
+            (def lexit (%cc-lower-e exit-c name ext))
+            (def outer-step-stmts
+              (if (null? step-node) () (list (list (lit expr) step-node))))
+            (def ctx (list exit-c step-node name))
+            (def nest (split-inner body-stmts ()))
+            (if (null? nest)
+              (let ((st (%cc-fold-stmts (append body-stmts outer-step-stmts)
+                          (%cc-st () () () () ()) ext ctx)))
+                (pair
+                  (list (lit if) lcond
+                    (with-effects (%cc-st-effects st) (%cc-st-exits st)
+                      (wrap-with (%cc-lower-e (call-from (first st)) name ext)
+                        (%cc-st-exits st)))
+                    lexit)
+                  (first (rest (rest st)))))
+              (let ((post-stmts (first (rest (rest nest)))))
+                (def inner (first (rest nest)))
+                (def j-cond (loop-cond inner))
+                (def j-step (loop-step inner))
+                (def j-body (loop-body inner))
+                (if (null? j-cond) (%cc-no "inner loop needs a condition"))
+                ; the transition from identity, as a static cexpr
+                (def st-t
+                  (no-exits!
+                    (%cc-fold-stmts
+                      (append post-stmts (append outer-step-stmts (reset-of loop)))
+                      (%cc-st () () () () ()) ext ctx)
+                    "the outer body around the inner loop"))
+                (def transition (call-from (first st-t)))
+                (def t-effs (%cc-st-effects st-t))
+                ; the inner step, its break aimed at the transition -- unless
+                ; the transition stores, which a static break target cannot
+                (def st-in
+                  (%cc-fold-stmts
+                    (append j-body
+                      (if (null? j-step) () (list (list (lit expr) j-step))))
+                    (%cc-st () () () () ()) ext
+                    (list (if (null? t-effs) transition ()) j-step name)))
+                (def inner-expr
+                  (with-effects (%cc-st-effects st-in) (%cc-st-exits st-in)
+                    (wrap-with (%cc-lower-e (call-from (first st-in)) name ext)
+                      (%cc-st-exits st-in))))
+                (pair
+                  (list (lit if) lcond
+                    (list (lit if) (%cc-lower-e j-cond name ext)
+                      inner-expr
+                      (%cc-effects-do t-effs name ext
+                        (%cc-lower-e transition name ext)))
+                    lexit)
+                  (append (first (rest (rest st-in)))
+                    (first (rest (rest st-t)))))))))
+        ; the transition INTO the k-th loop (phase k-1): the statements
+        ; between the loops, its for-init, its inner reset, the phase
+        ; advanced -- folded pure from identity into a static self-call
+        (def trans-into
+          (fn (_ k item)
+            (def loop (rest item))
+            (def init (loop-init loop))
+            (def stmts
+              (append (first item)
+                (append (if (null? init) () (list (list (lit expr) init)))
+                  (append (reset-of loop)
+                    (list (list (lit expr)
+                            (list (lit assign) (list (lit var) "%ph")
+                              (list (lit num) (- k 1)))))))))
+            (def st
+              (no-effects!
                 (no-exits!
-                  (%cc-fold-stmts (append post-stmts
-                                    (append outer-step-stmts reset))
-                    (%cc-st () () () () ()) ext (list ret-e step-node name))
-                  "the outer body around the inner loop"))
-              (def transition (call-from (first st-t)))
-              (def t-effs (%cc-st-effects st-t))
-              ; the inner step, its break aimed at the transition -- unless
-              ; the transition stores, which a static break target cannot
-              (def st-in
-                (%cc-fold-stmts
-                  (append j-body
-                    (if (null? j-step) () (list (list (lit expr) j-step))))
-                  (%cc-st () () () () ()) ext
-                  (list (if (null? t-effs) transition ()) j-step name)))
-              (def inner-expr
-                (with-effects (%cc-st-effects st-in) (%cc-st-exits st-in)
-                  (wrap-with (%cc-lower-e (call-from (first st-in)) name ext)
-                    (%cc-st-exits st-in))))
-              ; entry pads: the reset folded onto the init map, pure
-              (def imap-final
-                (first (no-effects!
-                         (no-exits!
-                           (%cc-fold-stmts reset (%cc-st imap () () () ())
-                             ext (list ret-e step-node name))
-                           "the reset")
-                         "the reset")))
-              (list imap-final
-                (list (lit if) lcond
-                  (list (lit if) (%cc-lower-e j-cond name ext)
-                    inner-expr
-                    (%cc-effects-do t-effs name ext
-                      (%cc-lower-e transition name ext)))
-                  lret)
-                (append (first (rest (rest st-in)))
-                  (first (rest (rest st-t))))))))
-        ; --- the single-loop path ------------------------------------
-        (def st
-          (if (null? nested)
-            (%cc-fold-stmts (append body-stmts outer-step-stmts)
-              (%cc-st () () () () ()) ext (list ret-e step-node name))
-            ()))
-        (def imap-final (if (null? nested) imap (first nested)))
-        (def loop-expr
-          (if (null? nested)
-            (list (lit if) lcond
-              (with-effects (%cc-st-effects st) (%cc-st-exits st)
-                (wrap-with (%cc-lower-e (call-from (first st)) name ext)
-                  (%cc-st-exits st)))
-              lret)
-            (first (rest nested))))
+                  (%cc-fold-stmts stmts (%cc-st () () () () ()) ext
+                    (list ret-e () name))
+                  "a transition between loops")
+                "a transition between loops"))
+            (call-from (first st))))
+        ; the loops from the k-th on, selecting on the phase: (expr . assigned)
+        (def build-loops
+          (fn (self2 items k)
+            (if (null? (rest items))
+              (one-loop (rest (first items)) ret-e)
+              (let ((r (one-loop (rest (first items))
+                         (trans-into (+ k 1) (first (rest items))))))
+                (def rr (self2 (rest items) (+ k 1)))
+                (pair
+                  (list (lit if)
+                    (list (lit =) (convert "%ph" %symbol) (- k 1))
+                    (first r) (first rr))
+                  (append (rest r) (rest rr)))))))
+        (def built (build-loops loops 1))
+        (def loop-expr (first built))
+        (def assigned (rest built))
+        ; entry pads: the first loop's reset folded onto the init map, pure
+        (def imap-final
+          (first (no-effects!
+                   (no-exits!
+                     (%cc-fold-stmts (reset-of loop1) (%cc-st imap () () () ())
+                       ext (list ret-e () name))
+                     "the reset")
+                   "the reset")))
         (def inits
           (map (fn (_ a)
                  (let ((e (%cc-var-of a imap-final)))
@@ -954,7 +1148,8 @@
                    (if (not (null? litv)) litv
                      (if (not (param-only? (%cc-free-vars e)))
                        (%cc-no "an init reads a non-parameter")
-                       ; fname "" so any call inside refuses
+                       ; fname "" so a self-call inside refuses; a call
+                       ; to another function inlines
                        (list (lit fn)
                          (pair (lit %cc-init)
                            (map (fn (_ p) (convert p %symbol)) params))
@@ -964,9 +1159,6 @@
         ; must be LOOP-INVARIANT: it may read only parameters the body
         ; never assigns (an accumulator holds its init only on first
         ; entry).  Guards wrap the loop outermost-first.
-        (def assigned
-          (if (null? nested) (first (rest (rest st)))
-            (first (rest (rest nested)))))
         (def invariant?
           (fn (self2 vs)
             (if (null? vs) #t
@@ -996,6 +1188,7 @@
 ; the expression-body path: fib and friends, no padding
 (def %cc-lower-expr-fun
   (fn (_ name params body)
+    (set! %cc-inline-stack (list name))
     (pair
       (pair (lit fn)
         (pair

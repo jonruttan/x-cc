@@ -98,13 +98,22 @@ buffer's data address baked in), so a pointer is a cell index on both
 sides and arrays cross the boundary for free: **a native bubble sort
 sorts main's array**.  In a loop body, memory reads become load temps
 at their evaluation point and stores become effects, emitted in
-program order before the tail.  `x -l cc -- build prog.c` reports each
-function's verdict and runs, same output as `run`: fib(24) 67s ->
-10.5s wall, a 2,000,000-iteration loop 79s -> 9.5s (the loop itself at
-machine speed under the boot).  Stores mixed with early exits, reads
-under a short circuit, two sequential top-level loops, three-deep
-loops, more than four threaded variables (the lane's arg limit),
-globals and cross-calls stay interpreted -- the recorded pendings.
+program order before the tail -- and when exits sit among the stores,
+the stream lowers with each exit tested in its place.  **Sequential
+loops** run as phases of the one self-call: a phase counter rides as
+one more threaded variable and each loop's exit is the transition call
+into the next.  **Cross-calls inline**: a non-recursive callee of the
+if/return shape lowers with its own parameters, which substitute to
+the lowered arguments (`cube` calls `sq`, `sumsq` calls `sq` in its
+loop, an init calls `cube`); inside a loop body a cross-call evaluates
+at its program point through a temp, so its reads order against the
+stores.  `x -l cc -- build prog.c` reports each function's verdict and
+runs, same output as `run`: fib(24) 67s -> 10.5s wall, a
+2,000,000-iteration loop 79s -> 9.5s (the loop itself at machine speed
+under the boot).  Reads or cross-calls under a short circuit,
+three-deep loops, more than four threaded variables (the lane's arg
+limit), callees with loops or recursion, globals and calls through
+pointers stay interpreted -- the recorded pendings.
 
 Paired with x-lang v0.10.0 (`lang.xon` is the checkable row).
 
