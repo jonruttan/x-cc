@@ -1,5 +1,7 @@
 # x-cc
 
+<p align="center"><img src="docs/bitwise-banner.svg" alt="x-cc, with Bitwise the owl" width="100%"></p>
+
 A C compiler on x-lang -- the self-hosting arc's final tier, slice
 one: the full front end (preprocessor subset, lexer, recursive-descent
 parser with all fifteen expression levels) and an evaluator with a
@@ -81,3 +83,5 @@ Paired with x-lang v0.10.0 (`lang.xon` is the checkable row).
     cc/build.x        the eligible-class lowerer onto compile-asm
     cc/cli.x          run FILE.c | build FILE.c
     tests/            markdown specs + the platform's runner, vendored nowhere
+
+<p align="center"><img src="docs/bitwise-mark.svg" alt="Bitwise" width="96"></p>
