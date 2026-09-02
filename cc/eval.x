@@ -623,18 +623,22 @@
 
 (set! %cc-call
   (fn (_ name args)
-    ; a native twin's entry is (pad . prim): the accumulator inits (from
-    ; build's loop transform) pad the call, so a C call of arity k
-    ; reaches a k+m-param lane function
-    ; a pad slot is a literal int, or a compiled init function over the
-    ; parameters -- applied to the actual args, once, right here
+    ; a native twin's entry is (pad entry . prim): the accumulator
+    ; inits (from build's loop transform) pad the call, so a C call of
+    ; arity k reaches a k+m-param lane function.  A pad slot is a
+    ; literal int, or a compiled init function over the parameters --
+    ; applied to the actual args, once, right here.  ENTRY, when
+    ; present, is the entry effects (the spilled variables' initial
+    ; stores) as a compiled function over the parameters, run first.
     (let ((entry (%cc-native name)))
       (if (null? entry)
         (%cc-call-interp name args)
-        (apply (rest entry)
-          (append args
-            (map (fn (_ p) (if (number? p) p (apply p args)))
-              (first entry))))))))
+        (do (if (null? (first (rest entry))) ()
+              (apply (first (rest entry)) args))
+            (apply (rest (rest entry))
+              (append args
+                (map (fn (_ p) (if (number? p) p (apply p args)))
+                  (first entry)))))))))
 
 ; --- statements --------------------------------------------------------------
 ; control: () | (return V) | (break) | (continue)

@@ -94,16 +94,16 @@ interp main
 0
 ```
 
-## the refusal
+## past the lane's four args
 
-### five threaded variables exceed the lane's four args
+### a fifth threaded variable spills to a scratch cell (15-limits has the story)
 
 ```cc
 (display (cc-build-run "#include <stdio.h>\nint pre(int n) { int s = 0; int t = 0; int i; int j; for (i = 0; i < n; i++) { t = i * 10; for (j = 0; j < 2; j++) { s = s + t; } } return s; }\nint main() { printf(\"%d\\n\", pre(4)); return 0; }"))
 ```
 ---
 ```output
-interp pre
+native pre
 interp main
 120
 0

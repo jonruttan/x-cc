@@ -107,13 +107,21 @@ if/return shape lowers with its own parameters, which substitute to
 the lowered arguments (`cube` calls `sq`, `sumsq` calls `sq` in its
 loop, an init calls `cube`); inside a loop body a cross-call evaluates
 at its program point through a temp, so its reads order against the
-stores.  `x -l cc -- build prog.c` reports each function's verdict and
+stores.  **Globals** are memory at a known address, a scalar read and
+written as `*(ADDR)`, an array its base.  Reads under `&&`, `||` and
+`?:` run under a cond effect on the guard, so a read the C never
+reaches never happens.  Threaded variables past the lane's four
+arguments **spill** to scratch cells, read and written as memory,
+their entry values stored by one compiled entry function at the call
+boundary.  Loops nest to **any depth**: the state machine is
+recursive, and a matrix product with a store between its levels goes
+native.  `x -l cc -- build prog.c` reports each function's verdict and
 runs, same output as `run`: fib(24) 67s -> 10.5s wall, a
 2,000,000-iteration loop 79s -> 9.5s (the loop itself at machine speed
-under the boot).  Reads or cross-calls under a short circuit,
-three-deep loops, more than four threaded variables (the lane's arg
-limit), callees with loops or recursion, globals and calls through
-pointers stay interpreted -- the recorded pendings.
+under the boot).  What remains is the lane's own contract: more than
+four parameters, callees with loops or recursion, calls through
+pointers, bitwise operators and struct kinds stay interpreted -- the
+recorded pendings.
 
 Paired with x-lang v0.10.0 (`lang.xon` is the checkable row).
 
