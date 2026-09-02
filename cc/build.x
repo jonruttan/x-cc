@@ -20,11 +20,14 @@
 ;      The body fold (%cc-fold-stmts) takes assignments/++/-- to any
 ;      threadable variable (a mutated param is fine), body-local
 ;      temps (substitution-only, no slot), if/else (each written
-;      variable merges as a ternary), and EXITS -- return/break/
-;      continue as guarded exits, plus loop-invariant pre-loop
-;      `if (C) return E;` guards.  params+accs <= 4.
-; Pointers, nested loops, non-literal inits, pre-loop assignments,
-; globals and cross-calls stay interpreted -- recorded pendings.
+;      variable merges as a ternary), EXITS -- return/break/continue
+;      as guarded exits, plus loop-invariant pre-loop `if (C) return
+;      E;` guards -- and INITS over the parameters: decl inits,
+;      pre-loop assignments and the for-INIT fold in order, and a
+;      non-literal init pads as its own lane function over the params
+;      applied at the call boundary.  params+accs <= 4.
+; Pointers, nested loops, inits that call, globals and cross-calls
+; stay interpreted -- recorded pendings.
 ;
 ; Adoption is sha256.x's pattern: the whole attempt sits in a guard;
 ; a function that will not lower or will not compile simply stays
@@ -445,29 +448,36 @@
               (pair (first (rest s)) (first (rest ret)))))
           ())))))
 
-; split { decls*; guards*; (while|for); return R }
-;   -> (decls guards loop return) or nil.  A guard is a pre-loop
-;   `if (C) return E;` -- the lowerer checks it is loop-invariant.
+; split { decls*; pre*; (while|for); return R }
+;   -> (decls pre loop return) or nil.  PRE is the statements between
+;   the decls and the loop, in order, each (guard C . E) for a pre-loop
+;   `if (C) return E;` or (init NAME . E) for a pre-loop assignment --
+;   the lowerer checks guards are loop-invariant and inits target
+;   accumulators.
 (def %cc-loop-split
   (fn (_ stmts)
     (def go
-      (fn (self ss decls guards)
+      (fn (self ss decls pre)
         (if (null? ss) ()
           (let ((s (first ss)))
-            (if (if (eq? (first s) (lit decl)) (null? guards) #f)
-              (self (rest ss) (pair s decls) guards)
+            (if (if (eq? (first s) (lit decl)) (null? pre) #f)
+              (self (rest ss) (pair s decls) pre)
               (if (if (eq? (first s) (lit while)) #t
                     (eq? (first s) (lit for)))
                 (if (if (pair? (rest ss))
                       (if (null? (rest (rest ss)))
                         (eq? (first (first (rest ss))) (lit return)) #f)
                       #f)
-                  (list (reverse decls) (reverse guards) s
+                  (list (reverse decls) (reverse pre) s
                     (first (rest ss)))
                   ())
                 (let ((g (%cc-guard-of s)))
-                  (if (null? g) ()
-                    (self (rest ss) decls (pair g guards))))))))))
+                  (if (not (null? g))
+                    (self (rest ss) decls (pair (pair (lit guard) g) pre))
+                    (let ((a (%cc-stmt-assign s)))
+                      (if (null? a) ()
+                        (self (rest ss) decls
+                          (pair (pair (lit init) a) pre))))))))))))
     (go stmts () ())))
 
 ; set accs[name]'s init in the parallel inits list
@@ -485,19 +495,18 @@
     (def split (%cc-loop-split (first (rest body))))
     (if (null? split) (%cc-no "not a decls+guards+loop+return shape")
       (let ((decls (first split)))
-        (def guards (first (rest split)))
+        (def pre (first (rest split)))
+        (def guards
+          (map (fn (_ p) (rest p))
+            (filter (fn (_ p) (eq? (first p) (lit guard))) pre)))
+        (def pre-inits
+          (map (fn (_ p) (rest p))
+            (filter (fn (_ p) (eq? (first p) (lit init))) pre)))
         (def loop (first (rest (rest split))))
         (def ret (first (rest (rest (rest split)))))
         (def ret-e (first (rest ret)))
         (if (null? ret-e) (%cc-no "loop fn has a bare return"))
         (def accs (map (fn (_ d) (first (rest d))) decls))
-        (def inits0
-          (map (fn (_ d)
-                 (let ((iv (first (rest (rest (rest d))))))
-                   (if (null? iv) 0
-                     (let ((n (%cc-int-lit iv)))
-                       (if (null? n) (%cc-no "decl init not a literal") n)))))
-            decls))
         (def is-for (eq? (first loop) (lit for)))
         (def init-node (if is-for (first (rest loop)) ()))
         (def cond-node (if is-for (first (rest (rest loop)))
@@ -509,16 +518,59 @@
         (if (null? cond-node) (%cc-no "loop needs a condition"))
         (if (> (+ (length params) (length accs)) 4)
           (%cc-no "loop needs more than 4 lane args"))
-        ; for-INIT overrides an accumulator's literal init
-        (def inits
-          (if (null? init-node) inits0
+        ; THE INITS: decl inits, pre-loop assignments and the for-INIT
+        ; fold in order into a map over the PARAMETERS (each later init
+        ; substitutes the earlier ones away), so every accumulator's
+        ; entry value is an expression over params alone.  A literal
+        ; pads as an int; anything else pads as its own tiny lane
+        ; function over the params, applied to the args at the call
+        ; boundary -- once, at entry, native.
+        (def set-init
+          (fn (_ a imap)
+            (if (not (%cc-member-str? (first a) accs))
+              (%cc-no "a pre-loop assignment to a non-accumulator")
+              (%cc-put-str (first a) (%cc-subst (rest a) imap) imap))))
+        (def imap0
+          (let ((go (fn (self2 ds imap)
+                      (if (null? ds) imap
+                        (let ((d (first ds)))
+                          (def iv (first (rest (rest (rest d)))))
+                          (self2 (rest ds)
+                            (%cc-put-str (first (rest d))
+                              (if (null? iv) (list (lit num) 0)
+                                (%cc-subst iv imap))
+                              imap)))))))
+            (go decls ())))
+        (def imap1
+          (let ((go (fn (self2 as imap)
+                      (if (null? as) imap
+                        (self2 (rest as) (set-init (first as) imap))))))
+            (go pre-inits imap0)))
+        (def imap
+          (if (null? init-node) imap1
             (let ((ia (%cc-expr-assign init-node)))
               (if (null? ia) (%cc-no "for init not a simple assignment")
-                (let ((iv (%cc-int-lit (rest ia))))
-                  (if (null? iv) (%cc-no "for init not a literal")
-                    (if (not (%cc-member-str? (first ia) accs))
-                      (%cc-no "for init sets a non-accumulator")
-                      (%cc-set-init inits0 accs (first ia) iv))))))))
+                (set-init ia imap1)))))
+        (def param-only?
+          (fn (self2 vs)
+            (if (null? vs) #t
+              (if (%cc-member-str? (first vs) params)
+                (self2 (rest vs)) #f))))
+        (def inits
+          (map (fn (_ a)
+                 (let ((e (%cc-var-of a imap)))
+                   ; NOT `lit` -- a def in a called body binds globally
+                   ; and `lit` is the quote operative
+                   (def litv (%cc-int-lit e))
+                   (if (not (null? litv)) litv
+                     (if (not (param-only? (%cc-free-vars e)))
+                       (%cc-no "an init reads a non-parameter")
+                       ; fname "" so any call inside refuses
+                       (list (lit fn)
+                         (pair (lit %cc-init)
+                           (map (fn (_ p) (convert p %symbol)) params))
+                         (%cc-lower-e e "" params))))))
+            accs))
         (def ext (append params accs))
         ; per-iteration updates: the body, then the for-step (wrapped
         ; as the statement it is), through one fold
@@ -631,11 +683,16 @@
               (guard (e (lit interpreted))
                 (let ((lowered (%cc-lower-fun name params body)))
                   (def prim (compile-asm (first lowered)))
-                  ; the table entry is (name pad . prim); pad is the
-                  ; accumulators' literal inits, () for a plain function
+                  ; the table entry is (name pad . prim); each pad slot
+                  ; is an accumulator's literal init, or its init
+                  ; expression compiled to a lane function over the
+                  ; params (applied at the call boundary); () for a
+                  ; plain function
+                  (def pad
+                    (map (fn (_ p) (if (number? p) p (compile-asm p)))
+                      (rest lowered)))
                   (set! %cc-natives
-                    (pair (pair name (pair (rest lowered) prim))
-                      %cc-natives))
+                    (pair (pair name (pair pad prim)) %cc-natives))
                   (lit native))))
             (self (rest fs) (pair (pair name verdict) acc))))))
     ; %cc-funs cons-loads, so program order is its reverse

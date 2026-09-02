@@ -42,14 +42,15 @@ their folded new values (accumulators' literal inits by arg-padding).
 The body fold takes assignments to any of them (a mutated parameter
 included -- `gcd` compiles to recursive gcd), body-local temps
 (substitution-only), `if`/`else` (each written variable merges as a
-ternary), and early exits -- `return`/`break`/`continue` inside the
-loop as guarded exits, plus loop-invariant pre-loop guards, so search
-loops and `isprime` go native.  `x -l cc -- build prog.c` reports each
-function's verdict and runs, same output as `run`: fib(24) 67s ->
-10.5s wall, a 2,000,000-iteration loop 79s -> 9.5s (the loop itself at
-machine speed under the boot).  Pointers, nested loops, non-literal
-inits, globals and cross-calls stay interpreted -- the recorded
-pendings.
+ternary), early exits -- `return`/`break`/`continue` inside the loop
+as guarded exits, plus loop-invariant pre-loop guards, so search loops
+and `isprime` go native -- and inits over the parameters (a non-literal
+init pads as its own tiny lane function, applied at the call boundary).
+`x -l cc -- build prog.c` reports each function's verdict and runs,
+same output as `run`: fib(24) 67s -> 10.5s wall, a 2,000,000-iteration
+loop 79s -> 9.5s (the loop itself at machine speed under the boot).
+Pointers, nested loops, globals and cross-calls stay interpreted -- the
+recorded pendings.
 
 Paired with x-lang v0.10.0 (`lang.xon` is the checkable row).
 

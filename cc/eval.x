@@ -366,10 +366,15 @@
     ; a native twin's entry is (pad . prim): the accumulator inits (from
     ; build's loop transform) pad the call, so a C call of arity k
     ; reaches a k+m-param lane function
+    ; a pad slot is a literal int, or a compiled init function over the
+    ; parameters -- applied to the actual args, once, right here
     (let ((entry (%cc-native name)))
       (if (null? entry)
         (%cc-call-interp name args)
-        (apply (rest entry) (append args (first entry)))))))
+        (apply (rest entry)
+          (append args
+            (map (fn (_ p) (if (number? p) p (apply p args)))
+              (first entry))))))))
 
 ; --- statements --------------------------------------------------------------
 ; control: () | (return V) | (break) | (continue)

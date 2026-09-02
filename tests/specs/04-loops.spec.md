@@ -152,19 +152,20 @@ interp main
 
 ## the refusals
 
-### a pre-loop assignment breaks the shape; the whole still runs
+### a nested loop stays interpreted; the whole still runs
 
-`i = n` between the decls and the loop is neither a decl nor the loop
-(and its init is a parameter, not a literal) -- the recorded pending.
+The inner loop would need its own recursion; the lane self-calls
+only -- the recorded pending (a state machine over one self-call is
+the planned shape).
 
 ```cc
-(display (cc-build-run "#include <stdio.h>\nint cd(int n) { int t = 0; int i; i = n; while (i > 0) { t = t + i; i = i - 1; } return t; }\nint main() { printf(\"%d\\n\", cd(50)); return 0; }"))
+(display (cc-build-run "#include <stdio.h>\nint sq(int n) { int s = 0; int i; int j; for (i = 0; i < n; i++) { for (j = 0; j < n; j++) { s = s + 1; } } return s; }\nint main() { printf(\"%d\\n\", sq(7)); return 0; }"))
 ```
 ---
 ```output
-interp cd
+interp sq
 interp main
-1275
+49
 0
 ```
 
