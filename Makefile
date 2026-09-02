@@ -27,7 +27,7 @@ install: ## Install into <share>/langs/cc
 	cp -R $(PAYLOAD) "$(DEST)/"
 	printf '%s\n' '$(LANG_VERSION)' > "$(DEST)/version"
 	@echo "x-cc: installed to $(DEST)"
-	@echo "x-cc: try  x -l make"
+	@echo "x-cc: try  x -l cc"
 
 .PHONY: uninstall
 uninstall: ## Remove it again
