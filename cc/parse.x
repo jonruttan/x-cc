@@ -23,11 +23,14 @@
 ;             (or A B) (assign LV E) (ternary C A B) (comma A B)
 ;             (szof E)
 ;
-; Structs, typedefs (the types section), switch (clauses in order,
-; fallthrough the evaluator's) and initializer lists (INIT may be
-; (initlist ITEMS); an unsized array takes its size from one) parse.
-; Refused loudly: union/enum, goto, floats, function pointers -- each
-; a recorded pending.
+; Structs, unions (a struct whose fields all sit at offset 0), enums
+; (constants folded at parse time; the type is a scalar), typedefs
+; (the types section), switch (clauses in order, fallthrough the
+; evaluator's), initializer lists (INIT may be (initlist ITEMS); an
+; unsized array takes its size from one) and function pointers (the
+; `(*NAME)(params)` declarator is one cell; a call whose callee is
+; any expression but a bare name is (callx E ARGS)) parse.  Refused
+; loudly: goto, floats -- each a recorded pending.
 
 (def %cc-p-err
   (fn (_ msg)
@@ -59,7 +62,7 @@
 
 ; the unimplemented keywords refuse by name
 (def %cc-p-hard
-  (list (lit union) (lit enum) (lit goto) (lit float) (lit double)))
+  (list (lit goto) (lit float) (lit double)))
 
 (def %cc-p-hard?
   (fn (_ toks)
@@ -141,12 +144,93 @@
                 (if (string=? (first (first es)) n) (rest (first es)) (self (rest es))))))
     (go %cc-p-typedefs)))
 
-; a declaration starts with a type keyword, `struct`, or a typedef name
+; a declaration starts with a type keyword, `struct`/`union`/`enum`,
+; or a typedef name
 (def %cc-p-type-start?
   (fn (_ toks)
     (if (%cc-p-type-kw? toks) #t
       (if (%cc-p-kw? toks (lit struct)) #t
-        (%cc-p-typedef-name? toks)))))
+        (if (%cc-p-kw? toks (lit union)) #t
+          (if (%cc-p-kw? toks (lit enum)) #t
+            (%cc-p-typedef-name? toks)))))))
+
+; --- enums: names for constants, folded here ----------------------------------
+(def %cc-p-enums ())       ; ((name . value) ...)
+
+(def %cc-p-enum-value
+  (fn (_ name)
+    (def go (fn (self es)
+              (if (null? es) ()
+                (if (string=? (first (first es)) name) (rest (first es)) (self (rest es))))))
+    (go %cc-p-enums)))
+
+; an enumerator's value: a constant expression over numbers (enum
+; names already folded to numbers by the primary level)
+(def %cc-p-const
+  (fn (self node)
+    (let ((t (first node)))
+      (if (eq? t (lit num)) (first (rest node))
+        (if (eq? t (lit un))
+          (let ((v (self (first (rest (rest node))))))
+            (def op (first (rest node)))
+            (if (string=? op "-") (- 0 v)
+              (if (string=? op "!") (if (= v 0) 1 0)
+                (if (string=? op "~") (- (- 0 v) 1)
+                  (%cc-p-err "an enumerator needs a constant expression")))))
+          (if (eq? t (lit bin))
+            (let ((op (first (rest node))))
+              (def a (self (first (rest (rest node)))))
+              (def b (self (first (rest (rest (rest node))))))
+              (if (string=? op "+") (+ a b)
+                (if (string=? op "-") (- a b)
+                  (if (string=? op "*") (* a b)
+                    (if (string=? op "/") (let ((q (/ a b))) (- q (% q 1)))
+                      (if (string=? op "%") (let ((q (/ a b))) (- a (* b (- q (% q 1)))))
+                        (if (string=? op "<<") (<< a b)
+                          (if (string=? op ">>") (>> a b)
+                            (if (string=? op "&") (& a b)
+                              (if (string=? op "|") (| a b)
+                                (if (string=? op "^") (^ a b)
+                                  (%cc-p-err "an enumerator needs a constant expression"))))))))))))
+            (%cc-p-err "an enumerator needs a constant expression")))))))
+
+; { NAME [= const] (, NAME [= const])* [,] }: each registers, counting
+; up from the last; answers the rest
+(def %cc-p-enum-body
+  (fn (_ toks)
+    (def go
+      (fn (self ts next)
+        (if (%cc-p-op? ts "}") (rest ts)
+          (if (not (%cc-p-id? ts)) (%cc-p-err "expected an enumerator")
+            (let ((name (first (rest (first ts)))))
+              (def vr
+                (if (%cc-p-op? (rest ts) "=")
+                  (let ((r (%cc-e-assign (rest (rest ts)))))
+                    (pair (%cc-p-const (first r)) (rest r)))
+                  (pair next (rest ts))))
+              (set! %cc-p-enums (pair (pair name (first vr)) %cc-p-enums))
+              (self (if (%cc-p-op? (rest vr) ",") (rest (rest vr)) (rest vr))
+                (+ (first vr) 1)))))))
+    (go toks 0)))
+
+; a balanced ( ... ), skipped: the parameter list of a function-pointer
+; declarator (types erased in the cell model); answers the rest
+(def %cc-p-skip-parens
+  (fn (_ toks)
+    (def go
+      (fn (self ts depth)
+        (if (null? ts) (%cc-p-err "unbalanced parentheses")
+          (if (%cc-p-op? ts "(") (self (rest ts) (+ depth 1))
+            (if (%cc-p-op? ts ")")
+              (if (= depth 1) (rest ts) (self (rest ts) (- depth 1)))
+              (self (rest ts) depth))))))
+    (if (%cc-p-op? toks "(") (go toks 0)
+      (%cc-p-err "expected a parameter list"))))
+
+; the `(*NAME` of a function-pointer declarator?
+(def %cc-p-fnptr-start?
+  (fn (_ toks)
+    (if (%cc-p-op? toks "(") (%cc-p-op? (rest toks) "*") #f)))
 
 ; a pointer to a struct keeps its pointee; every other pointer is a cell
 (def %cc-p-pointer-to
@@ -155,29 +239,39 @@
 
 (def %cc-p-struct-body ())
 
-; TYPE: specifiers, `struct NAME [{...}]`, or a typedef name, then *s.
-; Answers (KIND . rest).
+; TYPE: specifiers, `struct|union NAME [{...}]`, `enum [NAME] [{...}]`,
+; or a typedef name, then *s.  Answers (KIND . rest).
 (def %cc-p-type
   (fn (_ toks)
     (def skip-kws (fn (self ts) (if (%cc-p-type-kw? ts) (self (rest ts)) ts)))
     (def ts (skip-kws toks))
+    ; after `struct` or `union`: NAME [{...}] | {...}; a union is a
+    ; struct whose fields overlap
+    (def tagged
+      (fn (_ ts2 union?)
+        (if (%cc-p-id? ts2)
+          (let ((name (first (rest (first ts2)))))
+            (if (%cc-p-op? (rest ts2) "{")
+              (pair (list (lit struct) name)
+                (%cc-p-struct-body name (rest (rest ts2)) union?))
+              (pair (list (lit struct) name) (rest ts2))))
+          (if (%cc-p-op? ts2 "{")
+            (let ((name (string-append "%anon" (convert %cc-p-anon %string))))
+              (set! %cc-p-anon (+ %cc-p-anon 1))
+              (pair (list (lit struct) name) (%cc-p-struct-body name (rest ts2) union?)))
+            (%cc-p-err "expected a struct name or body")))))
     (def based
-      (if (%cc-p-kw? ts (lit struct))
-        (let ((ts2 (rest ts)))
-          (if (%cc-p-id? ts2)
-            (let ((name (first (rest (first ts2)))))
-              (if (%cc-p-op? (rest ts2) "{")
-                (pair (list (lit struct) name)
-                  (%cc-p-struct-body name (rest (rest ts2))))
-                (pair (list (lit struct) name) (rest ts2))))
-            (if (%cc-p-op? ts2 "{")
-              (let ((name (string-append "%anon" (convert %cc-p-anon %string))))
-                (set! %cc-p-anon (+ %cc-p-anon 1))
-                (pair (list (lit struct) name) (%cc-p-struct-body name (rest ts2))))
-              (%cc-p-err "expected a struct name or body"))))
-        (if (%cc-p-typedef-name? ts)
-          (pair (%cc-p-typedef-kind (first (rest (first ts)))) (rest ts))
-          (pair (lit scalar) ts))))
+      (if (%cc-p-kw? ts (lit struct)) (tagged (rest ts) #f)
+        (if (%cc-p-kw? ts (lit union)) (tagged (rest ts) #t)
+          (if (%cc-p-kw? ts (lit enum))
+            ; enum [NAME] [{ enumerators }]: the constants register, the
+            ; type is a scalar
+            (let ((ts2 (if (%cc-p-id? (rest ts)) (rest (rest ts)) (rest ts))))
+              (pair (lit scalar)
+                (if (%cc-p-op? ts2 "{") (%cc-p-enum-body (rest ts2)) ts2)))
+            (if (%cc-p-typedef-name? ts)
+              (pair (%cc-p-typedef-kind (first (rest (first ts)))) (rest ts))
+              (pair (lit scalar) ts))))))
     (def stars
       (fn (self k ts2)
         (if (%cc-p-type-kw? ts2) (self k (rest ts2))
@@ -222,7 +316,10 @@
                 (let ((r (%cc-p-args (rest (rest toks)))))
                   (pair (list (lit call) (first (rest tok)) (first r))
                     (rest r)))
-                (pair (list (lit var) (first (rest tok))) (rest toks)))
+                ; an enum constant is its number, right here
+                (let ((ev (%cc-p-enum-value (first (rest tok)))))
+                  (pair (if (null? ev) (list (lit var) (first (rest tok))) (list (lit num) ev))
+                    (rest toks))))
               (if (%cc-p-op? toks "(")
                 (let ((r (%cc-e-comma (rest toks))))
                   (pair (first r) (%cc-p-eat (rest r) ")")))
@@ -262,7 +359,11 @@
                 (if (if (%cc-p-op? ts "->") (%cc-p-id? (rest ts)) #f)
                   (self (list (lit arrow) ast (first (rest (first (rest ts)))))
                     (rest (rest ts)))
-                  (pair ast ts))))))))
+                  ; a call through any other expression: (*f)(x), ops[i](x), p->fn(x)
+                  (if (%cc-p-op? ts "(")
+                    (let ((ar (%cc-p-args (rest ts))))
+                      (self (list (lit callx) ast (first ar)) (rest ar)))
+                    (pair ast ts)))))))))
     (go (first r) (rest r))))
 
 ; a parenthesized type-name means a cast (erased in the cell model)
@@ -435,38 +536,52 @@
 
 ; --- declarations ------------------------------------------------------------
 
-; one declarator after the specifiers: *s NAME [N]? = init?; answers
-; ((decl NAME KIND INIT) . rest)
+; one declarator after the specifiers: *s NAME [N]? = init?, or the
+; function-pointer form (*NAME [N]?)(params) -- one cell, the parameter
+; types erased; answers ((decl NAME KIND INIT) . rest)
 (def %cc-p-declarator
   (fn (_ toks base)
     (def stars (fn (self k ts) (if (%cc-p-op? ts "*") (self (%cc-p-pointer-to k) (rest ts)) (pair k ts))))
     (def sr (stars base toks))
     (def ts (rest sr))
     (def kind0 (first sr))
-    (if (not (%cc-p-id? ts))
-      (%cc-p-err "expected a name in declaration")
-      (let ((name (first (rest (first ts)))))
-        (def ts2 (rest ts))
-        (def kindr
-          (if (%cc-p-op? ts2 "[")
-            (if (%cc-p-op? (rest ts2) "]")
-              ; int a[] = ...: the initializer sizes it
-              (pair (if (pair? kind0) (list (lit array) () kind0) (list (lit array) ()))
-                (rest (rest ts2)))
-              (let ((n (first (rest (first (rest ts2))))))
-                (pair (if (pair? kind0) (list (lit array) n kind0) (list (lit array) n))
-                  (%cc-p-eat (rest (rest ts2)) "]"))))
-            (pair kind0 ts2)))
-        (def ts3 (rest kindr))
-        (if (%cc-p-op? ts3 "=")
-          (let ((ir (if (%cc-p-op? (rest ts3) "{")
-                      (%cc-p-initlist (rest (rest ts3)))
-                      (%cc-e-assign (rest ts3)))))
-            (pair (list (lit decl) name (%cc-p-size-kind (first kindr) (first ir)) (first ir))
-              (rest ir)))
-          (if (if (pair? (first kindr)) (if (eq? (first (first kindr)) (lit array)) (null? (first (rest (first kindr)))) #f) #f)
-            (%cc-p-err "an array without a size needs an initializer")
-            (pair (list (lit decl) name (first kindr) ()) ts3)))))))
+    ; the array suffix after a name: (KIND . rest)
+    (def suffix
+      (fn (_ k ts2)
+        (if (%cc-p-op? ts2 "[")
+          (if (%cc-p-op? (rest ts2) "]")
+            ; int a[] = ...: the initializer sizes it
+            (pair (if (pair? k) (list (lit array) () k) (list (lit array) ()))
+              (rest (rest ts2)))
+            (let ((n (first (rest (first (rest ts2))))))
+              (pair (if (pair? k) (list (lit array) n k) (list (lit array) n))
+                (%cc-p-eat (rest (rest ts2)) "]"))))
+          (pair k ts2))))
+    ; (NAME KIND . rest)
+    (def head
+      (if (%cc-p-fnptr-start? ts)
+        (let ((ts2 (rest (rest ts))))
+          (if (not (%cc-p-id? ts2))
+            (%cc-p-err "expected a name in a function-pointer declarator")
+            (let ((kr (suffix (lit scalar) (rest ts2))))
+              (pair (first (rest (first ts2)))
+                (pair (first kr) (%cc-p-skip-parens (%cc-p-eat (rest kr) ")")))))))
+        (if (not (%cc-p-id? ts))
+          (%cc-p-err "expected a name in declaration")
+          (let ((kr (suffix kind0 (rest ts))))
+            (pair (first (rest (first ts))) (pair (first kr) (rest kr)))))))
+    (def name (first head))
+    (def kind (first (rest head)))
+    (def ts3 (rest (rest head)))
+    (if (%cc-p-op? ts3 "=")
+      (let ((ir (if (%cc-p-op? (rest ts3) "{")
+                  (%cc-p-initlist (rest (rest ts3)))
+                  (%cc-e-assign (rest ts3)))))
+        (pair (list (lit decl) name (%cc-p-size-kind kind (first ir)) (first ir))
+          (rest ir)))
+      (if (if (pair? kind) (if (eq? (first kind) (lit array)) (null? (first (rest kind))) #f) #f)
+        (%cc-p-err "an array without a size needs an initializer")
+        (pair (list (lit decl) name kind ()) ts3)))))
 
 ; { init (, init)* [,] } -> (initlist ITEMS), items nested lists or exprs
 (def %cc-p-initlist
@@ -513,9 +628,10 @@
       (go ts ()))))
 
 ; the body of a struct: decl lines to the closing brace, fields laid
-; end to end; registers the struct and answers the rest
+; end to end -- or, for a union, all at offset 0 with the size the
+; widest field's; registers the struct and answers the rest
 (set! %cc-p-struct-body
-  (fn (_ name toks)
+  (fn (_ name toks union?)
     (def go
       (fn (self ts off fields)
         (if (%cc-p-op? ts "}")
@@ -528,22 +644,33 @@
                 (if (null? ds) (pair o fs)
                   (let ((d (first ds)))
                     (def k (first (rest (rest d))))
-                    (self2 (rest ds) (+ o (%cc-kind-size k))
-                      (pair (list (first (rest d)) o k) fs))))))
+                    (def sz (%cc-kind-size k))
+                    (if union?
+                      (self2 (rest ds) (if (> sz o) sz o)
+                        (pair (list (first (rest d)) 0 k) fs))
+                      (self2 (rest ds) (+ o sz)
+                        (pair (list (first (rest d)) o k) fs)))))))
             (def l (lay (first r) off fields))
             (self (rest r) (first l) (rest l))))))
     (go toks 0 ())))
 
-; typedef TYPE declarator ;  -- a name for a kind, nothing declared
+; typedef TYPE declarator ;  -- a name for a kind, nothing declared;
+; `typedef int (*NAME)(params);` names the one-cell function pointer
 (def %cc-p-typedef
   (fn (_ toks)
     (def tr (%cc-p-type toks))
     (def stars (fn (self k ts) (if (%cc-p-op? ts "*") (self (%cc-p-pointer-to k) (rest ts)) (pair k ts))))
     (def sr (stars (first tr) (rest tr)))
-    (if (not (%cc-p-id? (rest sr))) (%cc-p-err "expected a typedef name")
-      (let ((name (first (rest (first (rest sr))))))
-        (set! %cc-p-typedefs (pair (pair name (first sr)) %cc-p-typedefs))
-        (%cc-p-eat (rest (rest sr)) ";")))))
+    (if (%cc-p-fnptr-start? (rest sr))
+      (let ((ts2 (rest (rest (rest sr)))))
+        (if (not (%cc-p-id? ts2)) (%cc-p-err "expected a typedef name")
+          (let ((name (first (rest (first ts2)))))
+            (set! %cc-p-typedefs (pair (pair name (lit scalar)) %cc-p-typedefs))
+            (%cc-p-eat (%cc-p-skip-parens (%cc-p-eat (rest ts2) ")")) ";"))))
+      (if (not (%cc-p-id? (rest sr))) (%cc-p-err "expected a typedef name")
+        (let ((name (first (rest (first (rest sr))))))
+          (set! %cc-p-typedefs (pair (pair name (first sr)) %cc-p-typedefs))
+          (%cc-p-eat (rest (rest sr)) ";"))))))
 
 ; --- statements --------------------------------------------------------------
 
@@ -675,23 +802,35 @@
             (fn (self ts names kinds)
               (def tr (%cc-p-type ts))
               (def ts2 (rest tr))
-              (if (not (%cc-p-id? ts2))
-                (%cc-p-err "expected a parameter name")
-                (let ((name (first (rest (first ts2)))))
-                  (def arr? (%cc-p-op? (rest ts2) "["))
-                  (def kind (if arr? (%cc-p-pointer-to (first tr)) (first tr)))
-                  (def ts3
-                    (if arr? (%cc-p-eat (rest (rest ts2)) "]") (rest ts2)))
-                  (if (%cc-p-op? ts3 ",")
-                    (self (rest ts3) (pair name names) (pair kind kinds))
-                    (pair (pair (reverse (pair name names)) (reverse (pair kind kinds)))
-                      (%cc-p-eat ts3 ")")))))))
+              ; (NAME KIND . rest): a plain parameter, an array one
+              ; (a pointer), or a function pointer (one cell)
+              (def head
+                (if (%cc-p-fnptr-start? ts2)
+                  (let ((ts3 (rest (rest ts2))))
+                    (if (not (%cc-p-id? ts3)) (%cc-p-err "expected a parameter name")
+                      (pair (first (rest (first ts3)))
+                        (pair (lit scalar)
+                          (%cc-p-skip-parens (%cc-p-eat (rest ts3) ")"))))))
+                  (if (not (%cc-p-id? ts2))
+                    (%cc-p-err "expected a parameter name")
+                    (let ((arr? (%cc-p-op? (rest ts2) "[")))
+                      (pair (first (rest (first ts2)))
+                        (pair (if arr? (%cc-p-pointer-to (first tr)) (first tr))
+                          (if arr? (%cc-p-eat (rest (rest ts2)) "]") (rest ts2))))))))
+              (let ((name (first head)))
+                (def kind (first (rest head)))
+                (def ts3 (rest (rest head)))
+                (if (%cc-p-op? ts3 ",")
+                  (self (rest ts3) (pair name names) (pair kind kinds))
+                  (pair (pair (reverse (pair name names)) (reverse (pair kind kinds)))
+                    (%cc-p-eat ts3 ")"))))))
           (go toks () ()))))))
 
 (def cc-parse
   (fn (_ toks)
     (set! %cc-p-structs ())
     (set! %cc-p-typedefs ())
+    (set! %cc-p-enums ())
     (set! %cc-p-anon 0)
     (def go
       (fn (self ts acc)
@@ -707,10 +846,10 @@
               (if (%cc-p-op? ts2 ";")
                 ; `struct S { ... };` -- a definition, nothing declared
                 (self (rest ts2) acc)
-              (if (not (%cc-p-id? ts2))
+              (if (not (if (%cc-p-id? ts2) #t (%cc-p-fnptr-start? ts2)))
                 (%cc-p-err "expected a declaration")
-                (let ((name (first (rest (first ts2)))))
-                  (if (%cc-p-op? (rest ts2) "(")
+                (let ((name (if (%cc-p-id? ts2) (first (rest (first ts2))) ())))
+                  (if (if (%cc-p-id? ts2) (%cc-p-op? (rest ts2) "(") #f)
                     ; function: definition, or a prototype to skip
                     (let ((pr (%cc-p-params (rest (rest ts2)))))
                       (if (%cc-p-op? (rest pr) ";")

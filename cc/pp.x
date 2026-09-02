@@ -11,10 +11,10 @@
 ; object-like #define records a macro the LEXER splices token-wise --
 ; substitution never touches text, so strings are safe by construction.
 ; Function-like macros are collected here as (NAME %fn (PARAMS) . BODY)
-; and expanded in the lexer.  #ifdef/#ifndef/#else/#endif/#undef and the
-; #if forms a build header needs (0, 1, defined) select lines.  Any
-; other directive refuses loudly; # and ## in a macro body, #elif and
-; friends are recorded pendings.
+; and expanded in the lexer.  #ifdef/#ifndef/#elif/#else/#endif/#undef
+; and the #if forms a build header needs (0, 1, defined) select lines.
+; Any other directive refuses loudly; # and ## in a macro body are the
+; recorded pending.
 
 ; comments to spaces; strings and char constants pass untouched
 (def %cc-strip-comments
@@ -104,8 +104,7 @@
     (if (string=? dname "endif") (list (lit endif))
     (if (string=? dname "undef") (pair (lit undef) arg)
     (if (string=? dname "if") (pair (lit if) arg)
-    (if (string=? dname "elif")
-      (Err raise (lit cc) "cc: #elif is not built yet" ())
+    (if (string=? dname "elif") (pair (lit elif) arg)
       (if (string=? dname "define")
         (let ((n0 (skip d1)))
           (def n1 (word n0))
@@ -211,17 +210,21 @@
 
 ; source to (clean-text . macro-alist): comments stripped, # lines
 ; pulled out and replaced with blanks (token separation kept)
-; the walk carries a STACK of conditional flags: a line lives when
-; every open conditional is true.  An inactive region still tracks its
-; own nesting, so its #endif pairs; its defines and undefs are ignored.
+; the walk carries a STACK of conditional entries, (ACTIVE . TAKEN): a
+; line lives when every open conditional is active; TAKEN says a branch
+; of this conditional already ran, so #elif and #else stay off.  An
+; inactive region still tracks its own nesting, so its #endif pairs;
+; its defines and undefs are ignored.
 (def cc-preprocess
   (fn (_ src)
     (def lines (%cc-split-lines (%cc-strip-comments src)))
     (def live?
-      (fn (self st) (if (null? st) #t (if (first st) (self (rest st)) #f))))
+      (fn (self st) (if (null? st) #t (if (first (first st)) (self (rest st)) #f))))
     (def undef
       (fn (_ name macros)
         (filter (fn (_ e) (not (string=? (first e) name))) macros)))
+    ; a conditional's opening entry: off-and-taken under a dead parent
+    (def open (fn (_ on v) (if on (pair v v) (pair #f #t))))
     (def go
       (fn (self ls macros stack acc)
         (if (null? ls)
@@ -236,15 +239,22 @@
               (let ((m (%cc-directive (substring line (+ hash 1) (byte-len line)))))
                 (def k (first m))
                 (if (eq? k (lit ifdef))
-                  (self (rest ls) macros (pair (if on (%cc-defined? (rest m) macros) #f) stack) (pair "" acc))
+                  (self (rest ls) macros (pair (open on (%cc-defined? (rest m) macros)) stack) (pair "" acc))
                 (if (eq? k (lit ifndef))
-                  (self (rest ls) macros (pair (if on (not (%cc-defined? (rest m) macros)) #f) stack) (pair "" acc))
+                  (self (rest ls) macros (pair (open on (not (%cc-defined? (rest m) macros))) stack) (pair "" acc))
                 (if (eq? k (lit if))
-                  (self (rest ls) macros (pair (if on (%cc-if-cond (rest m) macros) #f) stack) (pair "" acc))
+                  (self (rest ls) macros (pair (open on (if on (%cc-if-cond (rest m) macros) #f)) stack) (pair "" acc))
+                (if (eq? k (lit elif))
+                  (if (null? stack) (Err raise (lit cc) "cc: #elif without #if" ())
+                    (self (rest ls) macros
+                      (pair (if (rest (first stack)) (pair #f #t)
+                              (let ((v (%cc-if-cond (rest m) macros))) (pair v v)))
+                        (rest stack))
+                      (pair "" acc)))
                 (if (eq? k (lit else))
                   (if (null? stack) (Err raise (lit cc) "cc: #else without #if" ())
                     (self (rest ls) macros
-                      (pair (if (live? (rest stack)) (not (first stack)) #f) (rest stack))
+                      (pair (pair (not (rest (first stack))) #t) (rest stack))
                       (pair "" acc)))
                 (if (eq? k (lit endif))
                   (if (null? stack) (Err raise (lit cc) "cc: #endif without #if" ())
@@ -255,7 +265,7 @@
                   (self (rest ls) (pair (rest m) macros) stack (pair "" acc))
                 (if (eq? k (lit undef))
                   (self (rest ls) (undef (rest m) macros) stack (pair "" acc))
-                  (self (rest ls) macros stack (pair "" acc))))))))))))))))
+                  (self (rest ls) macros stack (pair "" acc)))))))))))))))))
     (go lines () () ())))
 
 (def %cc-join-nl

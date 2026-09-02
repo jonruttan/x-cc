@@ -45,16 +45,27 @@ collect their arguments as text across balanced parentheses,
 substitute at identifier boundaries, and rescan with the macro open;
 no parentheses are added, as in C.
 
-`#ifdef`/`#ifndef`/`#else`/`#endif`/`#undef` and the `#if` forms a
-build header needs (`0`, `1`, `defined`) select lines; an inactive
-region still tracks its nesting.  Initializer lists lay values into
-cells by kind -- `int a[] = {…}` sized by the list, `struct P p =
-{…}`, nested lists for arrays of structs, missing trailing items
-zero, `char s[] = "…"` from the string's bytes.
+`#ifdef`/`#ifndef`/`#elif`/`#else`/`#endif`/`#undef` and the `#if`
+forms a build header needs (`0`, `1`, `defined`) select lines; an
+inactive region still tracks its nesting.  Initializer lists lay
+values into cells by kind -- `int a[] = {…}` sized by the list,
+`struct P p = {…}`, nested lists for arrays of structs, missing
+trailing items zero, `char s[] = "…"` from the string's bytes.
+
+Enums fold at parse time (`enum { A, B = 1 << 3, C }` -- constant
+expressions, counting on from the last; the type is a scalar; `case
+RED:` labels).  A union is a struct whose fields all sit at offset 0,
+sized by its widest -- overlap, copy, nesting anonymously in a struct.
+Function pointers: `int (*f)(int, int)` as a local, global, parameter,
+struct field or typedef, arrays of them with initializer lists; a
+function's name is its value (an id above every cell address, never
+NULL), and `f(x)`, `(*f)(x)`, `ops[i](x)`, `p->fn(x)` all dispatch as
+the named call would -- a native twin called through a pointer from
+interpreted code stays native.
 
 Refused loudly, each a recorded pending: structs passed or returned by
-value, union/enum, goto, floats, function pointers, `#` and `##` in
-macros, `#elif`, byte-accurate sizeof.
+value, goto, floats, casts to function-pointer types, `#` and `##` in
+macros, byte-accurate sizeof.
 
 `build` lowers the ELIGIBLE functions through the engine's compile-asm
 lane to NATIVE machine code, no external toolchain; the rest stay

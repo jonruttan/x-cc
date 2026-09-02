@@ -43,6 +43,35 @@
 (def %cc-exit-code ())  ; set when exit() raises its sentinel
 (def %cc-natives ())    ; ((name . prim) ...) -- build's compiled twins
 
+; FUNCTION VALUES: a function's address is an id above every cell
+; address (so it is never NULL, never confused with memory), handed out
+; the first time a function's name is used as a value; a call through
+; a value maps the id back to the name and dispatches as a named call
+; would (native twin first).  The runtime's builtins take ids too.
+(def %cc-fun-base 1048576)
+(def %cc-fun-ids ())    ; ((name . id) ...)
+(def %cc-builtins (list "putchar" "puts" "printf" "malloc" "free" "exit"))
+
+(def %cc-fun-id
+  (fn (_ name)
+    (def go (fn (self es)
+              (if (null? es) ()
+                (if (string=? (first (first es)) name) (rest (first es)) (self (rest es))))))
+    (def hit (go %cc-fun-ids))
+    (if (not (null? hit)) hit
+      (if (if (null? (%cc-fun name)) (not (%cc-member-str? name %cc-builtins)) #f)
+        (%cc-oops (string-append "undefined: " name))
+        (let ((id (+ %cc-fun-base (length %cc-fun-ids))))
+          (set! %cc-fun-ids (pair (pair name id) %cc-fun-ids))
+          id)))))
+
+(def %cc-fun-name
+  (fn (_ id)
+    (def go (fn (self es)
+              (if (null? es) (%cc-oops "call through a value that is not a function")
+                (if (= (rest (first es)) id) (first (first es)) (self (rest es))))))
+    (go %cc-fun-ids)))
+
 (def %cc-native
   (fn (_ name)
     (def go
@@ -360,7 +389,8 @@
       (if (eq? t (lit var))
         (let ((e (%cc-find (first (rest node)) env)))
           (if (null? e)
-            (%cc-oops (string-append "undefined: " (first (rest node))))
+            ; not a variable: a function's name is its value (or undefined)
+            (%cc-fun-id (first (rest node)))
             ; an array or struct NAME decays to its address; a scalar loads
             (if (%cc-kind-decays? (rest (rest e)))
               (first (rest e))
@@ -410,7 +440,11 @@
           (if (string=? op "*")
             (%cc-load (%cc-eval (first (rest (rest node))) env))
             (if (string=? op "&")
-              (%cc-lval (first (rest (rest node))) env)
+              ; &f of a function name is the function's value
+              (let ((sub (first (rest (rest node)))))
+                (if (if (eq? (first sub) (lit var)) (null? (%cc-find (first (rest sub)) env)) #f)
+                  (%cc-fun-id (first (rest sub)))
+                  (%cc-lval sub env)))
               (let ((v (%cc-eval (first (rest (rest node))) env)))
                 (if (string=? op "-") (- 0 v)
                   (if (string=? op "!") (%cc-b (= v 0))
@@ -451,10 +485,23 @@
       (if (eq? t (lit szof))
         (%cc-kind-size (%cc-kind-of (first (rest node)) env))
       (if (eq? t (lit call))
-        (%cc-call (first (rest node))
-          (map (fn (_ a) (%cc-eval a env))
-            (first (rest (rest node)))))
-        (%cc-oops "unknown expression")))))))))))))))))))))))
+        ; a named call -- unless the name is a variable holding a function
+        (let ((e (%cc-find (first (rest node)) env)))
+          (%cc-call
+            (if (null? e) (first (rest node)) (%cc-fun-name (%cc-load (first (rest e)))))
+            (map (fn (_ a) (%cc-eval a env))
+              (first (rest (rest node))))))
+      (if (eq? t (lit callx))
+        ; a call through an expression: (*f)(x) is f(x) -- * on a
+        ; function value is the function
+        (let ((strip (fn (self n)
+                       (if (if (eq? (first n) (lit un)) (string=? (first (rest n)) "*") #f)
+                         (self (first (rest (rest n))))
+                         n))))
+          (%cc-call (%cc-fun-name (%cc-eval (strip (first (rest node))) env))
+            (map (fn (_ a) (%cc-eval a env))
+              (first (rest (rest node))))))
+        (%cc-oops "unknown expression"))))))))))))))))))))))))
 
 ; --- calls and builtins ------------------------------------------------------
 
@@ -690,6 +737,7 @@
     (set! %cc-genv ())
     (set! %cc-funs ())
     (set! %cc-strtab ())
+    (set! %cc-fun-ids ())
     (set! %cc-exit-code ())
     (def prog (cc-parse (cc-lex src)))
     (def load!

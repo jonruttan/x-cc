@@ -70,13 +70,13 @@ Every expectation is an oracle row from /usr/bin/cc.
 
 ## the refusals
 
-### #elif stays pending
+### goto stays pending
 
 ```cc
-(display (guard (e (do (display "refused: ") (write e) "")) (cc-run "#ifdef X\n#elif 1\n#endif\nint main() { return 0; }")))
+(display (guard (e (do (display "refused: ") (write e) "")) (cc-run "int main() { goto out; out: return 0; }")))
 ```
 ---
-    refused: #<err:cc cc: #elif is not built yet>
+    refused: #<err:cc cc: parse: not built yet: goto>
 
 ### an initialized local array keeps its function interpreted
 
