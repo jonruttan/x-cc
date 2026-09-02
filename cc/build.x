@@ -14,12 +14,16 @@
 ; shapes lower:
 ;   1. if/return/blocks -- fib and friends (%cc-lower-expr-fun)
 ;   2. { decls; while|for; return } -- LOOPS, transformed to tail
-;      self-recursion with the accumulators as extra params, literal
-;      inits supplied by arg-padding at the call boundary
-;      (%cc-lower-loop).  Slice one: a flat assignment body,
-;      literal inits, params+accs <= 4.
-; Pointers, param mutation, nested loop control, non-literal inits,
-; globals and cross-calls stay interpreted -- recorded pendings.
+;      self-recursion: params AND accumulators ride the self-call
+;      with their folded new values, accumulators' literal inits
+;      supplied by arg-padding at the call boundary (%cc-lower-loop).
+;      The body fold (%cc-fold-stmts) takes assignments/++/-- to any
+;      threadable variable (a mutated param is fine), body-local
+;      temps (substitution-only, no slot), and if/else (each written
+;      variable merges as a ternary).  params+accs <= 4.
+; Pointers, break/continue/return inside a loop, nested loops,
+; non-literal inits, pre-loop assignments, globals and cross-calls
+; stay interpreted -- recorded pendings.
 ;
 ; Adoption is sha256.x's pattern: the whole attempt sits in a guard;
 ; a function that will not lower or will not compile simply stays
@@ -252,20 +256,84 @@
       (%cc-expr-assign (first (rest s)))
       ())))
 
-; fold the loop body (and step) into an updates alist, sequentially
-(def %cc-loop-updates
-  (fn (_ stmts accs)
-    (def go
-      (fn (self ss upd)
-        (if (null? ss) upd
-          (let ((a-rhs (%cc-stmt-assign (first ss))))
-            (if (null? a-rhs) (%cc-no "loop body: only assignments")
-              (if (not (%cc-member-str? (first a-rhs) accs))
-                (%cc-no "loop assigns a non-accumulator")
-                (self (rest ss)
-                  (%cc-put-str (first a-rhs)
-                    (%cc-subst (rest a-rhs) upd) upd))))))))
-    (go stmts ())))
+; the update fold: loop-body statements to an updates alist, in order.
+; State is (map locals assigned): MAP is var -> cexpr in terms of the
+; iteration's ENTRY values; LOCALS are names declared in the body --
+; substitution-only, they never need a parameter slot (a `t = a % b`
+; temp folds straight into whoever reads it); ASSIGNED is the names
+; written, for the if-merge.  Any variable in EXT (params AND
+; accumulators -- a mutated param just rides the self-call like an
+; accumulator) or in LOCALS may be assigned.  An `if` folds each branch
+; from the current map and merges every variable either branch wrote
+; as a ternary on the (substituted) condition -- SSA's phi, as a
+; select.  Branch-declared locals die at the merge.  Anything else --
+; break, continue, return, a nested loop, a call statement -- refuses.
+(def %cc-var-of
+  (fn (_ v m)
+    (let ((r (%cc-assoc-str v m)))
+      (if (null? r) (list (lit var) v) (rest r)))))
+
+(def %cc-fold-stmts
+  (fn (self stmts st ext)
+    (if (null? stmts) st
+      (let ((s (first stmts)))
+        (def t (first s))
+        (def m (first st))
+        (def locals (first (rest st)))
+        (def assigned (first (rest (rest st))))
+        (if (eq? t (lit block))
+          (self (append (first (rest s)) (rest stmts)) st ext)
+        (if (eq? t (lit decl))
+          (let ((name (first (rest s))))
+            (def kind (first (rest (rest s))))
+            (def init (first (rest (rest (rest s)))))
+            (if (pair? kind) (%cc-no "array local in a loop body"))
+            (self (rest stmts)
+              (list (if (null? init) m
+                      (%cc-put-str name (%cc-subst init m) m))
+                (pair name locals)
+                assigned)
+              ext))
+        (if (eq? t (lit expr))
+          (let ((a (%cc-expr-assign (first (rest s)))))
+            (if (null? a) (%cc-no "loop body: a statement that is not an assignment")
+              (if (not (if (%cc-member-str? (first a) ext) #t
+                         (%cc-member-str? (first a) locals)))
+                (%cc-no "loop assigns an unknown variable")
+                (self (rest stmts)
+                  (list (%cc-put-str (first a) (%cc-subst (rest a) m) m)
+                    locals
+                    (pair (first a) assigned))
+                  ext))))
+        (if (eq? t (lit if))
+          (let ((c (%cc-subst (first (rest s)) m)))
+            (def then-s (first (rest (rest s))))
+            (def else-s (first (rest (rest (rest s)))))
+            (def st-then (self (list then-s) (list m locals ()) ext))
+            (def st-else
+              (if (null? else-s) (list m locals ())
+                (self (list else-s) (list m locals ()) ext)))
+            ; only variables that outlive the if get merged
+            (def touched
+              (filter (fn (_ v)
+                        (if (%cc-member-str? v ext) #t
+                          (%cc-member-str? v locals)))
+                (append (first (rest (rest st-then)))
+                  (first (rest (rest st-else))))))
+            (def merge
+              (fn (self2 vs mm)
+                (if (null? vs) mm
+                  (let ((v (first vs)))
+                    (self2 (rest vs)
+                      (%cc-put-str v
+                        (list (lit ternary) c
+                          (%cc-var-of v (first st-then))
+                          (%cc-var-of v (first st-else)))
+                        mm))))))
+            (self (rest stmts)
+              (list (merge touched m) locals (append touched assigned))
+              ext))
+          (%cc-no "loop body: only assignments, locals and if lower")))))))))
 
 ; body-stmt to a statement list (a block flattens)
 (def %cc-loop-body-stmts
@@ -342,29 +410,25 @@
                     (if (not (%cc-member-str? (first ia) accs))
                       (%cc-no "for init sets a non-accumulator")
                       (%cc-set-init inits0 accs (first ia) iv))))))))
-        ; per-iteration updates: body then step
-        (def upd0 (%cc-loop-updates
-                    (%cc-loop-body-stmts body-stmt) accs))
-        (def upd
-          (if (null? step-node) upd0
-            (let ((sa (%cc-expr-assign step-node)))
-              (if (null? sa) (%cc-no "for step not an assignment")
-                (if (not (%cc-member-str? (first sa) accs))
-                  (%cc-no "for step touches a non-accumulator")
-                  (%cc-put-str (first sa)
-                    (%cc-subst (rest sa) upd0) upd0))))))
         (def ext (append params accs))
+        ; per-iteration updates: the body, then the for-step (wrapped
+        ; as the statement it is), through one fold
+        (def stmts
+          (append (%cc-loop-body-stmts body-stmt)
+            (if (null? step-node) ()
+              (list (list (lit expr) step-node)))))
+        (def upd (first (%cc-fold-stmts stmts (list () () ()) ext)))
         (def lcond (%cc-lower-e cond-node name ext))
         (def lret (%cc-lower-e ret-e name ext))
+        ; every threadable variable -- params included -- takes its
+        ; folded value into the self-call, or rides through unchanged
         (def self-call
           (pair (convert name %symbol)
-            (append
-              (map (fn (_ p) (convert p %symbol)) params)
-              (map (fn (_ a)
-                     (let ((u (%cc-assoc-str a upd)))
-                       (if (null? u) (convert a %symbol)
-                         (%cc-lower-e (rest u) name ext))))
-                accs))))
+            (map (fn (_ v)
+                   (let ((u (%cc-assoc-str v upd)))
+                     (if (null? u) (convert v %symbol)
+                       (%cc-lower-e (rest u) name ext))))
+              ext)))
         (pair
           (pair (lit fn)
             (pair (pair (convert name %symbol)

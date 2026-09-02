@@ -37,12 +37,17 @@ lane to NATIVE machine code, no external toolchain; the rest stay
 interpreted (sha256.x's adoption pattern: refuse, fall back).  Two body
 shapes lower: `if`/`return` recursion (fib), and **loops** -- a
 `{ decls; while|for; return }` function transforms into tail self-
-recursion, its accumulators riding as extra parameters with literal
-inits supplied by arg-padding.  `x -l cc -- build prog.c` reports each
-function's verdict and runs, same output as `run`: fib(24) 67s -> 10.5s
-wall, a 2,000,000-iteration loop 79s -> 9.5s (the loop itself at machine
-speed under the boot).  Pointers, param mutation, nested loop control,
-globals and cross-calls stay interpreted -- the recorded pendings.
+recursion, parameters and accumulators alike riding the self-call with
+their folded new values (accumulators' literal inits by arg-padding).
+The body fold takes assignments to any of them (a mutated parameter
+included -- `gcd` compiles to recursive gcd), body-local temps
+(substitution-only), and `if`/`else` (each written variable merges as
+a ternary).  `x -l cc -- build prog.c` reports each function's verdict
+and runs, same output as `run`: fib(24) 67s -> 10.5s wall, a
+2,000,000-iteration loop 79s -> 9.5s (the loop itself at machine speed
+under the boot).  Pointers, break/continue/return inside a loop, nested
+loops, non-literal inits, globals and cross-calls stay interpreted --
+the recorded pendings.
 
 Paired with x-lang v0.10.0 (`lang.xon` is the checkable row).
 
