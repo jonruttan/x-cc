@@ -227,8 +227,9 @@
           (def ret (let ((r (rest (rest (rest f))))) (if (null? r) (lit scalar) (first r))))
           (if (not (= (length cparams) (length largs)))
             (%cc-no "a call with the wrong arity"))
-          (if (if (pair? ret) #t (not (null? (filter pair? kinds))))
-            (%cc-no "struct kinds stay interpreted"))
+          (if (if (pair? ret) #t
+                (not (null? (filter (fn (_ k) (not (%cc-cellish? k))) kinds))))
+            (%cc-no "a struct return or aggregate parameter does not inline"))
           (%cc-check-names callee cparams)
           (set! %cc-inline-stack (pair callee %cc-inline-stack))
           (def lowered
@@ -1299,7 +1300,7 @@
               (list (guarded guards))))
           inits
           entry
-          (length kept-params))))))
+          (%cc-iota (length kept-params)))))))
 
 ; the variable names an effect list reads (dupes fine)
 (def %cc-effs-free-vars
@@ -1576,14 +1577,15 @@
     (def recurses?
       (let ((go (fn (self n)
                   (if (not (pair? n)) #f
-                    (if (if (eq? (first n) (lit call))
-                          (string=? (first (rest n)) fname) #f)
+                    (if (if (pair? (first n)) #f
+                          (if (eq? (first n) (lit call))
+                            (string=? (first (rest n)) fname) #f))
                       #t
                       (let ((any (fn (self2 xs)
                                    (if (null? xs) #f
                                      (if (if (pair? (first xs)) (self (first xs)) #f) #t
                                        (self2 (rest xs)))))))
-                        (any (rest n))))))))
+                        (any (%cc-kids n))))))))
         (go (pair (lit block) (list stmts)))))
     (map (fn (_ d)
            (if (not (null? (first (rest (rest (rest d))))))
@@ -1644,22 +1646,166 @@
               (wrap exits)))))
       ()
       ()
-      (length params))))
+      (%cc-iota (length params)))))
+
+; --- recursion past four parameters: hoisting the invariant ones -------------
+; A self-call must pass every parameter the function has, and takes at
+; most four.  But a parameter that EVERY self-call passes along
+; unchanged has the same value in every frame, so it does not need a
+; slot at all: it can live in one scratch cell, written once at entry.
+; The varying parameters keep their slots and the self-call passes only
+; those.  A parameter the recursion actually changes cannot be hoisted
+; -- each frame would need its own cell -- so if too few are invariant,
+; the function stays interpreted.
+(def %cc-iota
+  (fn (self n) (if (<= n 0) () (append (self (- n 1)) (list (- n 1))))))
+
+(def %cc-nth
+  (fn (self l n) (if (null? l) () (if (<= n 0) (first l) (self (rest l) (- n 1))))))
+
+(def %cc-member-int?
+  (fn (_ x l)
+    (def go (fn (self es) (if (null? es) #f (if (= (first es) x) #t (self (rest es))))))
+    (go l)))
+
+; the sub-nodes of a form.  A TAGGED node is (tag . children), but a
+; plain LIST of nodes -- a statement list, a call's arguments -- has a
+; node in first position, and walking (rest ...) there silently skips
+; it.  That bug hid every self-call in a function's first statement.
+(def %cc-kids
+  (fn (_ node) (if (pair? (first node)) node (rest node))))
+
+; every self-call's argument list, from a statement tree
+(def %cc-selfcalls
+  (fn (self node fname)
+    (if (not (pair? node)) ()
+      (let ((here
+              (if (if (pair? (first node)) #f (eq? (first node) (lit call)))
+                (if (string=? (first (rest node)) fname)
+                  (list (first (rest (rest node)))) ())
+                ())))
+        (def go (fn (self2 xs)
+                  (if (null? xs) ()
+                    (append (self (first xs) fname) (self2 (rest xs))))))
+        (append here (go (%cc-kids node)))))))
+
+; the parameter positions every self-call passes through untouched
+(def %cc-invariant-args
+  (fn (_ params calls)
+    (def n (length params))
+    (filter
+      (fn (_ i)
+        (let ((go (fn (self cs)
+                    (if (null? cs) #t
+                      (let ((a (%cc-nth (first cs) i)))
+                        (if (if (pair? a)
+                              (if (eq? (first a) (lit var))
+                                (string=? (first (rest a)) (%cc-nth params i)) #f)
+                              #f)
+                          (self (rest cs)) #f))))))
+          (go calls)))
+      (%cc-iota n))))
+
+; substitute the hoisted parameters and drop their argument positions
+(def %cc-hoist-rw ())
+(def %cc-hoist-rw-stmt
+  (fn (self s hsub keep fname)
+    (def e (fn (_ x) (if (null? x) () (%cc-hoist-rw x hsub keep fname))))
+    (let ((t (first s)))
+      (if (eq? t (lit expr)) (list (lit expr) (e (first (rest s))))
+      (if (eq? t (lit return)) (list (lit return) (e (first (rest s))))
+      (if (eq? t (lit block))
+        (list (lit block) (map (fn (_ x) (self x hsub keep fname)) (first (rest s))))
+      (if (eq? t (lit if))
+        (list (lit if) (e (first (rest s)))
+          (self (first (rest (rest s))) hsub keep fname)
+          (if (null? (first (rest (rest (rest s))))) ()
+            (self (first (rest (rest (rest s)))) hsub keep fname)))
+      (if (eq? t (lit while))
+        (list (lit while) (e (first (rest s)))
+          (self (first (rest (rest s))) hsub keep fname))
+      (if (eq? t (lit for))
+        (list (lit for) (e (first (rest s))) (e (first (rest (rest s))))
+          (e (first (rest (rest (rest s)))))
+          (self (first (rest (rest (rest (rest s))))) hsub keep fname))
+      (if (eq? t (lit decl))
+        (list (lit decl) (first (rest s)) (first (rest (rest s)))
+          (e (first (rest (rest (rest s))))))
+        s))))))))))
+(set! %cc-hoist-rw
+  (fn (self node hsub keep fname)
+    (if (not (pair? node)) node
+      (let ((t (first node)))
+        (if (eq? t (lit var))
+          (let ((r (%cc-assoc-str (first (rest node)) hsub)))
+            (if (null? r) node (rest r)))
+        (if (if (eq? t (lit call)) (string=? (first (rest node)) fname) #f)
+          (let ((args (first (rest (rest node)))))
+            (list (lit call) fname
+              (map (fn (_ i) (self (%cc-nth args i) hsub keep fname)) keep)))
+        (if (eq? t (lit call))
+          (list (lit call) (first (rest node))
+            (map (fn (_ a) (self a hsub keep fname)) (first (rest (rest node)))))
+        (if (if (eq? t (lit num)) #t (eq? t (lit str))) node
+          (pair t (map (fn (_ x) (if (pair? x) (self x hsub keep fname) x))
+                    (rest node)))))))))))
+
+; answers (params' stmts' entry-effects keep), or refuses
+(def %cc-hoist-invariant
+  (fn (_ name params stmts)
+    (def calls (%cc-selfcalls (pair (lit block) (list stmts)) name))
+    (if (null? calls) (%cc-no "no self-call to hoist around"))
+    (def n (length params))
+    (def inv (%cc-invariant-args params calls))
+    (def need (- n 4))
+    (if (< (length inv) need)
+      (%cc-no "recursion past four parameters, too few of them invariant"))
+    ; hoist the LAST invariant ones: the earlier parameters are the
+    ; ones a reader expects to see change
+    (def drop-n (fn (self l k) (if (<= k 0) l (if (null? l) () (self (rest l) (- k 1))))))
+    (def hoisted (drop-n inv (- (length inv) need)))
+    (def keep (filter (fn (_ i) (not (%cc-member-int? i hoisted))) (%cc-iota n)))
+    (def cells (map (fn (_ i) (pair i (%cc-new-cells 1))) hoisted))
+    (def hsub
+      (map (fn (_ c)
+             (pair (%cc-nth params (first c))
+               (list (lit un) "*" (list (lit num) (rest c)))))
+        cells))
+    (def entry-effs
+      (map (fn (_ c)
+             (list (lit store) (list (lit num) (rest c))
+               (list (lit var) (%cc-nth params (first c)))))
+        cells))
+    (list (map (fn (_ i) (%cc-nth params i)) keep)
+      (map (fn (_ s) (%cc-hoist-rw-stmt s hsub keep name)) stmts)
+      entry-effs
+      keep)))
 
 ; the expression-body path: fib and friends, no padding
 (def %cc-lower-expr-fun
   (fn (_ name params body)
     (set! %cc-inline-stack (list name))
+    (def stmts (first (rest body)))
+    ; more parameters than a self-call can carry: hoist the ones the
+    ; recursion never changes into cells, written once at entry
+    (def h (if (> (length params) 4) (%cc-hoist-invariant name params stmts) ()))
+    (def params2 (if (null? h) params (first h)))
+    (def stmts2 (if (null? h) stmts (first (rest h))))
+    (def effs (if (null? h) () (first (rest (rest h)))))
+    (def keep (if (null? h) (%cc-iota (length params)) (first (rest (rest (rest h))))))
     (list
       (pair (lit fn)
         (pair
           (pair (convert name %symbol)
-            (map (fn (_ p) (convert p %symbol)) params))
+            (map (fn (_ p) (convert p %symbol)) params2))
           (list
-            (%cc-lower-body (first (rest body)) name params))))
+            (%cc-lower-body stmts2 name params2))))
       ()
-      ()
-      (length params))))
+      (if (null? effs) ()
+        (list (lit fn)
+          (pair (lit %cc-init) (map (fn (_ p) (convert p %symbol)) params))
+          (%cc-effects-do effs "" params 0)))
+      keep)))
 
 (def %cc-check-names
   (fn (_ name params)
@@ -1705,19 +1851,23 @@
           (let ((name (first (first fs))))
             (def params (first (rest (first fs))))
             (def body (first (rest (rest (first fs)))))
-            ; (name params body kinds ret): a struct RETURNED by value
-            ; needs a frame slot in the caller, which only the
-            ; interpreter has.  Struct PARAMETERS are fine -- their
-            ; fields become address arithmetic (%cc-structs-subst),
-            ; and assigning one refuses there.
+            ; (name params body kinds ret).  A struct RETURNED by value
+            ; is an address here, like every other struct value: the
+            ; body answers wherever its result was built, and the CALL
+            ; BOUNDARY copies those cells into a fresh slot in the
+            ; caller's frame -- which is what the interpreter does, and
+            ; what keeps two calls to the same function from sharing
+            ; one block.  RETSIZE is how many cells that is, 0 for a
+            ; scalar.
             (def kinds (let ((tail (rest (rest (rest (first fs))))))
                          (if (null? tail) () (first tail))))
-            (def structy?
+            (def retsize
               (let ((tail (rest (rest (rest (first fs))))))
-                (if (null? tail) #f
-                  (if (null? (rest tail)) #f
+                (if (null? tail) 0
+                  (if (null? (rest tail)) 0
                     (let ((r (first (rest tail))))
-                      (if (pair? r) (eq? (first r) (lit struct)) #f))))))
+                      (if (if (pair? r) (eq? (first r) (lit struct)) #f)
+                        (%cc-kind-size r) 0))))))
             ; X_CC_WHY=1 reports each refusal: the adoption rule is to
              ; fall back silently, which makes a function that SHOULD
              ; lower and does not very hard to see
@@ -1733,12 +1883,11 @@
                             (lit interpreted)))
                 (set! %cc-loop-why ())
                 (let ((lowered
-                        (if structy? (%cc-no "a struct returned by value stays interpreted")
-                          (%cc-lower-fun name params body kinds))))
+                        (%cc-lower-fun name params body kinds)))
                   (def prim (compile-asm (first lowered)))
-                  ; the table entry is (name nkeep pad entry . prim);
-                  ; NKEEP is how many of the C parameters the lane
-                  ; function actually takes (the rest spilled to cells).
+                  ; the table entry is (name keep pad entry retsize .
+                  ; prim); KEEP lists which of the C parameters the lane
+                  ; function takes (the rest spilled or hoisted).
                   ; Each pad slot is an accumulator's literal init, or its init
                   ; expression compiled to a lane function over the
                   ; params (applied at the call boundary); () for a
@@ -1751,9 +1900,13 @@
                   (def entry
                     (let ((e (first (rest (rest lowered)))))
                       (if (null? e) () (compile-asm e))))
-                  (def nkeep (first (rest (rest (rest lowered)))))
+                  ; KEEP is the argument POSITIONS the lane function
+                  ; takes: a spilled or hoisted parameter is one it
+                  ; never sees, and those need not be a prefix
+                  (def keep (first (rest (rest (rest lowered)))))
                   (set! %cc-natives
-                    (pair (pair name (pair nkeep (pair pad (pair entry prim))))
+                    (pair (pair name
+                            (pair keep (pair pad (pair entry (pair retsize prim)))))
                       %cc-natives))
                   (lit native))))
             (self (rest fs) (pair (pair name verdict) acc))))))

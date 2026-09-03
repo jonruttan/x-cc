@@ -156,9 +156,22 @@ refuses while a loop function (same frame) is fine.  Because the pass
 is shared, a local array now works in a straight-line body as well as
 a loop, and an array of structs indexes with the right stride.
 
-What remains, each a recorded pending and each the lane's own:
-recursion of more than four parameters, callees with loops or
-recursion, calls through pointers, and structs returned by value.
+**Recursion past four parameters** lowers when it can: a self-call
+must pass every parameter and takes at most four, but a parameter
+every self-call passes along UNCHANGED holds the same value in every
+frame, so it is hoisted into a cell written once at entry and the
+self-call carries only the ones that vary.  A recursion whose
+parameters all vary stays interpreted.  **Structs returned by value**
+lower too -- the answer is the address the result was built at, and
+the call boundary copies those cells into a fresh slot in the caller's
+frame, so `add(make(1, 2), make(3, 4))` cannot alias.
+
+What remains are the two the lane itself cannot express: a callee with
+a loop or recursion (it must inline, and an expression cannot loop),
+and a call through a function pointer.  Both need the JIT to call a
+prim held in a free variable -- its self-call already loads an address
+from a cell and branches to it, so the machinery is there; only naming
+another function is missing.
 
 Paired with x-lang v0.10.0 (`lang.xon` is the checkable row).
 
