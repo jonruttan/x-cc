@@ -148,10 +148,17 @@ by-value struct parameters are all native.  Writing through a POINTER
 is the point and is allowed; assigning a field of a BY-VALUE parameter
 would write the caller's copy, so it refuses.
 
+**Local aggregates** get storage in the same pass: an array or struct
+declared in a function takes a block of scratch cells, its name stands
+for the base, and the declaration goes away -- one block per function
+rather than per frame, so a genuinely recursive function with one
+refuses while a loop function (same frame) is fine.  Because the pass
+is shared, a local array now works in a straight-line body as well as
+a loop, and an array of structs indexes with the right stride.
+
 What remains, each a recorded pending and each the lane's own:
 recursion of more than four parameters, callees with loops or
-recursion, calls through pointers, structs returned by value, and
-local structs (they have no native storage).
+recursion, calls through pointers, and structs returned by value.
 
 Paired with x-lang v0.10.0 (`lang.xon` is the checkable row).
 

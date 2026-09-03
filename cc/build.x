@@ -955,44 +955,9 @@
   (fn (_ name params body)
     (set! %cc-inline-stack (list name))
     (set! %cc-fold-name name)
-    ; local ARRAYS: cells in the native scratch region, their names
-    ; substituted away as literal bases before anything else looks
-    (def stmts0 (first (rest body)))
-    ; an ARRAY declaration, not merely a compound kind: a pointer kind
-    ; is a pair too, and treating one as an array sized it by the kind
-    ; list itself, which then reached the lane as a stray symbol
-    (def array-decl?
-      (fn (_ st1)
-        (if (eq? (first st1) (lit decl))
-          (let ((k (first (rest (rest st1)))))
-            (if (pair? k) (eq? (first k) (lit array)) #f))
-          #f)))
-    ; a struct-kinded or struct-element local stays interpreted
-    (def check-kinds
-      (fn (self ss)
-        (if (null? ss) ()
-          (let ((st1 (first ss)))
-            (if (if (eq? (first st1) (lit decl)) (pair? (first (rest (rest st1)))) #f)
-              (let ((k (first (rest (rest st1)))))
-                (if (%cc-cellish? k) (self (rest ss))
-                  (if (if (eq? (first k) (lit array)) (null? (rest (rest k))) #f)
-                    (self (rest ss))
-                    (%cc-no "a local struct or array of structs stays interpreted"))))
-              (self (rest ss)))))))
-    (check-kinds stmts0)
-    (def arr-sub
-      (map (fn (_ d)
-             ; the array's name substitutes away and its decl is dropped,
-             ; so an initializer would be lost: refuse, stay interpreted
-             (if (not (null? (first (rest (rest (rest d))))))
-               (%cc-no "an initialized local array stays interpreted"))
-             (pair (first (rest d))
-               (list (lit num)
-                 (%cc-new-cells (first (rest (first (rest (rest d)))))))))
-        (filter array-decl? stmts0)))
-    (def stmts1
-      (%cc-subst-stmts (filter (fn (_ st1) (not (array-decl? st1))) stmts0)
-        arr-sub))
+    ; local aggregates already have their scratch blocks and their
+    ; names resolved (%cc-structs-subst, which every path shares)
+    (def stmts1 (first (rest body)))
     (def split (%cc-loop-split stmts1))
     (if (null? split) (%cc-no "not a decls+guards+loops+return shape")
       (let ((decls (first split)))
@@ -1433,6 +1398,22 @@
 (def %cc-saddr ())
 (def %cc-sval ())
 
+; LOCAL AGGREGATES: an array or struct declared in a function needs
+; storage, and the native scratch region above the program's memory is
+; where it goes -- the name then stands for its base address, exactly
+; as a struct parameter does.  One block per function, not per frame,
+; so a genuinely recursive function with one refuses (its frames would
+; share the storage); a loop function's self-call is the same frame and
+; is fine.
+(def %cc-local-bases ())
+(def %cc-base-of
+  (fn (_ name)
+    (def go (fn (self es)
+              (if (null? es) ()
+                (if (string=? (first (first es)) name) (rest (first es))
+                  (self (rest es))))))
+    (go %cc-local-bases)))
+
 ; the VALUE of a node, once fields are arithmetic: a struct or array
 ; decays to its address, anything else reads
 (set! %cc-sval
@@ -1452,9 +1433,12 @@
   (fn (_ node env)
     (let ((t (first node)))
       (if (eq? t (lit var))
-        ; a struct parameter holds its address; so does an array's name
-        (if (%cc-kind-decays? (%cc-env-kind (first (rest node)) env)) node
-          (%cc-no "the address of a scalar variable stays interpreted"))
+        ; a local aggregate IS its scratch block; a struct parameter
+        ; holds the caller's address
+        (let ((b (%cc-base-of (first (rest node)))))
+          (if (not (null? b)) (list (lit num) b)
+            (if (%cc-kind-decays? (%cc-env-kind (first (rest node)) env)) node
+              (%cc-no "the address of a scalar variable stays interpreted"))))
       (if (eq? t (lit dot))
         (let ((k (%cc-lk (first (rest node)) env)))
           (def f (%cc-field (first (rest k)) (first (rest (rest node)))))
@@ -1510,11 +1494,11 @@
         (if (if (eq? t (lit dot)) #t (eq? t (lit arrow)))
           (%cc-sval node env)
         (if (eq? t (lit idx))
-          ; an index whose element is not one cell must scale, and an
-          ; index over a struct is a field access in disguise
+          ; an index into an aggregate (a local array, an array of
+          ; structs) resolves to an address here, so the element size
+          ; scales; a plain `int *p` keeps the existing pointer shape
           (let ((k (%cc-lk (first (rest node)) env)))
-            (if (if (%cc-kind-decays? k)
-                  (not (= (%cc-kind-size (%cc-kind-elem k)) 1)) #f)
+            (if (%cc-kind-decays? k)
               (%cc-sval node env)
               (list (lit idx) (self (first (rest node)) env byval)
                 (self (first (rest (rest node))) env byval))))
@@ -1527,10 +1511,13 @@
         (if (eq? t (lit call))
           (list (lit call) (first (rest node))
             (map (fn (_ a) (self a env byval)) (first (rest (rest node)))))
-        (if (if (eq? t (lit num)) #t (if (eq? t (lit var)) #t (eq? t (lit str))))
+        (if (eq? t (lit var))
+          ; an aggregate's name decays to its address
+          (if (%cc-kind-decays? (%cc-lk node env)) (%cc-sval node env) node)
+        (if (if (eq? t (lit num)) #t (eq? t (lit str)))
           node
           (pair t (map (fn (_ x) (if (pair? x) (self x env byval) x))
-                    (rest node))))))))))))
+                    (rest node)))))))))))))
 
 (def %cc-srw-stmts ())
 (def %cc-srw-stmt
@@ -1553,17 +1540,24 @@
           (e (first (rest (rest (rest s)))))
           (self (first (rest (rest (rest (rest s))))) env byval))
       (if (eq? t (lit decl))
-        (if (%cc-struct? (first (rest (rest s))))
-          (%cc-no "a local struct has no native storage")
-          (list (lit decl) (first (rest s)) (first (rest (rest s)))
-            (e (first (rest (rest (rest s)))))))
+        (list (lit decl) (first (rest s)) (first (rest (rest s)))
+          (e (first (rest (rest (rest s))))))
         s))))))))))
+; an aggregate that got a scratch block declares nothing any more: its
+; statement goes, rather than becoming an empty one -- the loop split
+; reads the leading declarations positionally
 (set! %cc-srw-stmts
-  (fn (_ ss env byval) (map (fn (_ s) (%cc-srw-stmt s env byval)) ss)))
+  (fn (_ ss env byval)
+    (map (fn (_ s) (%cc-srw-stmt s env byval))
+      (filter (fn (_ s)
+                (if (eq? (first s) (lit decl))
+                  (null? (%cc-base-of (first (rest s))))
+                  #t))
+        ss))))
 
 ; the whole pass: nothing to do unless a field appears somewhere
 (def %cc-structs-subst
-  (fn (_ stmts params kinds)
+  (fn (_ stmts params kinds fname)
     (def penv
       (let ((go (fn (self ps ks)
                   (if (null? ps) ()
@@ -1571,6 +1565,36 @@
                       (self (rest ps) (if (null? ks) () (rest ks))))))))
         (go params kinds)))
     (def env (%cc-kind-env stmts penv))
+    ; storage for the local aggregates, before anything reads a name
+    (set! %cc-local-bases ())
+    (def aggregate?
+      (fn (_ st1)
+        (if (eq? (first st1) (lit decl))
+          (let ((k (first (rest (rest st1)))))
+            (if (pair? k) (not (eq? (first k) (lit ptr))) #f))
+          #f)))
+    (def recurses?
+      (let ((go (fn (self n)
+                  (if (not (pair? n)) #f
+                    (if (if (eq? (first n) (lit call))
+                          (string=? (first (rest n)) fname) #f)
+                      #t
+                      (let ((any (fn (self2 xs)
+                                   (if (null? xs) #f
+                                     (if (if (pair? (first xs)) (self (first xs)) #f) #t
+                                       (self2 (rest xs)))))))
+                        (any (rest n))))))))
+        (go (pair (lit block) (list stmts)))))
+    (map (fn (_ d)
+           (if (not (null? (first (rest (rest (rest d))))))
+             (%cc-no "an initialized local aggregate stays interpreted"))
+           (if recurses?
+             (%cc-no "a recursive function's local aggregate would share frames"))
+           (set! %cc-local-bases
+             (pair (pair (first (rest d))
+                     (%cc-new-cells (%cc-kind-size (first (rest (rest d))))))
+               %cc-local-bases)))
+      (filter aggregate? stmts))
     (def byval
       (let ((go (fn (self ps ks)
                   (if (null? ps) ()
@@ -1655,7 +1679,7 @@
         (let ((body2 (list (lit block)
                        (%cc-structs-subst
                          (%cc-globals-subst (first (rest body)) params)
-                         params kinds))))
+                         params kinds name))))
           ; the loop path first; its refusal is the informative one, so
           ; keep it for the X_CC_WHY report before the expression path
           ; answers with its own
