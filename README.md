@@ -166,12 +166,14 @@ lower too -- the answer is the address the result was built at, and
 the call boundary copies those cells into a fresh slot in the caller's
 frame, so `add(make(1, 2), make(3, 4))` cannot alias.
 
-What remains are the two the lane itself cannot express: a callee with
-a loop or recursion (it must inline, and an expression cannot loop),
-and a call through a function pointer.  Both need the JIT to call a
-prim held in a free variable -- its self-call already loads an address
-from a cell and branches to it, so the machinery is there; only naming
-another function is missing.
+What remains are the two the lane itself cannot express, both filed
+against the engine: a callee with a loop or its own recursion (it must
+inline, and an expression cannot loop) needs `compile-asm` to call a
+prim named at compile time, `jonruttan/x-lang#603`; a call through a
+function pointer needs one chosen at run time,
+`jonruttan/x-lang#604`.  The machinery is close -- the self-call
+already builds an args list and branches to an address it loads, and
+free variables already carry objects into compiled code.
 
 Paired with x-lang v0.10.0 (`lang.xon` is the checkable row).
 
