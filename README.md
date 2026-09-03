@@ -77,8 +77,9 @@ function-pointer types, byte-accurate sizeof.
 
 `build` lowers the ELIGIBLE functions through the engine's compile-asm
 lane to NATIVE machine code, no external toolchain; the rest stay
-interpreted (sha256.x's adoption pattern: refuse, fall back).  Two body
-shapes lower: `if`/`return` recursion (fib), and **loops** -- a
+interpreted (sha256.x's adoption pattern: refuse, fall back).  Three
+body shapes lower: `if`/`return` recursion (fib), straight-line
+assignments ending in a return, and **loops** -- a
 `{ decls; while|for; return }` function transforms into tail self-
 recursion, parameters and accumulators alike riding the self-call with
 their folded new values (accumulators' literal inits by arg-padding).
@@ -127,11 +128,16 @@ SELF-CALL is limited to four, which it must fill completely.  So an
 eight-parameter leaf is native, a five-parameter recursion is not, and
 a loop past four threaded variables spills the rest -- parameters
 included, the call passing only what the lane kept.  `X_CC_WHY=1`
-reports why each refused function refused, both paths.  What remains,
-each a recorded pending: a straight-line body (assignments then a
-return, neither shape), recursion of more than four parameters,
-callees with loops or recursion, calls through pointers, and struct
-kinds.
+reports why each refused function refused, both paths.
+
+A **third body shape** lowers as well: assignments and a return, with
+no `if`/`return` ladder and no loop.  The same fold takes it, and
+without a self-call nothing needs a lane slot -- every local is
+substitution-only and an assigned parameter threads through the map --
+so a rotation through a temp, an early return and a swap through
+memory all go native.  What remains, each a recorded pending and each
+the lane's own: recursion of more than four parameters, callees with
+loops or recursion, calls through pointers, and struct kinds.
 
 Paired with x-lang v0.10.0 (`lang.xon` is the checkable row).
 

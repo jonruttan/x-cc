@@ -55,6 +55,8 @@
 ;      the lowered arguments (%cc-inline); in a loop body a cross-call
 ;      evaluates at its program point through a temp, so its reads
 ;      order against the stores.
+;   3b. STRAIGHT-LINE bodies -- assignments then a return -- take the
+;      same fold with no self-call at all (%cc-lower-straight).
 ;   4. GLOBALS are memory at a known address (%cc-globals-subst): a
 ;      scalar reads and writes as *(ADDR), an array is its base.
 ; What stays interpreted, each a recorded pending: a RECURSIVE
@@ -1345,6 +1347,48 @@
                   (list "?")))))
           (self (rest effs)))))))
 
+; --- the straight-line path --------------------------------------------------
+; A body of assignments and a return: no if/return ladder, no loop.
+; The loop fold already models exactly this -- statements folded into
+; a map over the parameters, memory reads and writes as ordered
+; effects, a `return` as a guarded exit -- and without a self-call
+; nothing needs a lane slot: every local is substitution-only and an
+; assigned parameter just threads through the map.  A `break` or
+; `continue` has no enclosing loop here, and refuses: the context
+; carries no break target and no name to call.
+(def %cc-lower-straight
+  (fn (_ name params body)
+    (set! %cc-inline-stack (list name))
+    (set! %cc-fold-name name)
+    (def st
+      (%cc-fold-stmts (first (rest body)) (%cc-st () () () () ())
+        params (list () () "")))
+    (def effs (%cc-st-effects st))
+    (def exits (%cc-st-exits st))
+    (if (null? exits) (%cc-no "a path falls off the end"))
+    ; the exits, last to first; the body ends in a return, so the
+    ; unconditional one always replaces this tail
+    (def wrap
+      (fn (self2 es)
+        (if (null? es) 0
+          (let ((e (first es)))
+            (if (eq? (first (first e)) (lit num))
+              (%cc-lower-e (rest e) name params)
+              (list (lit if) (%cc-lower-e (first e) name params)
+                (%cc-lower-e (rest e) name params)
+                (self2 (rest es))))))))
+    (list
+      (pair (lit fn)
+        (pair (pair (convert name %symbol)
+                (map (fn (_ p) (convert p %symbol)) params))
+          (list
+            (if (%cc-real-effects? effs)
+              (%cc-stream-do effs name params 0)
+              (wrap exits)))))
+      ()
+      ()
+      (length params))))
+
 ; the expression-body path: fib and friends, no padding
 (def %cc-lower-expr-fun
   (fn (_ name params body)
@@ -1381,7 +1425,8 @@
           ; keep it for the X_CC_WHY report before the expression path
           ; answers with its own
           (guard (e (do (set! %cc-loop-why e)
-                        (%cc-lower-expr-fun name params body2)))
+                        (guard (e2 (%cc-lower-straight name params body2))
+                          (%cc-lower-expr-fun name params body2))))
             (%cc-lower-loop name params body2))))))
 
 ; try every function; the guard is the adoption rule -- refuse, stay

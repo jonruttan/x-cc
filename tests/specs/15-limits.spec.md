@@ -22,7 +22,7 @@ what the interpreter prints.
 ```
 ---
 ```output
-interp bump
+native bump
 native fill
 native sumsq
 native under

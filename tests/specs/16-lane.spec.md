@@ -55,21 +55,3 @@ interp main
 12345678 20 10 434 37
 0
 ```
-
-## the refusal
-
-### a straight-line body is neither shape
-
-A body of assignments and a return has no `if`/`return` ladder and no
-loop, so neither path takes it -- the recorded pending.
-
-```cc
-(display (cc-build-run "#include <stdio.h>\nint compound(int x) { x <<= 2; x |= 7; x ^= 255; x &= 1023; x >>= 1; return x; }\nint main() { printf(\"%d\\n\", compound(9)); return 0; }"))
-```
----
-```output
-interp compound
-interp main
-108
-0
-```
