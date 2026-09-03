@@ -44,4 +44,25 @@ SPEC_PATH="${SPEC_PATH:-$BUNDLE/tests/specs}"
 # reason rather than rediscovering it.
 export SPEC_SEAM_COLLECT=0
 
+# AND THEREFORE A HIGHER CEILING, which is the other half of that knob rather
+# than an unrelated setting.  Nothing collects between snippets, so a batch's
+# allocation is the SUM of its snippets -- and this bundle's are the most
+# allocating in the fleet: every `build` case compiles C to native through the
+# engine's compile lane, and since x-engine-c v0.2.2 the lane KEEPS the bytes
+# it emits rather than recompiling them.  That is a deliberate trade (a warm
+# process never recompiles) and it is retained memory all the same.
+#
+# The platform's default is 300,000,000 objects.  Measured on this suite
+# against v0.2.2: 300M gives 17 failures, 330M gives 14, and 380M gives none --
+# all of them `allocation limit exceeded`, never a wrong answer.  600M is that
+# measured floor with roughly half again on top, which is the headroom
+# a number like this wants: enough that a case growing a little does not turn
+# into a mystery, small enough to still be a guard.  The ceiling exists because
+# a runaway here takes the machine down, so raising it is not free and it is
+# not raised further than the measurement asks.
+#
+# Overridable, like the platform's own: an operator narrowing this down wants
+# to move it without editing the file.
+export X_ALLOC_LIMIT_OBJS="${X_ALLOC_LIMIT_OBJS:-600000000}"
+
 . "$X_ROOT/tests/spec-runner.sh"
