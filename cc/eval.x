@@ -72,6 +72,12 @@
                 (if (= (rest (first es)) id) (first (first es)) (self (rest es))))))
     (go %cc-fun-ids)))
 
+; the arguments at the given positions, in order
+(def %cc-pick
+  (fn (_ l idxs)
+    (def nth (fn (self xs k) (if (null? xs) 0 (if (<= k 0) (first xs) (self (rest xs) (- k 1))))))
+    (map (fn (_ i) (nth l i)) idxs)))
+
 (def %cc-native
   (fn (_ name)
     (def go
@@ -623,22 +629,38 @@
 
 (set! %cc-call
   (fn (_ name args)
-    ; a native twin's entry is (pad entry . prim): the accumulator
-    ; inits (from build's loop transform) pad the call, so a C call of
-    ; arity k reaches a k+m-param lane function.  A pad slot is a
-    ; literal int, or a compiled init function over the parameters --
-    ; applied to the actual args, once, right here.  ENTRY, when
+    ; a native twin's entry is (keep pad entry . prim).  KEEP lists
+    ; WHICH of the C parameters the lane function takes: the lane has
+    ; four argument slots, and a parameter past them lives in a scratch
+    ; cell instead, so a 6-parameter C function may reach a 4-parameter
+    ; lane function.  The kept ones need not be a prefix -- a recursion
+    ; hoists whichever parameters it never changes.  The accumulator inits (from build's
+    ; loop transform) pad the call after those.  A pad slot is a
+    ; literal int, or a compiled init function over ALL the parameters
+    ; -- applied to the actual args, once, right here.  ENTRY, when
     ; present, is the entry effects (the spilled variables' initial
-    ; stores) as a compiled function over the parameters, run first.
-    (let ((entry (%cc-native name)))
-      (if (null? entry)
+    ; stores) as a compiled function over all the parameters, run first.
+    (let ((e (%cc-native name)))
+      (if (null? e)
         (%cc-call-interp name args)
-        (do (if (null? (first (rest entry))) ()
-              (apply (first (rest entry)) args))
-            (apply (rest (rest entry))
-              (append args
-                (map (fn (_ p) (if (number? p) p (apply p args)))
-                  (first entry)))))))))
+        (let ((keep (first e)))
+          (def pad (first (rest e)))
+          (def entry (first (rest (rest e))))
+          (def retsize (first (rest (rest (rest e)))))
+          (def prim (rest (rest (rest (rest e)))))
+          (def v
+            (do (if (null? entry) () (apply entry args))
+                (apply prim
+                  (append (%cc-pick args keep)
+                    (map (fn (_ p) (if (number? p) p (apply p args)))
+                      pad)))))
+          ; a struct answer is an address the twin built at; copy it
+          ; into a fresh slot in THIS frame, so a second call to the
+          ; same function cannot overwrite the first one's result
+          (if (= retsize 0) v
+            (let ((vals (%cc-read-cells v retsize)))
+              (def tmp (%cc-alloca retsize))
+              (do (%cc-write-cells! tmp vals) tmp))))))))
 
 ; --- statements --------------------------------------------------------------
 ; control: () | (return V) | (break) | (continue)

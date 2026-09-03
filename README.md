@@ -77,8 +77,9 @@ function-pointer types, byte-accurate sizeof.
 
 `build` lowers the ELIGIBLE functions through the engine's compile-asm
 lane to NATIVE machine code, no external toolchain; the rest stay
-interpreted (sha256.x's adoption pattern: refuse, fall back).  Two body
-shapes lower: `if`/`return` recursion (fib), and **loops** -- a
+interpreted (sha256.x's adoption pattern: refuse, fall back).  Three
+body shapes lower: `if`/`return` recursion (fib), straight-line
+assignments ending in a return, and **loops** -- a
 `{ decls; while|for; return }` function transforms into tail self-
 recursion, parameters and accumulators alike riding the self-call with
 their folded new values (accumulators' literal inits by arg-padding).
@@ -118,10 +119,61 @@ recursive, and a matrix product with a store between its levels goes
 native.  `x -l cc -- build prog.c` reports each function's verdict and
 runs, same output as `run`: fib(24) 67s -> 10.5s wall, a
 2,000,000-iteration loop 79s -> 9.5s (the loop itself at machine speed
-under the boot).  What remains is the lane's own contract: more than
-four parameters, callees with loops or recursion, calls through
-pointers, bitwise operators and struct kinds stay interpreted -- the
-recorded pendings.
+under the boot).  The **bitwise family lowers too** -- `&` `|` `^`
+`<<` `>>` are single ARM64 instructions, and `>>` is arithmetic, so it
+matches C on a signed word -- which makes shift-and-mask code (a
+djb2 hash, a popcount loop) native.  **Arity**, measured rather than
+assumed: a lane function takes any number of parameters, and only a
+SELF-CALL is limited to four, which it must fill completely.  So an
+eight-parameter leaf is native, a five-parameter recursion is not, and
+a loop past four threaded variables spills the rest -- parameters
+included, the call passing only what the lane kept.  `X_CC_WHY=1`
+reports why each refused function refused, both paths.
+
+A **third body shape** lowers as well: assignments and a return, with
+no `if`/`return` ladder and no loop.  The same fold takes it, and
+without a self-call nothing needs a lane slot -- every local is
+substitution-only and an assigned parameter threads through the map --
+so a rotation through a temp, an early return and a swap through
+memory all go native.
+
+**Struct fields lower too.**  The lane has no notion of a field, but
+the cell model already says where one lives: a struct value IS its
+address, and a field is a fixed offset from it, so before lowering
+every `.` and `->` becomes explicit arithmetic -- `p->x` is
+`*(p + off)`, `a[i].y` is `*(a + i*size + off)` -- and the load and
+store machinery takes it from there.  A pointer walk down a linked
+list, a sum over an array of structs, and a function reading two
+by-value struct parameters are all native.  Writing through a POINTER
+is the point and is allowed; assigning a field of a BY-VALUE parameter
+would write the caller's copy, so it refuses.
+
+**Local aggregates** get storage in the same pass: an array or struct
+declared in a function takes a block of scratch cells, its name stands
+for the base, and the declaration goes away -- one block per function
+rather than per frame, so a genuinely recursive function with one
+refuses while a loop function (same frame) is fine.  Because the pass
+is shared, a local array now works in a straight-line body as well as
+a loop, and an array of structs indexes with the right stride.
+
+**Recursion past four parameters** lowers when it can: a self-call
+must pass every parameter and takes at most four, but a parameter
+every self-call passes along UNCHANGED holds the same value in every
+frame, so it is hoisted into a cell written once at entry and the
+self-call carries only the ones that vary.  A recursion whose
+parameters all vary stays interpreted.  **Structs returned by value**
+lower too -- the answer is the address the result was built at, and
+the call boundary copies those cells into a fresh slot in the caller's
+frame, so `add(make(1, 2), make(3, 4))` cannot alias.
+
+What remains are the two the lane itself cannot express, both filed
+against the engine: a callee with a loop or its own recursion (it must
+inline, and an expression cannot loop) needs `compile-asm` to call a
+prim named at compile time, `jonruttan/x-lang#603`; a call through a
+function pointer needs one chosen at run time,
+`jonruttan/x-lang#604`.  The machinery is close -- the self-call
+already builds an args list and branches to an address it loads, and
+free variables already carry objects into compiled code.
 
 Paired with x-lang v0.10.0 (`lang.xon` is the checkable row).
 

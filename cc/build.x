@@ -8,9 +8,16 @@
 ;
 ; THE ELIGIBLE CLASS: a C function lowers to the engine's JIT when it
 ; is integers all the way -- int parameters, expressions over params,
-; literals, + - * / % comparisons && || ! ~ the ternary, and calls to
-; ITSELF (max 4 lane args -- the trampoline rule; self-recursion rides
-; the fn's first-param name, x-lang#583's slot-0 convention).  Two body
+; literals, + - * / % & | ^ << >> comparisons && || ! ~ the ternary,
+; and calls to ITSELF (self-recursion rides the fn's first-param name,
+; x-lang#583's slot-0 convention).
+;
+; THE LANE'S ONE ARITY RULE, measured rather than assumed: a lane
+; function may take ANY number of parameters, but a SELF-CALL takes at
+; most four -- and it must pass every parameter the function has, or
+; the callee binds garbage and segfaults.  So a non-recursive function
+; has no limit, while anything riding a self-call (every loop) fits
+; four threaded variables, the rest spilling to cells.  Two body
 ; shapes lower:
 ;   1. if/return/blocks -- fib and friends (%cc-lower-expr-fun)
 ;   2. { decls; while|for; return } -- LOOPS, transformed to tail
@@ -48,11 +55,15 @@
 ;      the lowered arguments (%cc-inline); in a loop body a cross-call
 ;      evaluates at its program point through a temp, so its reads
 ;      order against the stores.
+;   3b. STRAIGHT-LINE bodies -- assignments then a return -- take the
+;      same fold with no self-call at all (%cc-lower-straight).
 ;   4. GLOBALS are memory at a known address (%cc-globals-subst): a
 ;      scalar reads and writes as *(ADDR), an array is its base.
-; The lane's own limits remain: more than four parameters, callees
-; with loops or recursion, calls through pointers, bitwise operators,
-; and struct kinds stay interpreted -- recorded pendings.
+; What stays interpreted, each a recorded pending: a RECURSIVE
+; function of more than four parameters (its self-call cannot pass
+; them), callees with loops or recursion (a lane function calls only
+; itself, so a callee must inline), calls through pointers, and struct
+; kinds.
 ;
 ; Adoption is sha256.x's pattern: the whole attempt sits in a guard;
 ; a function that will not lower or will not compile simply stays
@@ -92,7 +103,7 @@
         (let ((n (first (rest node))))
           (if (%cc-member-str? n params)
             (convert n %symbol)
-            (%cc-no "free variable")))
+            (%cc-no (string-append "free variable: " n))))
       (if (eq? t (lit bin))
         (let ((op (first (rest node))))
           (def a (self (first (rest (rest node))) fname params))
@@ -102,7 +113,12 @@
               (if (string=? op "*") (list (lit *) a b)
                 (if (string=? op "/") (list (lit /) a b)
                   (if (string=? op "%") (list (lit %) a b)
-                    (%cc-no "bitwise is not in the lane yet")))))))
+                    (if (string=? op "&") (list (lit &) a b)
+                      (if (string=? op "|") (list (lit |) a b)
+                        (if (string=? op "^") (list (lit ^) a b)
+                          (if (string=? op "<<") (list (lit <<) a b)
+                            (if (string=? op ">>") (list (lit >>) a b)
+                              (%cc-no "unknown operator"))))))))))))
       (if (eq? t (lit cmp))
         (let ((op (first (rest node))))
           (def a (self (first (rest (rest node))) fname params))
@@ -211,8 +227,9 @@
           (def ret (let ((r (rest (rest (rest f))))) (if (null? r) (lit scalar) (first r))))
           (if (not (= (length cparams) (length largs)))
             (%cc-no "a call with the wrong arity"))
-          (if (if (pair? ret) #t (not (null? (filter pair? kinds))))
-            (%cc-no "struct kinds stay interpreted"))
+          (if (if (pair? ret) #t
+                (not (null? (filter (fn (_ k) (not (%cc-cellish? k))) kinds))))
+            (%cc-no "a struct return or aggregate parameter does not inline"))
           (%cc-check-names callee cparams)
           (set! %cc-inline-stack (pair callee %cc-inline-stack))
           (def lowered
@@ -561,7 +578,8 @@
           (let ((name (first (rest s))))
             (def kind (first (rest (rest s))))
             (def init (first (rest (rest (rest s)))))
-            (if (pair? kind) (%cc-no "array local in a loop body"))
+            (if (not (%cc-cellish? kind))
+              (%cc-no "an array or struct local in a body"))
             (def r (if (null? init) (pair () effs) (%cc-extract init m effs)))
             (self (rest stmts)
               (%cc-st (if (null? init) m
@@ -595,7 +613,7 @@
                 (if (null? a) (%cc-no "loop body: a statement that is not an assignment")
                   (if (not (if (%cc-member-str? (first a) ext) #t
                              (%cc-member-str? (first a) locals)))
-                    (%cc-no "loop assigns an unknown variable")
+                    (%cc-no (string-append "loop assigns an unknown variable: " (first a)))
                     (let ((r (%cc-extract (rest a) m effs)))
                       (self (rest stmts)
                         (%cc-st (%cc-put-str (first a) (%cc-subst (first r) m) m)
@@ -938,37 +956,9 @@
   (fn (_ name params body)
     (set! %cc-inline-stack (list name))
     (set! %cc-fold-name name)
-    ; local ARRAYS: cells in the native scratch region, their names
-    ; substituted away as literal bases before anything else looks
-    (def stmts0 (first (rest body)))
-    (def array-decl?
-      (fn (_ st1)
-        (if (eq? (first st1) (lit decl)) (pair? (first (rest (rest st1)))) #f)))
-    ; a struct-kinded or struct-element local stays interpreted
-    (def check-kinds
-      (fn (self ss)
-        (if (null? ss) ()
-          (let ((st1 (first ss)))
-            (if (if (eq? (first st1) (lit decl)) (pair? (first (rest (rest st1)))) #f)
-              (let ((k (first (rest (rest st1)))))
-                (if (if (eq? (first k) (lit array)) (null? (rest (rest k))) #f)
-                  (self (rest ss))
-                  (%cc-no "struct kinds stay interpreted")))
-              (self (rest ss)))))))
-    (check-kinds stmts0)
-    (def arr-sub
-      (map (fn (_ d)
-             ; the array's name substitutes away and its decl is dropped,
-             ; so an initializer would be lost: refuse, stay interpreted
-             (if (not (null? (first (rest (rest (rest d))))))
-               (%cc-no "an initialized local array stays interpreted"))
-             (pair (first (rest d))
-               (list (lit num)
-                 (%cc-new-cells (first (rest (first (rest (rest d)))))))))
-        (filter array-decl? stmts0)))
-    (def stmts1
-      (%cc-subst-stmts (filter (fn (_ st1) (not (array-decl? st1))) stmts0)
-        arr-sub))
+    ; local aggregates already have their scratch blocks and their
+    ; names resolved (%cc-structs-subst, which every path shares)
+    (def stmts1 (first (rest body)))
     (def split (%cc-loop-split stmts1))
     (if (null? split) (%cc-no "not a decls+guards+loops+return shape")
       (let ((decls (first split)))
@@ -994,18 +984,35 @@
         (def accs0 (map (fn (_ d) (first (rest d))) decls))
         ; %ph first: it must keep its slot (a transition sets it)
         (def accs-all (if multi (pair "%ph" accs0) accs0))
-        ; SPILLS: the lane takes four arguments, so threaded variables
-        ; past the fourth live in scratch cells instead -- their names
-        ; substitute to *(CELL) through the loops and the return, and
-        ; they read and write as memory from there; their entry values
-        ; store at the call boundary (the entry effects, below).  The
-        ; last-declared spill first.
-        (if (> (length params) 4) (%cc-no "more than 4 parameters"))
-        (def room (- 4 (length params)))
+        ; SPILLS: every self-call passes all of the lane's four
+        ; argument slots, so THREADED VARIABLES past the fourth --
+        ; parameters and accumulators alike -- live in scratch cells
+        ; instead: their names substitute to *(CELL) through the loops,
+        ; the guards and the return, they read and write as memory from
+        ; there, and their entry values store at the call boundary (the
+        ; entry effects, below).  Parameters keep the slots first, then
+        ; accumulators.  A spilled PARAMETER is one the lane function
+        ; never takes, so the call passes fewer arguments than the C
+        ; function has -- %cc-call reads the kept count from the table.
         (def take (fn (self2 l n) (if (if (null? l) #t (<= n 0)) () (pair (first l) (self2 (rest l) (- n 1))))))
         (def drop (fn (self2 l n) (if (if (null? l) #t (<= n 0)) l (self2 (rest l) (- n 1)))))
+        ; the phase counter is assigned by a transition built after the
+        ; substitution, so it can never be one of the spilled names:
+        ; sequential loops reserve its slot, a parameter spilling to
+        ; make room
+        ; ONE count for both sides: keeping N parameters and spilling
+        ; all but the first N are the same decision, and splitting them
+        ; left the (multi) 4th parameter neither kept nor spilled -- a
+        ; free variable at lowering
+        (def pkeep (if multi 3 4))
+        (def kept-params (take params pkeep))
+        (def room (- 4 (length kept-params)))
+        (if (if multi (< room 1) #f)
+          (%cc-no "no lane slot for the phase counter"))
         (def accs (take accs-all room))
-        (def spill-cells (map (fn (_ v) (pair v (%cc-new-cells 1))) (drop accs-all room)))
+        (def spill-cells
+          (map (fn (_ v) (pair v (%cc-new-cells 1)))
+            (append (drop params pkeep) (drop accs-all room))))
         (def spill-sub
           (map (fn (_ sc) (pair (first sc) (list (lit un) "*" (list (lit num) (rest sc)))))
             spill-cells))
@@ -1068,7 +1075,7 @@
             (if (null? vs) #t
               (if (%cc-member-str? (first vs) params)
                 (self2 (rest vs)) #f))))
-        (def ext (append params accs))
+        (def ext (append kept-params accs))
         (def lret (%cc-lower-e ret-e name ext))
         ; a self-call cexpr from map M: every threadable variable takes
         ; its folded value, or rides through unchanged
@@ -1098,10 +1105,6 @@
           (fn (_ st2 what)
             (if (null? (%cc-st-exits st2)) st2
               (%cc-no (string-append what " may not exit")))))
-        (def no-effects!
-          (fn (_ st2 what)
-            (if (null? (%cc-st-effects st2)) st2
-              (%cc-no (string-append what " may not store")))))
         ; a body's effects run in a `do` before its tail; a body that
         ; both stores and exits lowers as the ordered STREAM, each exit
         ; tested in its place among the stores (%cc-stream-do)
@@ -1199,20 +1202,20 @@
                             (list (lit assign) (list (lit var) "%ph")
                               (list (lit num) (- k 1)))))))))
             (def st
-              (no-effects!
-                (no-exits!
-                  (%cc-fold-stmts stmts (%cc-st () () () () ()) ext
-                    (list ret-e () name))
-                  "a transition between loops")
+              (no-exits!
+                (%cc-fold-stmts stmts (%cc-st () () () () ()) ext
+                  (list ret-e () name))
                 "a transition between loops"))
-            (call-from (first st))))
+            ; (call . effects): the next loop's init may STORE (its
+            ; counter spilled to a cell), and those run before the call
+            (pair (call-from (first st)) (%cc-st-effects st))))
         ; the loops from the k-th on, selecting on the phase: (expr . assigned)
         (def build-loops
           (fn (self2 items k)
             (if (null? (rest items))
               (one-loop (rest (first items)) ret-e ())
-              (let ((r (one-loop (rest (first items))
-                         (trans-into (+ k 1) (first (rest items))) ())))
+              (let ((r (let ((tr (trans-into (+ k 1) (first (rest items)))))
+                         (one-loop (rest (first items)) (first tr) (rest tr)))))
                 (def rr (self2 (rest items) (+ k 1)))
                 (pair
                   (list (lit if)
@@ -1275,7 +1278,9 @@
         (def guarded
           (fn (self2 gs)
             (if (null? gs) loop-expr
-              (let ((g (first gs)))
+              (let ((g (let ((g0 (first gs)))
+                         (pair (%cc-subst (first g0) spill-sub)
+                           (%cc-subst (rest g0) spill-sub)))))
                 (if (not (invariant?
                            (append (%cc-free-vars (first g))
                              (%cc-free-vars (rest g)))))
@@ -1294,7 +1299,8 @@
                     (map (fn (_ v) (convert v %symbol)) ext))
               (list (guarded guards))))
           inits
-          entry)))))
+          entry
+          (%cc-iota (length kept-params)))))))
 
 ; the variable names an effect list reads (dupes fine)
 (def %cc-effs-free-vars
@@ -1315,19 +1321,491 @@
                   (list "?")))))
           (self (rest effs)))))))
 
+; --- structs: field access as address arithmetic -----------------------------
+; The lane has no notion of a field, but the cell model already says
+; where one lives: a struct value IS its address, and a field is a
+; fixed offset from it.  So before lowering, every `.` and `->` becomes
+; explicit arithmetic over the shared memory -- `p->x` is `*(p + off)`,
+; `a[i].y` is `*(a + i*size + off)` -- and the existing load/store
+; machinery takes it from there.
+;
+; The one semantic trap is a struct passed BY VALUE: the argument is
+; the caller's address, and C says the callee mutates a copy.  Reading
+; through the address is right, writing through it is not, so a
+; function that assigns a field of a by-value struct parameter refuses.
+; Through a POINTER, writing is the point, and is allowed.
+;
+; Anything whose kind this cannot determine refuses rather than
+; guessing: an unscaled index into an array of structs would be
+; silently wrong, which is the worst thing a compiler can be.
+(def %cc-kind-env
+  (fn (self stmts acc)
+    (if (null? stmts) acc
+      (let ((s (first stmts)))
+        (def t (first s))
+        (self (rest stmts)
+          (if (eq? t (lit decl))
+            (pair (pair (first (rest s)) (first (rest (rest s)))) acc)
+            (if (eq? t (lit block)) (self (first (rest s)) acc)
+              (if (eq? t (lit if))
+                (self (list (first (rest (rest s))))
+                  (if (null? (first (rest (rest (rest s))))) acc
+                    (self (list (first (rest (rest (rest s))))) acc)))
+                (if (eq? t (lit while)) (self (list (first (rest (rest s)))) acc)
+                  (if (eq? t (lit for))
+                    (self (list (first (rest (rest (rest (rest s)))))) acc)
+                    (if (eq? t (lit do)) (self (list (first (rest s))) acc)
+                      acc)))))))))))
+
+(def %cc-env-kind
+  (fn (_ name env)
+    (def go (fn (self es)
+              (if (null? es) (lit scalar)
+                (if (string=? (first (first es)) name) (rest (first es))
+                  (self (rest es))))))
+    (go env)))
+
+(def %cc-struct? (fn (_ k) (if (pair? k) (eq? (first k) (lit struct)) #f)))
+
+; one cell: a scalar, or a pointer whatever it points at.  An array or
+; a struct is the one that needs storage.
+(def %cc-cellish?
+  (fn (_ k) (if (not (pair? k)) #t (eq? (first k) (lit ptr)))))
+
+; the kind of an expression, statically
+(def %cc-lk
+  (fn (self node env)
+    (let ((t (first node)))
+      (if (eq? t (lit var)) (%cc-env-kind (first (rest node)) env)
+      (if (eq? t (lit idx)) (%cc-kind-elem (self (first (rest node)) env))
+      (if (eq? t (lit dot))
+        (let ((k (self (first (rest node)) env)))
+          (if (not (%cc-struct? k)) (%cc-no "a field of something not a struct")
+            (let ((f (%cc-field (first (rest k)) (first (rest (rest node))))))
+              (if (null? f) (%cc-no "no such field") (rest f)))))
+      (if (eq? t (lit arrow))
+        (let ((k (%cc-kind-elem (self (first (rest node)) env))))
+          (if (not (%cc-struct? k)) (%cc-no "an arrow through something not a struct pointer")
+            (let ((f (%cc-field (first (rest k)) (first (rest (rest node))))))
+              (if (null? f) (%cc-no "no such field") (rest f)))))
+      (if (if (eq? t (lit un)) (string=? (first (rest node)) "*") #f)
+        (%cc-kind-elem (self (first (rest (rest node))) env))
+      (if (if (eq? t (lit bin))
+            (if (string=? (first (rest node)) "+") #t (string=? (first (rest node)) "-")) #f)
+        (let ((ka (self (first (rest (rest node))) env)))
+          (if (pair? ka) ka (lit scalar)))
+        (lit scalar))))))))))
+
+(def %cc-saddr ())
+(def %cc-sval ())
+
+; LOCAL AGGREGATES: an array or struct declared in a function needs
+; storage, and the native scratch region above the program's memory is
+; where it goes -- the name then stands for its base address, exactly
+; as a struct parameter does.  One block per function, not per frame,
+; so a genuinely recursive function with one refuses (its frames would
+; share the storage); a loop function's self-call is the same frame and
+; is fine.
+(def %cc-local-bases ())
+(def %cc-base-of
+  (fn (_ name)
+    (def go (fn (self es)
+              (if (null? es) ()
+                (if (string=? (first (first es)) name) (rest (first es))
+                  (self (rest es))))))
+    (go %cc-local-bases)))
+
+; the VALUE of a node, once fields are arithmetic: a struct or array
+; decays to its address, anything else reads
+(set! %cc-sval
+  (fn (_ node env)
+    (let ((k (%cc-lk node env)))
+      (if (%cc-kind-decays? k) (%cc-saddr node env)
+        (let ((t (first node)))
+          (if (if (eq? t (lit dot)) #t
+                (if (eq? t (lit arrow)) #t
+                  (if (eq? t (lit idx)) #t
+                    (if (eq? t (lit un)) (string=? (first (rest node)) "*") #f))))
+            (list (lit un) "*" (%cc-saddr node env))
+            node))))))
+
+; the ADDRESS a node names, as an expression over cells
+(set! %cc-saddr
+  (fn (_ node env)
+    (let ((t (first node)))
+      (if (eq? t (lit var))
+        ; a local aggregate IS its scratch block; a struct parameter
+        ; holds the caller's address
+        (let ((b (%cc-base-of (first (rest node)))))
+          (if (not (null? b)) (list (lit num) b)
+            (if (%cc-kind-decays? (%cc-env-kind (first (rest node)) env)) node
+              (%cc-no "the address of a scalar variable stays interpreted"))))
+      (if (eq? t (lit dot))
+        (let ((k (%cc-lk (first (rest node)) env)))
+          (def f (%cc-field (first (rest k)) (first (rest (rest node)))))
+          (list (lit bin) "+" (%cc-saddr (first (rest node)) env)
+            (list (lit num) (first f))))
+      (if (eq? t (lit arrow))
+        (let ((k (%cc-kind-elem (%cc-lk (first (rest node)) env))))
+          (def f (%cc-field (first (rest k)) (first (rest (rest node)))))
+          (list (lit bin) "+" (%cc-sval (first (rest node)) env)
+            (list (lit num) (first f))))
+      (if (eq? t (lit idx))
+        (let ((step (%cc-kind-size (%cc-kind-elem (%cc-lk (first (rest node)) env)))))
+          (def base (%cc-sval (first (rest node)) env))
+          (def i (%cc-sval (first (rest (rest node))) env))
+          (list (lit bin) "+" base
+            (if (= step 1) i (list (lit bin) "*" i (list (lit num) step)))))
+      (if (if (eq? t (lit un)) (string=? (first (rest node)) "*") #f)
+        (%cc-sval (first (rest (rest node))) env)
+        (%cc-no "not an address")))))))))
+
+; does any part of this expression mention a field?
+(def %cc-has-field?
+  (fn (self node)
+    (if (not (pair? node)) #f
+      (let ((t (first node)))
+        (if (if (eq? t (lit dot)) #t (eq? t (lit arrow))) #t
+          (let ((go (fn (self2 xs)
+                      (if (null? xs) #f
+                        (if (if (pair? (first xs)) (self (first xs)) #f) #t
+                          (self2 (rest xs)))))))
+            (go (rest node))))))))
+
+; the variable a place is rooted at, stopping at any dereference (past
+; one, the memory belongs to whatever the pointer names, not to us)
+(def %cc-lv-root
+  (fn (self node env)
+    (let ((t (first node)))
+      (if (eq? t (lit var)) (first (rest node))
+        (if (eq? t (lit dot)) (self (first (rest node)) env)
+          (if (if (eq? t (lit idx))
+                (let ((k (%cc-lk (first (rest node)) env)))
+                  (if (pair? k) (eq? (first k) (lit array)) #f))
+                #f)
+            (self (first (rest node)) env)
+            ()))))))
+
+; rewrite one expression: fields become arithmetic, everything else
+; keeps its shape
+(def %cc-srw
+  (fn (self node env byval)
+    (if (not (pair? node)) node
+      (let ((t (first node)))
+        (if (if (eq? t (lit dot)) #t (eq? t (lit arrow)))
+          (%cc-sval node env)
+        (if (eq? t (lit idx))
+          ; an index into an aggregate (a local array, an array of
+          ; structs) resolves to an address here, so the element size
+          ; scales; a plain `int *p` keeps the existing pointer shape
+          (let ((k (%cc-lk (first (rest node)) env)))
+            (if (%cc-kind-decays? k)
+              (%cc-sval node env)
+              (list (lit idx) (self (first (rest node)) env byval)
+                (self (first (rest (rest node))) env byval))))
+        (if (eq? t (lit assign))
+          (let ((root (%cc-lv-root (first (rest node)) env)))
+            (if (if (null? root) #f (%cc-member-str? root byval))
+              (%cc-no "a by-value struct parameter is assigned")
+              (list (lit assign) (self (first (rest node)) env byval)
+                (self (first (rest (rest node))) env byval))))
+        (if (eq? t (lit call))
+          (list (lit call) (first (rest node))
+            (map (fn (_ a) (self a env byval)) (first (rest (rest node)))))
+        (if (eq? t (lit var))
+          ; an aggregate's name decays to its address
+          (if (%cc-kind-decays? (%cc-lk node env)) (%cc-sval node env) node)
+        (if (if (eq? t (lit num)) #t (eq? t (lit str)))
+          node
+          (pair t (map (fn (_ x) (if (pair? x) (self x env byval) x))
+                    (rest node)))))))))))))
+
+(def %cc-srw-stmts ())
+(def %cc-srw-stmt
+  (fn (self s env byval)
+    (def e (fn (_ x) (if (null? x) () (%cc-srw x env byval))))
+    (let ((t (first s)))
+      (if (eq? t (lit expr)) (list (lit expr) (e (first (rest s))))
+      (if (eq? t (lit return)) (list (lit return) (e (first (rest s))))
+      (if (eq? t (lit block)) (list (lit block) (%cc-srw-stmts (first (rest s)) env byval))
+      (if (eq? t (lit if))
+        (list (lit if) (e (first (rest s)))
+          (self (first (rest (rest s))) env byval)
+          (if (null? (first (rest (rest (rest s))))) ()
+            (self (first (rest (rest (rest s)))) env byval)))
+      (if (eq? t (lit while))
+        (list (lit while) (e (first (rest s)))
+          (self (first (rest (rest s))) env byval))
+      (if (eq? t (lit for))
+        (list (lit for) (e (first (rest s))) (e (first (rest (rest s))))
+          (e (first (rest (rest (rest s)))))
+          (self (first (rest (rest (rest (rest s))))) env byval))
+      (if (eq? t (lit decl))
+        (list (lit decl) (first (rest s)) (first (rest (rest s)))
+          (e (first (rest (rest (rest s))))))
+        s))))))))))
+; an aggregate that got a scratch block declares nothing any more: its
+; statement goes, rather than becoming an empty one -- the loop split
+; reads the leading declarations positionally
+(set! %cc-srw-stmts
+  (fn (_ ss env byval)
+    (map (fn (_ s) (%cc-srw-stmt s env byval))
+      (filter (fn (_ s)
+                (if (eq? (first s) (lit decl))
+                  (null? (%cc-base-of (first (rest s))))
+                  #t))
+        ss))))
+
+; the whole pass: nothing to do unless a field appears somewhere
+(def %cc-structs-subst
+  (fn (_ stmts params kinds fname)
+    (def penv
+      (let ((go (fn (self ps ks)
+                  (if (null? ps) ()
+                    (pair (pair (first ps) (if (null? ks) (lit scalar) (first ks)))
+                      (self (rest ps) (if (null? ks) () (rest ks))))))))
+        (go params kinds)))
+    (def env (%cc-kind-env stmts penv))
+    ; storage for the local aggregates, before anything reads a name
+    (set! %cc-local-bases ())
+    (def aggregate?
+      (fn (_ st1)
+        (if (eq? (first st1) (lit decl))
+          (let ((k (first (rest (rest st1)))))
+            (if (pair? k) (not (eq? (first k) (lit ptr))) #f))
+          #f)))
+    (def recurses?
+      (let ((go (fn (self n)
+                  (if (not (pair? n)) #f
+                    (if (if (pair? (first n)) #f
+                          (if (eq? (first n) (lit call))
+                            (string=? (first (rest n)) fname) #f))
+                      #t
+                      (let ((any (fn (self2 xs)
+                                   (if (null? xs) #f
+                                     (if (if (pair? (first xs)) (self (first xs)) #f) #t
+                                       (self2 (rest xs)))))))
+                        (any (%cc-kids n))))))))
+        (go (pair (lit block) (list stmts)))))
+    (map (fn (_ d)
+           (if (not (null? (first (rest (rest (rest d))))))
+             (%cc-no "an initialized local aggregate stays interpreted"))
+           (if recurses?
+             (%cc-no "a recursive function's local aggregate would share frames"))
+           (set! %cc-local-bases
+             (pair (pair (first (rest d))
+                     (%cc-new-cells (%cc-kind-size (first (rest (rest d))))))
+               %cc-local-bases)))
+      (filter aggregate? stmts))
+    (def byval
+      (let ((go (fn (self ps ks)
+                  (if (null? ps) ()
+                    (if (%cc-struct? (if (null? ks) (lit scalar) (first ks)))
+                      (pair (first ps) (self (rest ps) (if (null? ks) () (rest ks))))
+                      (self (rest ps) (if (null? ks) () (rest ks))))))))
+        (go params kinds)))
+    (%cc-srw-stmts stmts env byval)))
+
+; --- the straight-line path --------------------------------------------------
+; A body of assignments and a return: no if/return ladder, no loop.
+; The loop fold already models exactly this -- statements folded into
+; a map over the parameters, memory reads and writes as ordered
+; effects, a `return` as a guarded exit -- and without a self-call
+; nothing needs a lane slot: every local is substitution-only and an
+; assigned parameter just threads through the map.  A `break` or
+; `continue` has no enclosing loop here, and refuses: the context
+; carries no break target and no name to call.
+(def %cc-lower-straight
+  (fn (_ name params body)
+    (set! %cc-inline-stack (list name))
+    (set! %cc-fold-name name)
+    (def st
+      (%cc-fold-stmts (first (rest body)) (%cc-st () () () () ())
+        params (list () () "")))
+    (def effs (%cc-st-effects st))
+    (def exits (%cc-st-exits st))
+    (if (null? exits) (%cc-no "a path falls off the end"))
+    ; the exits, last to first; the body ends in a return, so the
+    ; unconditional one always replaces this tail
+    (def wrap
+      (fn (self2 es)
+        (if (null? es) 0
+          (let ((e (first es)))
+            (if (eq? (first (first e)) (lit num))
+              (%cc-lower-e (rest e) name params)
+              (list (lit if) (%cc-lower-e (first e) name params)
+                (%cc-lower-e (rest e) name params)
+                (self2 (rest es))))))))
+    (list
+      (pair (lit fn)
+        (pair (pair (convert name %symbol)
+                (map (fn (_ p) (convert p %symbol)) params))
+          (list
+            (if (%cc-real-effects? effs)
+              (%cc-stream-do effs name params 0)
+              (wrap exits)))))
+      ()
+      ()
+      (%cc-iota (length params)))))
+
+; --- recursion past four parameters: hoisting the invariant ones -------------
+; A self-call must pass every parameter the function has, and takes at
+; most four.  But a parameter that EVERY self-call passes along
+; unchanged has the same value in every frame, so it does not need a
+; slot at all: it can live in one scratch cell, written once at entry.
+; The varying parameters keep their slots and the self-call passes only
+; those.  A parameter the recursion actually changes cannot be hoisted
+; -- each frame would need its own cell -- so if too few are invariant,
+; the function stays interpreted.
+(def %cc-iota
+  (fn (self n) (if (<= n 0) () (append (self (- n 1)) (list (- n 1))))))
+
+(def %cc-nth
+  (fn (self l n) (if (null? l) () (if (<= n 0) (first l) (self (rest l) (- n 1))))))
+
+(def %cc-member-int?
+  (fn (_ x l)
+    (def go (fn (self es) (if (null? es) #f (if (= (first es) x) #t (self (rest es))))))
+    (go l)))
+
+; the sub-nodes of a form.  A TAGGED node is (tag . children), but a
+; plain LIST of nodes -- a statement list, a call's arguments -- has a
+; node in first position, and walking (rest ...) there silently skips
+; it.  That bug hid every self-call in a function's first statement.
+(def %cc-kids
+  (fn (_ node) (if (pair? (first node)) node (rest node))))
+
+; every self-call's argument list, from a statement tree
+(def %cc-selfcalls
+  (fn (self node fname)
+    (if (not (pair? node)) ()
+      (let ((here
+              (if (if (pair? (first node)) #f (eq? (first node) (lit call)))
+                (if (string=? (first (rest node)) fname)
+                  (list (first (rest (rest node)))) ())
+                ())))
+        (def go (fn (self2 xs)
+                  (if (null? xs) ()
+                    (append (self (first xs) fname) (self2 (rest xs))))))
+        (append here (go (%cc-kids node)))))))
+
+; the parameter positions every self-call passes through untouched
+(def %cc-invariant-args
+  (fn (_ params calls)
+    (def n (length params))
+    (filter
+      (fn (_ i)
+        (let ((go (fn (self cs)
+                    (if (null? cs) #t
+                      (let ((a (%cc-nth (first cs) i)))
+                        (if (if (pair? a)
+                              (if (eq? (first a) (lit var))
+                                (string=? (first (rest a)) (%cc-nth params i)) #f)
+                              #f)
+                          (self (rest cs)) #f))))))
+          (go calls)))
+      (%cc-iota n))))
+
+; substitute the hoisted parameters and drop their argument positions
+(def %cc-hoist-rw ())
+(def %cc-hoist-rw-stmt
+  (fn (self s hsub keep fname)
+    (def e (fn (_ x) (if (null? x) () (%cc-hoist-rw x hsub keep fname))))
+    (let ((t (first s)))
+      (if (eq? t (lit expr)) (list (lit expr) (e (first (rest s))))
+      (if (eq? t (lit return)) (list (lit return) (e (first (rest s))))
+      (if (eq? t (lit block))
+        (list (lit block) (map (fn (_ x) (self x hsub keep fname)) (first (rest s))))
+      (if (eq? t (lit if))
+        (list (lit if) (e (first (rest s)))
+          (self (first (rest (rest s))) hsub keep fname)
+          (if (null? (first (rest (rest (rest s))))) ()
+            (self (first (rest (rest (rest s)))) hsub keep fname)))
+      (if (eq? t (lit while))
+        (list (lit while) (e (first (rest s)))
+          (self (first (rest (rest s))) hsub keep fname))
+      (if (eq? t (lit for))
+        (list (lit for) (e (first (rest s))) (e (first (rest (rest s))))
+          (e (first (rest (rest (rest s)))))
+          (self (first (rest (rest (rest (rest s))))) hsub keep fname))
+      (if (eq? t (lit decl))
+        (list (lit decl) (first (rest s)) (first (rest (rest s)))
+          (e (first (rest (rest (rest s))))))
+        s))))))))))
+(set! %cc-hoist-rw
+  (fn (self node hsub keep fname)
+    (if (not (pair? node)) node
+      (let ((t (first node)))
+        (if (eq? t (lit var))
+          (let ((r (%cc-assoc-str (first (rest node)) hsub)))
+            (if (null? r) node (rest r)))
+        (if (if (eq? t (lit call)) (string=? (first (rest node)) fname) #f)
+          (let ((args (first (rest (rest node)))))
+            (list (lit call) fname
+              (map (fn (_ i) (self (%cc-nth args i) hsub keep fname)) keep)))
+        (if (eq? t (lit call))
+          (list (lit call) (first (rest node))
+            (map (fn (_ a) (self a hsub keep fname)) (first (rest (rest node)))))
+        (if (if (eq? t (lit num)) #t (eq? t (lit str))) node
+          (pair t (map (fn (_ x) (if (pair? x) (self x hsub keep fname) x))
+                    (rest node)))))))))))
+
+; answers (params' stmts' entry-effects keep), or refuses
+(def %cc-hoist-invariant
+  (fn (_ name params stmts)
+    (def calls (%cc-selfcalls (pair (lit block) (list stmts)) name))
+    (if (null? calls) (%cc-no "no self-call to hoist around"))
+    (def n (length params))
+    (def inv (%cc-invariant-args params calls))
+    (def need (- n 4))
+    (if (< (length inv) need)
+      (%cc-no "recursion past four parameters, too few of them invariant"))
+    ; hoist the LAST invariant ones: the earlier parameters are the
+    ; ones a reader expects to see change
+    (def drop-n (fn (self l k) (if (<= k 0) l (if (null? l) () (self (rest l) (- k 1))))))
+    (def hoisted (drop-n inv (- (length inv) need)))
+    (def keep (filter (fn (_ i) (not (%cc-member-int? i hoisted))) (%cc-iota n)))
+    (def cells (map (fn (_ i) (pair i (%cc-new-cells 1))) hoisted))
+    (def hsub
+      (map (fn (_ c)
+             (pair (%cc-nth params (first c))
+               (list (lit un) "*" (list (lit num) (rest c)))))
+        cells))
+    (def entry-effs
+      (map (fn (_ c)
+             (list (lit store) (list (lit num) (rest c))
+               (list (lit var) (%cc-nth params (first c)))))
+        cells))
+    (list (map (fn (_ i) (%cc-nth params i)) keep)
+      (map (fn (_ s) (%cc-hoist-rw-stmt s hsub keep name)) stmts)
+      entry-effs
+      keep)))
+
 ; the expression-body path: fib and friends, no padding
 (def %cc-lower-expr-fun
   (fn (_ name params body)
     (set! %cc-inline-stack (list name))
+    (def stmts (first (rest body)))
+    ; more parameters than a self-call can carry: hoist the ones the
+    ; recursion never changes into cells, written once at entry
+    (def h (if (> (length params) 4) (%cc-hoist-invariant name params stmts) ()))
+    (def params2 (if (null? h) params (first h)))
+    (def stmts2 (if (null? h) stmts (first (rest h))))
+    (def effs (if (null? h) () (first (rest (rest h)))))
+    (def keep (if (null? h) (%cc-iota (length params)) (first (rest (rest (rest h))))))
     (list
       (pair (lit fn)
         (pair
           (pair (convert name %symbol)
-            (map (fn (_ p) (convert p %symbol)) params))
+            (map (fn (_ p) (convert p %symbol)) params2))
           (list
-            (%cc-lower-body (first (rest body)) name params))))
+            (%cc-lower-body stmts2 name params2))))
       ()
-      ())))
+      (if (null? effs) ()
+        (list (lit fn)
+          (pair (lit %cc-init) (map (fn (_ p) (convert p %symbol)) params))
+          (%cc-effects-do effs "" params 0)))
+      keep)))
 
 (def %cc-check-names
   (fn (_ name params)
@@ -1342,18 +1820,29 @@
 ; one function to (fn-expr pad-inits entry): globals become memory
 ; first; then the loop transform, falling back to the expression path
 (def %cc-lower-fun
-  (fn (_ name params body)
+  (fn (_ name params body kinds)
     (do (%cc-check-names name params)
         (let ((body2 (list (lit block)
-                       (%cc-globals-subst (first (rest body)) params))))
-          (guard (e (%cc-lower-expr-fun name params body2))
+                       (%cc-structs-subst
+                         (%cc-globals-subst (first (rest body)) params)
+                         params kinds name))))
+          ; the loop path first; its refusal is the informative one, so
+          ; keep it for the X_CC_WHY report before the expression path
+          ; answers with its own
+          (guard (e (do (set! %cc-loop-why e)
+                        (guard (e2 (%cc-lower-straight name params body2))
+                          (%cc-lower-expr-fun name params body2))))
             (%cc-lower-loop name params body2))))))
 
 ; try every function; the guard is the adoption rule -- refuse, stay
 ; interpreted.  Answers ((name . verdict) ...) in program order,
 ; verdict native | interpreted.
+(def %cc-why? #f)
+(def %cc-loop-why ())   ; the loop path's refusal, kept for the report
+
 (def %cc-jit!
   (fn (_)
+    (set! %cc-why? (not (null? (sys-getenv "X_CC_WHY"))))
     (set! %cc-natives ())
     (set! %cc-scratch-next %cc-memsize)
     (def go
@@ -1362,23 +1851,44 @@
           (let ((name (first (first fs))))
             (def params (first (rest (first fs))))
             (def body (first (rest (rest (first fs)))))
-            ; (name params body kinds ret): a struct passed or returned
-            ; by value stays interpreted
-            (def struct-kind?
-              (fn (_ k) (if (pair? k) (eq? (first k) (lit struct)) #f)))
-            (def structy?
+            ; (name params body kinds ret).  A struct RETURNED by value
+            ; is an address here, like every other struct value: the
+            ; body answers wherever its result was built, and the CALL
+            ; BOUNDARY copies those cells into a fresh slot in the
+            ; caller's frame -- which is what the interpreter does, and
+            ; what keeps two calls to the same function from sharing
+            ; one block.  RETSIZE is how many cells that is, 0 for a
+            ; scalar.
+            (def kinds (let ((tail (rest (rest (rest (first fs))))))
+                         (if (null? tail) () (first tail))))
+            (def retsize
               (let ((tail (rest (rest (rest (first fs))))))
-                (if (null? tail) #f
-                  (if (struct-kind? (if (null? (rest tail)) () (first (rest tail)))) #t
-                    (not (null? (filter struct-kind? (first tail))))))))
+                (if (null? tail) 0
+                  (if (null? (rest tail)) 0
+                    (let ((r (first (rest tail))))
+                      (if (if (pair? r) (eq? (first r) (lit struct)) #f)
+                        (%cc-kind-size r) 0))))))
+            ; X_CC_WHY=1 reports each refusal: the adoption rule is to
+             ; fall back silently, which makes a function that SHOULD
+             ; lower and does not very hard to see
             (def verdict
-              (guard (e (lit interpreted))
+              (guard (e (do (if %cc-why?
+                              (do (display "why ") (display name)
+                                  (display ": ") (write e)
+                                  (if (null? %cc-loop-why) ()
+                                    (do (display " | loop path: ")
+                                        (write %cc-loop-why)))
+                                  (newline))
+                              ())
+                            (lit interpreted)))
+                (set! %cc-loop-why ())
                 (let ((lowered
-                        (if structy? (%cc-no "struct kinds stay interpreted")
-                          (%cc-lower-fun name params body))))
+                        (%cc-lower-fun name params body kinds)))
                   (def prim (compile-asm (first lowered)))
-                  ; the table entry is (name pad entry . prim); each pad
-                  ; slot is an accumulator's literal init, or its init
+                  ; the table entry is (name keep pad entry retsize .
+                  ; prim); KEEP lists which of the C parameters the lane
+                  ; function takes (the rest spilled or hoisted).
+                  ; Each pad slot is an accumulator's literal init, or its init
                   ; expression compiled to a lane function over the
                   ; params (applied at the call boundary); () for a
                   ; plain function.  ENTRY is the entry effects -- the
@@ -1390,8 +1900,14 @@
                   (def entry
                     (let ((e (first (rest (rest lowered)))))
                       (if (null? e) () (compile-asm e))))
+                  ; KEEP is the argument POSITIONS the lane function
+                  ; takes: a spilled or hoisted parameter is one it
+                  ; never sees, and those need not be a prefix
+                  (def keep (first (rest (rest (rest lowered)))))
                   (set! %cc-natives
-                    (pair (pair name (pair pad (pair entry prim))) %cc-natives))
+                    (pair (pair name
+                            (pair keep (pair pad (pair entry (pair retsize prim)))))
+                      %cc-natives))
                   (lit native))))
             (self (rest fs) (pair (pair name verdict) acc))))))
     ; %cc-funs cons-loads, so program order is its reverse

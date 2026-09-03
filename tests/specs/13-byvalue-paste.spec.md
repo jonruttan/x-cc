@@ -24,15 +24,20 @@ expectation is an oracle row from /usr/bin/cc.
 35
 ```
 
-### by-value functions stay interpreted; the rest still lower
+### by value, natively
+
+In the cell model a struct value IS its address, so a by-value
+parameter's fields lower to address arithmetic and a struct return is
+the address its result was built at, copied into the caller's frame at
+the call boundary (18-structs and 21-sret have the full story).
 
 ```cc
 (display (cc-build-run "#include <stdio.h>\nstruct P { int x; int y; };\nstruct P make(int x, int y) { struct P p; p.x = x; p.y = y; return p; }\nint dot(struct P a, struct P b) { return a.x * b.x + a.y * b.y; }\nint sq(int n) { return n * n; }\nint main() { printf(\"%d\\n\", sq(dot(make(1, 2), make(3, 4)))); return 0; }"))
 ```
 ---
 ```output
-interp make
-interp dot
+native make
+native dot
 native sq
 interp main
 121
