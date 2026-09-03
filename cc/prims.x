@@ -19,7 +19,7 @@
   vec-make vec-ref vec-set!
   mem-make mem-ptr ptr-int word-ref word-set!
   file-read-all file-exists? file-write
-  sys-exit)
+  sys-exit sys-getenv)
 
 (def char->integer (prim-ref (lit char) (lit ->int)))
 (def integer->char (prim-ref (lit int) (lit ->char)))
@@ -69,3 +69,4 @@
 (def file-write
   (fn (_ fd s) (File write fd s (string-length s))))
 (def sys-exit (fn (_ n) (Sys exit n)))
+(def sys-getenv (fn (_ n) (Sys getenv n)))

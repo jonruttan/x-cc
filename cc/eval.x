@@ -72,6 +72,11 @@
                 (if (= (rest (first es)) id) (first (first es)) (self (rest es))))))
     (go %cc-fun-ids)))
 
+(def %cc-take
+  (fn (self l n)
+    (if (if (null? l) #t (<= n 0)) ()
+      (pair (first l) (self (rest l) (- n 1))))))
+
 (def %cc-native
   (fn (_ name)
     (def go
@@ -623,22 +628,28 @@
 
 (set! %cc-call
   (fn (_ name args)
-    ; a native twin's entry is (pad entry . prim): the accumulator
-    ; inits (from build's loop transform) pad the call, so a C call of
-    ; arity k reaches a k+m-param lane function.  A pad slot is a
-    ; literal int, or a compiled init function over the parameters --
-    ; applied to the actual args, once, right here.  ENTRY, when
+    ; a native twin's entry is (nkeep pad entry . prim).  NKEEP is how
+    ; many of the C parameters the lane function takes: the lane has
+    ; four argument slots, and a threaded variable past them lives in a
+    ; scratch cell instead, so a 6-parameter C function may reach a
+    ; 4-parameter lane function.  The accumulator inits (from build's
+    ; loop transform) pad the call after those.  A pad slot is a
+    ; literal int, or a compiled init function over ALL the parameters
+    ; -- applied to the actual args, once, right here.  ENTRY, when
     ; present, is the entry effects (the spilled variables' initial
-    ; stores) as a compiled function over the parameters, run first.
-    (let ((entry (%cc-native name)))
-      (if (null? entry)
+    ; stores) as a compiled function over all the parameters, run first.
+    (let ((e (%cc-native name)))
+      (if (null? e)
         (%cc-call-interp name args)
-        (do (if (null? (first (rest entry))) ()
-              (apply (first (rest entry)) args))
-            (apply (rest (rest entry))
-              (append args
-                (map (fn (_ p) (if (number? p) p (apply p args)))
-                  (first entry)))))))))
+        (let ((nkeep (first e)))
+          (def pad (first (rest e)))
+          (def entry (first (rest (rest e))))
+          (def prim (rest (rest (rest e))))
+          (do (if (null? entry) () (apply entry args))
+              (apply prim
+                (append (%cc-take args nkeep)
+                  (map (fn (_ p) (if (number? p) p (apply p args)))
+                    pad)))))))))
 
 ; --- statements --------------------------------------------------------------
 ; control: () | (return V) | (break) | (continue)

@@ -8,9 +8,16 @@
 ;
 ; THE ELIGIBLE CLASS: a C function lowers to the engine's JIT when it
 ; is integers all the way -- int parameters, expressions over params,
-; literals, + - * / % comparisons && || ! ~ the ternary, and calls to
-; ITSELF (max 4 lane args -- the trampoline rule; self-recursion rides
-; the fn's first-param name, x-lang#583's slot-0 convention).  Two body
+; literals, + - * / % & | ^ << >> comparisons && || ! ~ the ternary,
+; and calls to ITSELF (self-recursion rides the fn's first-param name,
+; x-lang#583's slot-0 convention).
+;
+; THE LANE'S ONE ARITY RULE, measured rather than assumed: a lane
+; function may take ANY number of parameters, but a SELF-CALL takes at
+; most four -- and it must pass every parameter the function has, or
+; the callee binds garbage and segfaults.  So a non-recursive function
+; has no limit, while anything riding a self-call (every loop) fits
+; four threaded variables, the rest spilling to cells.  Two body
 ; shapes lower:
 ;   1. if/return/blocks -- fib and friends (%cc-lower-expr-fun)
 ;   2. { decls; while|for; return } -- LOOPS, transformed to tail
@@ -50,9 +57,11 @@
 ;      order against the stores.
 ;   4. GLOBALS are memory at a known address (%cc-globals-subst): a
 ;      scalar reads and writes as *(ADDR), an array is its base.
-; The lane's own limits remain: more than four parameters, callees
-; with loops or recursion, calls through pointers, bitwise operators,
-; and struct kinds stay interpreted -- recorded pendings.
+; What stays interpreted, each a recorded pending: a RECURSIVE
+; function of more than four parameters (its self-call cannot pass
+; them), callees with loops or recursion (a lane function calls only
+; itself, so a callee must inline), calls through pointers, and struct
+; kinds.
 ;
 ; Adoption is sha256.x's pattern: the whole attempt sits in a guard;
 ; a function that will not lower or will not compile simply stays
@@ -92,7 +101,7 @@
         (let ((n (first (rest node))))
           (if (%cc-member-str? n params)
             (convert n %symbol)
-            (%cc-no "free variable")))
+            (%cc-no (string-append "free variable: " n))))
       (if (eq? t (lit bin))
         (let ((op (first (rest node))))
           (def a (self (first (rest (rest node))) fname params))
@@ -102,7 +111,12 @@
               (if (string=? op "*") (list (lit *) a b)
                 (if (string=? op "/") (list (lit /) a b)
                   (if (string=? op "%") (list (lit %) a b)
-                    (%cc-no "bitwise is not in the lane yet")))))))
+                    (if (string=? op "&") (list (lit &) a b)
+                      (if (string=? op "|") (list (lit |) a b)
+                        (if (string=? op "^") (list (lit ^) a b)
+                          (if (string=? op "<<") (list (lit <<) a b)
+                            (if (string=? op ">>") (list (lit >>) a b)
+                              (%cc-no "unknown operator"))))))))))))
       (if (eq? t (lit cmp))
         (let ((op (first (rest node))))
           (def a (self (first (rest (rest node))) fname params))
@@ -595,7 +609,7 @@
                 (if (null? a) (%cc-no "loop body: a statement that is not an assignment")
                   (if (not (if (%cc-member-str? (first a) ext) #t
                              (%cc-member-str? (first a) locals)))
-                    (%cc-no "loop assigns an unknown variable")
+                    (%cc-no (string-append "loop assigns an unknown variable: " (first a)))
                     (let ((r (%cc-extract (rest a) m effs)))
                       (self (rest stmts)
                         (%cc-st (%cc-put-str (first a) (%cc-subst (first r) m) m)
@@ -994,18 +1008,35 @@
         (def accs0 (map (fn (_ d) (first (rest d))) decls))
         ; %ph first: it must keep its slot (a transition sets it)
         (def accs-all (if multi (pair "%ph" accs0) accs0))
-        ; SPILLS: the lane takes four arguments, so threaded variables
-        ; past the fourth live in scratch cells instead -- their names
-        ; substitute to *(CELL) through the loops and the return, and
-        ; they read and write as memory from there; their entry values
-        ; store at the call boundary (the entry effects, below).  The
-        ; last-declared spill first.
-        (if (> (length params) 4) (%cc-no "more than 4 parameters"))
-        (def room (- 4 (length params)))
+        ; SPILLS: every self-call passes all of the lane's four
+        ; argument slots, so THREADED VARIABLES past the fourth --
+        ; parameters and accumulators alike -- live in scratch cells
+        ; instead: their names substitute to *(CELL) through the loops,
+        ; the guards and the return, they read and write as memory from
+        ; there, and their entry values store at the call boundary (the
+        ; entry effects, below).  Parameters keep the slots first, then
+        ; accumulators.  A spilled PARAMETER is one the lane function
+        ; never takes, so the call passes fewer arguments than the C
+        ; function has -- %cc-call reads the kept count from the table.
         (def take (fn (self2 l n) (if (if (null? l) #t (<= n 0)) () (pair (first l) (self2 (rest l) (- n 1))))))
         (def drop (fn (self2 l n) (if (if (null? l) #t (<= n 0)) l (self2 (rest l) (- n 1)))))
+        ; the phase counter is assigned by a transition built after the
+        ; substitution, so it can never be one of the spilled names:
+        ; sequential loops reserve its slot, a parameter spilling to
+        ; make room
+        ; ONE count for both sides: keeping N parameters and spilling
+        ; all but the first N are the same decision, and splitting them
+        ; left the (multi) 4th parameter neither kept nor spilled -- a
+        ; free variable at lowering
+        (def pkeep (if multi 3 4))
+        (def kept-params (take params pkeep))
+        (def room (- 4 (length kept-params)))
+        (if (if multi (< room 1) #f)
+          (%cc-no "no lane slot for the phase counter"))
         (def accs (take accs-all room))
-        (def spill-cells (map (fn (_ v) (pair v (%cc-new-cells 1))) (drop accs-all room)))
+        (def spill-cells
+          (map (fn (_ v) (pair v (%cc-new-cells 1)))
+            (append (drop params pkeep) (drop accs-all room))))
         (def spill-sub
           (map (fn (_ sc) (pair (first sc) (list (lit un) "*" (list (lit num) (rest sc)))))
             spill-cells))
@@ -1068,7 +1099,7 @@
             (if (null? vs) #t
               (if (%cc-member-str? (first vs) params)
                 (self2 (rest vs)) #f))))
-        (def ext (append params accs))
+        (def ext (append kept-params accs))
         (def lret (%cc-lower-e ret-e name ext))
         ; a self-call cexpr from map M: every threadable variable takes
         ; its folded value, or rides through unchanged
@@ -1098,10 +1129,6 @@
           (fn (_ st2 what)
             (if (null? (%cc-st-exits st2)) st2
               (%cc-no (string-append what " may not exit")))))
-        (def no-effects!
-          (fn (_ st2 what)
-            (if (null? (%cc-st-effects st2)) st2
-              (%cc-no (string-append what " may not store")))))
         ; a body's effects run in a `do` before its tail; a body that
         ; both stores and exits lowers as the ordered STREAM, each exit
         ; tested in its place among the stores (%cc-stream-do)
@@ -1199,20 +1226,20 @@
                             (list (lit assign) (list (lit var) "%ph")
                               (list (lit num) (- k 1)))))))))
             (def st
-              (no-effects!
-                (no-exits!
-                  (%cc-fold-stmts stmts (%cc-st () () () () ()) ext
-                    (list ret-e () name))
-                  "a transition between loops")
+              (no-exits!
+                (%cc-fold-stmts stmts (%cc-st () () () () ()) ext
+                  (list ret-e () name))
                 "a transition between loops"))
-            (call-from (first st))))
+            ; (call . effects): the next loop's init may STORE (its
+            ; counter spilled to a cell), and those run before the call
+            (pair (call-from (first st)) (%cc-st-effects st))))
         ; the loops from the k-th on, selecting on the phase: (expr . assigned)
         (def build-loops
           (fn (self2 items k)
             (if (null? (rest items))
               (one-loop (rest (first items)) ret-e ())
-              (let ((r (one-loop (rest (first items))
-                         (trans-into (+ k 1) (first (rest items))) ())))
+              (let ((r (let ((tr (trans-into (+ k 1) (first (rest items)))))
+                         (one-loop (rest (first items)) (first tr) (rest tr)))))
                 (def rr (self2 (rest items) (+ k 1)))
                 (pair
                   (list (lit if)
@@ -1275,7 +1302,9 @@
         (def guarded
           (fn (self2 gs)
             (if (null? gs) loop-expr
-              (let ((g (first gs)))
+              (let ((g (let ((g0 (first gs)))
+                         (pair (%cc-subst (first g0) spill-sub)
+                           (%cc-subst (rest g0) spill-sub)))))
                 (if (not (invariant?
                            (append (%cc-free-vars (first g))
                              (%cc-free-vars (rest g)))))
@@ -1294,7 +1323,8 @@
                     (map (fn (_ v) (convert v %symbol)) ext))
               (list (guarded guards))))
           inits
-          entry)))))
+          entry
+          (length kept-params))))))
 
 ; the variable names an effect list reads (dupes fine)
 (def %cc-effs-free-vars
@@ -1327,7 +1357,8 @@
           (list
             (%cc-lower-body (first (rest body)) name params))))
       ()
-      ())))
+      ()
+      (length params))))
 
 (def %cc-check-names
   (fn (_ name params)
@@ -1346,14 +1377,22 @@
     (do (%cc-check-names name params)
         (let ((body2 (list (lit block)
                        (%cc-globals-subst (first (rest body)) params))))
-          (guard (e (%cc-lower-expr-fun name params body2))
+          ; the loop path first; its refusal is the informative one, so
+          ; keep it for the X_CC_WHY report before the expression path
+          ; answers with its own
+          (guard (e (do (set! %cc-loop-why e)
+                        (%cc-lower-expr-fun name params body2)))
             (%cc-lower-loop name params body2))))))
 
 ; try every function; the guard is the adoption rule -- refuse, stay
 ; interpreted.  Answers ((name . verdict) ...) in program order,
 ; verdict native | interpreted.
+(def %cc-why? #f)
+(def %cc-loop-why ())   ; the loop path's refusal, kept for the report
+
 (def %cc-jit!
   (fn (_)
+    (set! %cc-why? (not (null? (sys-getenv "X_CC_WHY"))))
     (set! %cc-natives ())
     (set! %cc-scratch-next %cc-memsize)
     (def go
@@ -1371,14 +1410,28 @@
                 (if (null? tail) #f
                   (if (struct-kind? (if (null? (rest tail)) () (first (rest tail)))) #t
                     (not (null? (filter struct-kind? (first tail))))))))
+            ; X_CC_WHY=1 reports each refusal: the adoption rule is to
+             ; fall back silently, which makes a function that SHOULD
+             ; lower and does not very hard to see
             (def verdict
-              (guard (e (lit interpreted))
+              (guard (e (do (if %cc-why?
+                              (do (display "why ") (display name)
+                                  (display ": ") (write e)
+                                  (if (null? %cc-loop-why) ()
+                                    (do (display " | loop path: ")
+                                        (write %cc-loop-why)))
+                                  (newline))
+                              ())
+                            (lit interpreted)))
+                (set! %cc-loop-why ())
                 (let ((lowered
                         (if structy? (%cc-no "struct kinds stay interpreted")
                           (%cc-lower-fun name params body))))
                   (def prim (compile-asm (first lowered)))
-                  ; the table entry is (name pad entry . prim); each pad
-                  ; slot is an accumulator's literal init, or its init
+                  ; the table entry is (name nkeep pad entry . prim);
+                  ; NKEEP is how many of the C parameters the lane
+                  ; function actually takes (the rest spilled to cells).
+                  ; Each pad slot is an accumulator's literal init, or its init
                   ; expression compiled to a lane function over the
                   ; params (applied at the call boundary); () for a
                   ; plain function.  ENTRY is the entry effects -- the
@@ -1390,8 +1443,10 @@
                   (def entry
                     (let ((e (first (rest (rest lowered)))))
                       (if (null? e) () (compile-asm e))))
+                  (def nkeep (first (rest (rest (rest lowered)))))
                   (set! %cc-natives
-                    (pair (pair name (pair pad (pair entry prim))) %cc-natives))
+                    (pair (pair name (pair nkeep (pair pad (pair entry prim))))
+                      %cc-natives))
                   (lit native))))
             (self (rest fs) (pair (pair name verdict) acc))))))
     ; %cc-funs cons-loads, so program order is its reverse

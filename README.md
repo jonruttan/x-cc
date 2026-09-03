@@ -118,10 +118,20 @@ recursive, and a matrix product with a store between its levels goes
 native.  `x -l cc -- build prog.c` reports each function's verdict and
 runs, same output as `run`: fib(24) 67s -> 10.5s wall, a
 2,000,000-iteration loop 79s -> 9.5s (the loop itself at machine speed
-under the boot).  What remains is the lane's own contract: more than
-four parameters, callees with loops or recursion, calls through
-pointers, bitwise operators and struct kinds stay interpreted -- the
-recorded pendings.
+under the boot).  The **bitwise family lowers too** -- `&` `|` `^`
+`<<` `>>` are single ARM64 instructions, and `>>` is arithmetic, so it
+matches C on a signed word -- which makes shift-and-mask code (a
+djb2 hash, a popcount loop) native.  **Arity**, measured rather than
+assumed: a lane function takes any number of parameters, and only a
+SELF-CALL is limited to four, which it must fill completely.  So an
+eight-parameter leaf is native, a five-parameter recursion is not, and
+a loop past four threaded variables spills the rest -- parameters
+included, the call passing only what the lane kept.  `X_CC_WHY=1`
+reports why each refused function refused, both paths.  What remains,
+each a recorded pending: a straight-line body (assignments then a
+return, neither shape), recursion of more than four parameters,
+callees with loops or recursion, calls through pointers, and struct
+kinds.
 
 Paired with x-lang v0.10.0 (`lang.xon` is the checkable row).
 
