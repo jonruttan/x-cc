@@ -135,9 +135,23 @@ no `if`/`return` ladder and no loop.  The same fold takes it, and
 without a self-call nothing needs a lane slot -- every local is
 substitution-only and an assigned parameter threads through the map --
 so a rotation through a temp, an early return and a swap through
-memory all go native.  What remains, each a recorded pending and each
-the lane's own: recursion of more than four parameters, callees with
-loops or recursion, calls through pointers, and struct kinds.
+memory all go native.
+
+**Struct fields lower too.**  The lane has no notion of a field, but
+the cell model already says where one lives: a struct value IS its
+address, and a field is a fixed offset from it, so before lowering
+every `.` and `->` becomes explicit arithmetic -- `p->x` is
+`*(p + off)`, `a[i].y` is `*(a + i*size + off)` -- and the load and
+store machinery takes it from there.  A pointer walk down a linked
+list, a sum over an array of structs, and a function reading two
+by-value struct parameters are all native.  Writing through a POINTER
+is the point and is allowed; assigning a field of a BY-VALUE parameter
+would write the caller's copy, so it refuses.
+
+What remains, each a recorded pending and each the lane's own:
+recursion of more than four parameters, callees with loops or
+recursion, calls through pointers, structs returned by value, and
+local structs (they have no native storage).
 
 Paired with x-lang v0.10.0 (`lang.xon` is the checkable row).
 

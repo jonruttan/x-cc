@@ -577,7 +577,8 @@
           (let ((name (first (rest s))))
             (def kind (first (rest (rest s))))
             (def init (first (rest (rest (rest s)))))
-            (if (pair? kind) (%cc-no "array local in a loop body"))
+            (if (not (%cc-cellish? kind))
+              (%cc-no "an array or struct local in a body"))
             (def r (if (null? init) (pair () effs) (%cc-extract init m effs)))
             (self (rest stmts)
               (%cc-st (if (null? init) m
@@ -957,9 +958,15 @@
     ; local ARRAYS: cells in the native scratch region, their names
     ; substituted away as literal bases before anything else looks
     (def stmts0 (first (rest body)))
+    ; an ARRAY declaration, not merely a compound kind: a pointer kind
+    ; is a pair too, and treating one as an array sized it by the kind
+    ; list itself, which then reached the lane as a stray symbol
     (def array-decl?
       (fn (_ st1)
-        (if (eq? (first st1) (lit decl)) (pair? (first (rest (rest st1)))) #f)))
+        (if (eq? (first st1) (lit decl))
+          (let ((k (first (rest (rest st1)))))
+            (if (pair? k) (eq? (first k) (lit array)) #f))
+          #f)))
     ; a struct-kinded or struct-element local stays interpreted
     (def check-kinds
       (fn (self ss)
@@ -967,9 +974,10 @@
           (let ((st1 (first ss)))
             (if (if (eq? (first st1) (lit decl)) (pair? (first (rest (rest st1)))) #f)
               (let ((k (first (rest (rest st1)))))
-                (if (if (eq? (first k) (lit array)) (null? (rest (rest k))) #f)
-                  (self (rest ss))
-                  (%cc-no "struct kinds stay interpreted")))
+                (if (%cc-cellish? k) (self (rest ss))
+                  (if (if (eq? (first k) (lit array)) (null? (rest (rest k))) #f)
+                    (self (rest ss))
+                    (%cc-no "a local struct or array of structs stays interpreted"))))
               (self (rest ss)))))))
     (check-kinds stmts0)
     (def arr-sub
@@ -1347,6 +1355,231 @@
                   (list "?")))))
           (self (rest effs)))))))
 
+; --- structs: field access as address arithmetic -----------------------------
+; The lane has no notion of a field, but the cell model already says
+; where one lives: a struct value IS its address, and a field is a
+; fixed offset from it.  So before lowering, every `.` and `->` becomes
+; explicit arithmetic over the shared memory -- `p->x` is `*(p + off)`,
+; `a[i].y` is `*(a + i*size + off)` -- and the existing load/store
+; machinery takes it from there.
+;
+; The one semantic trap is a struct passed BY VALUE: the argument is
+; the caller's address, and C says the callee mutates a copy.  Reading
+; through the address is right, writing through it is not, so a
+; function that assigns a field of a by-value struct parameter refuses.
+; Through a POINTER, writing is the point, and is allowed.
+;
+; Anything whose kind this cannot determine refuses rather than
+; guessing: an unscaled index into an array of structs would be
+; silently wrong, which is the worst thing a compiler can be.
+(def %cc-kind-env
+  (fn (self stmts acc)
+    (if (null? stmts) acc
+      (let ((s (first stmts)))
+        (def t (first s))
+        (self (rest stmts)
+          (if (eq? t (lit decl))
+            (pair (pair (first (rest s)) (first (rest (rest s)))) acc)
+            (if (eq? t (lit block)) (self (first (rest s)) acc)
+              (if (eq? t (lit if))
+                (self (list (first (rest (rest s))))
+                  (if (null? (first (rest (rest (rest s))))) acc
+                    (self (list (first (rest (rest (rest s))))) acc)))
+                (if (eq? t (lit while)) (self (list (first (rest (rest s)))) acc)
+                  (if (eq? t (lit for))
+                    (self (list (first (rest (rest (rest (rest s)))))) acc)
+                    (if (eq? t (lit do)) (self (list (first (rest s))) acc)
+                      acc)))))))))))
+
+(def %cc-env-kind
+  (fn (_ name env)
+    (def go (fn (self es)
+              (if (null? es) (lit scalar)
+                (if (string=? (first (first es)) name) (rest (first es))
+                  (self (rest es))))))
+    (go env)))
+
+(def %cc-struct? (fn (_ k) (if (pair? k) (eq? (first k) (lit struct)) #f)))
+
+; one cell: a scalar, or a pointer whatever it points at.  An array or
+; a struct is the one that needs storage.
+(def %cc-cellish?
+  (fn (_ k) (if (not (pair? k)) #t (eq? (first k) (lit ptr)))))
+
+; the kind of an expression, statically
+(def %cc-lk
+  (fn (self node env)
+    (let ((t (first node)))
+      (if (eq? t (lit var)) (%cc-env-kind (first (rest node)) env)
+      (if (eq? t (lit idx)) (%cc-kind-elem (self (first (rest node)) env))
+      (if (eq? t (lit dot))
+        (let ((k (self (first (rest node)) env)))
+          (if (not (%cc-struct? k)) (%cc-no "a field of something not a struct")
+            (let ((f (%cc-field (first (rest k)) (first (rest (rest node))))))
+              (if (null? f) (%cc-no "no such field") (rest f)))))
+      (if (eq? t (lit arrow))
+        (let ((k (%cc-kind-elem (self (first (rest node)) env))))
+          (if (not (%cc-struct? k)) (%cc-no "an arrow through something not a struct pointer")
+            (let ((f (%cc-field (first (rest k)) (first (rest (rest node))))))
+              (if (null? f) (%cc-no "no such field") (rest f)))))
+      (if (if (eq? t (lit un)) (string=? (first (rest node)) "*") #f)
+        (%cc-kind-elem (self (first (rest (rest node))) env))
+      (if (if (eq? t (lit bin))
+            (if (string=? (first (rest node)) "+") #t (string=? (first (rest node)) "-")) #f)
+        (let ((ka (self (first (rest (rest node))) env)))
+          (if (pair? ka) ka (lit scalar)))
+        (lit scalar))))))))))
+
+(def %cc-saddr ())
+(def %cc-sval ())
+
+; the VALUE of a node, once fields are arithmetic: a struct or array
+; decays to its address, anything else reads
+(set! %cc-sval
+  (fn (_ node env)
+    (let ((k (%cc-lk node env)))
+      (if (%cc-kind-decays? k) (%cc-saddr node env)
+        (let ((t (first node)))
+          (if (if (eq? t (lit dot)) #t
+                (if (eq? t (lit arrow)) #t
+                  (if (eq? t (lit idx)) #t
+                    (if (eq? t (lit un)) (string=? (first (rest node)) "*") #f))))
+            (list (lit un) "*" (%cc-saddr node env))
+            node))))))
+
+; the ADDRESS a node names, as an expression over cells
+(set! %cc-saddr
+  (fn (_ node env)
+    (let ((t (first node)))
+      (if (eq? t (lit var))
+        ; a struct parameter holds its address; so does an array's name
+        (if (%cc-kind-decays? (%cc-env-kind (first (rest node)) env)) node
+          (%cc-no "the address of a scalar variable stays interpreted"))
+      (if (eq? t (lit dot))
+        (let ((k (%cc-lk (first (rest node)) env)))
+          (def f (%cc-field (first (rest k)) (first (rest (rest node)))))
+          (list (lit bin) "+" (%cc-saddr (first (rest node)) env)
+            (list (lit num) (first f))))
+      (if (eq? t (lit arrow))
+        (let ((k (%cc-kind-elem (%cc-lk (first (rest node)) env))))
+          (def f (%cc-field (first (rest k)) (first (rest (rest node)))))
+          (list (lit bin) "+" (%cc-sval (first (rest node)) env)
+            (list (lit num) (first f))))
+      (if (eq? t (lit idx))
+        (let ((step (%cc-kind-size (%cc-kind-elem (%cc-lk (first (rest node)) env)))))
+          (def base (%cc-sval (first (rest node)) env))
+          (def i (%cc-sval (first (rest (rest node))) env))
+          (list (lit bin) "+" base
+            (if (= step 1) i (list (lit bin) "*" i (list (lit num) step)))))
+      (if (if (eq? t (lit un)) (string=? (first (rest node)) "*") #f)
+        (%cc-sval (first (rest (rest node))) env)
+        (%cc-no "not an address")))))))))
+
+; does any part of this expression mention a field?
+(def %cc-has-field?
+  (fn (self node)
+    (if (not (pair? node)) #f
+      (let ((t (first node)))
+        (if (if (eq? t (lit dot)) #t (eq? t (lit arrow))) #t
+          (let ((go (fn (self2 xs)
+                      (if (null? xs) #f
+                        (if (if (pair? (first xs)) (self (first xs)) #f) #t
+                          (self2 (rest xs)))))))
+            (go (rest node))))))))
+
+; the variable a place is rooted at, stopping at any dereference (past
+; one, the memory belongs to whatever the pointer names, not to us)
+(def %cc-lv-root
+  (fn (self node env)
+    (let ((t (first node)))
+      (if (eq? t (lit var)) (first (rest node))
+        (if (eq? t (lit dot)) (self (first (rest node)) env)
+          (if (if (eq? t (lit idx))
+                (let ((k (%cc-lk (first (rest node)) env)))
+                  (if (pair? k) (eq? (first k) (lit array)) #f))
+                #f)
+            (self (first (rest node)) env)
+            ()))))))
+
+; rewrite one expression: fields become arithmetic, everything else
+; keeps its shape
+(def %cc-srw
+  (fn (self node env byval)
+    (if (not (pair? node)) node
+      (let ((t (first node)))
+        (if (if (eq? t (lit dot)) #t (eq? t (lit arrow)))
+          (%cc-sval node env)
+        (if (eq? t (lit idx))
+          ; an index whose element is not one cell must scale, and an
+          ; index over a struct is a field access in disguise
+          (let ((k (%cc-lk (first (rest node)) env)))
+            (if (if (%cc-kind-decays? k)
+                  (not (= (%cc-kind-size (%cc-kind-elem k)) 1)) #f)
+              (%cc-sval node env)
+              (list (lit idx) (self (first (rest node)) env byval)
+                (self (first (rest (rest node))) env byval))))
+        (if (eq? t (lit assign))
+          (let ((root (%cc-lv-root (first (rest node)) env)))
+            (if (if (null? root) #f (%cc-member-str? root byval))
+              (%cc-no "a by-value struct parameter is assigned")
+              (list (lit assign) (self (first (rest node)) env byval)
+                (self (first (rest (rest node))) env byval))))
+        (if (eq? t (lit call))
+          (list (lit call) (first (rest node))
+            (map (fn (_ a) (self a env byval)) (first (rest (rest node)))))
+        (if (if (eq? t (lit num)) #t (if (eq? t (lit var)) #t (eq? t (lit str))))
+          node
+          (pair t (map (fn (_ x) (if (pair? x) (self x env byval) x))
+                    (rest node))))))))))))
+
+(def %cc-srw-stmts ())
+(def %cc-srw-stmt
+  (fn (self s env byval)
+    (def e (fn (_ x) (if (null? x) () (%cc-srw x env byval))))
+    (let ((t (first s)))
+      (if (eq? t (lit expr)) (list (lit expr) (e (first (rest s))))
+      (if (eq? t (lit return)) (list (lit return) (e (first (rest s))))
+      (if (eq? t (lit block)) (list (lit block) (%cc-srw-stmts (first (rest s)) env byval))
+      (if (eq? t (lit if))
+        (list (lit if) (e (first (rest s)))
+          (self (first (rest (rest s))) env byval)
+          (if (null? (first (rest (rest (rest s))))) ()
+            (self (first (rest (rest (rest s)))) env byval)))
+      (if (eq? t (lit while))
+        (list (lit while) (e (first (rest s)))
+          (self (first (rest (rest s))) env byval))
+      (if (eq? t (lit for))
+        (list (lit for) (e (first (rest s))) (e (first (rest (rest s))))
+          (e (first (rest (rest (rest s)))))
+          (self (first (rest (rest (rest (rest s))))) env byval))
+      (if (eq? t (lit decl))
+        (if (%cc-struct? (first (rest (rest s))))
+          (%cc-no "a local struct has no native storage")
+          (list (lit decl) (first (rest s)) (first (rest (rest s)))
+            (e (first (rest (rest (rest s)))))))
+        s))))))))))
+(set! %cc-srw-stmts
+  (fn (_ ss env byval) (map (fn (_ s) (%cc-srw-stmt s env byval)) ss)))
+
+; the whole pass: nothing to do unless a field appears somewhere
+(def %cc-structs-subst
+  (fn (_ stmts params kinds)
+    (def penv
+      (let ((go (fn (self ps ks)
+                  (if (null? ps) ()
+                    (pair (pair (first ps) (if (null? ks) (lit scalar) (first ks)))
+                      (self (rest ps) (if (null? ks) () (rest ks))))))))
+        (go params kinds)))
+    (def env (%cc-kind-env stmts penv))
+    (def byval
+      (let ((go (fn (self ps ks)
+                  (if (null? ps) ()
+                    (if (%cc-struct? (if (null? ks) (lit scalar) (first ks)))
+                      (pair (first ps) (self (rest ps) (if (null? ks) () (rest ks))))
+                      (self (rest ps) (if (null? ks) () (rest ks))))))))
+        (go params kinds)))
+    (%cc-srw-stmts stmts env byval)))
+
 ; --- the straight-line path --------------------------------------------------
 ; A body of assignments and a return: no if/return ladder, no loop.
 ; The loop fold already models exactly this -- statements folded into
@@ -1417,10 +1650,12 @@
 ; one function to (fn-expr pad-inits entry): globals become memory
 ; first; then the loop transform, falling back to the expression path
 (def %cc-lower-fun
-  (fn (_ name params body)
+  (fn (_ name params body kinds)
     (do (%cc-check-names name params)
         (let ((body2 (list (lit block)
-                       (%cc-globals-subst (first (rest body)) params))))
+                       (%cc-structs-subst
+                         (%cc-globals-subst (first (rest body)) params)
+                         params kinds))))
           ; the loop path first; its refusal is the informative one, so
           ; keep it for the X_CC_WHY report before the expression path
           ; answers with its own
@@ -1446,15 +1681,19 @@
           (let ((name (first (first fs))))
             (def params (first (rest (first fs))))
             (def body (first (rest (rest (first fs)))))
-            ; (name params body kinds ret): a struct passed or returned
-            ; by value stays interpreted
-            (def struct-kind?
-              (fn (_ k) (if (pair? k) (eq? (first k) (lit struct)) #f)))
+            ; (name params body kinds ret): a struct RETURNED by value
+            ; needs a frame slot in the caller, which only the
+            ; interpreter has.  Struct PARAMETERS are fine -- their
+            ; fields become address arithmetic (%cc-structs-subst),
+            ; and assigning one refuses there.
+            (def kinds (let ((tail (rest (rest (rest (first fs))))))
+                         (if (null? tail) () (first tail))))
             (def structy?
               (let ((tail (rest (rest (rest (first fs))))))
                 (if (null? tail) #f
-                  (if (struct-kind? (if (null? (rest tail)) () (first (rest tail)))) #t
-                    (not (null? (filter struct-kind? (first tail))))))))
+                  (if (null? (rest tail)) #f
+                    (let ((r (first (rest tail))))
+                      (if (pair? r) (eq? (first r) (lit struct)) #f))))))
             ; X_CC_WHY=1 reports each refusal: the adoption rule is to
              ; fall back silently, which makes a function that SHOULD
              ; lower and does not very hard to see
@@ -1470,8 +1709,8 @@
                             (lit interpreted)))
                 (set! %cc-loop-why ())
                 (let ((lowered
-                        (if structy? (%cc-no "struct kinds stay interpreted")
-                          (%cc-lower-fun name params body))))
+                        (if structy? (%cc-no "a struct returned by value stays interpreted")
+                          (%cc-lower-fun name params body kinds))))
                   (def prim (compile-asm (first lowered)))
                   ; the table entry is (name nkeep pad entry . prim);
                   ; NKEEP is how many of the C parameters the lane

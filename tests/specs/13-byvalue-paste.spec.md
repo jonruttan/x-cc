@@ -24,7 +24,12 @@ expectation is an oracle row from /usr/bin/cc.
 35
 ```
 
-### by-value functions stay interpreted; the rest still lower
+### a struct RETURN stays interpreted; reading a by-value parameter lowers
+
+`make` returns a struct, which needs a frame slot only the interpreter
+has.  `dot` merely reads its two by-value parameters, and in the cell
+model a struct argument IS its address, so its fields lower to address
+arithmetic (16-lane's companion, 18-structs, has the full story).
 
 ```cc
 (display (cc-build-run "#include <stdio.h>\nstruct P { int x; int y; };\nstruct P make(int x, int y) { struct P p; p.x = x; p.y = y; return p; }\nint dot(struct P a, struct P b) { return a.x * b.x + a.y * b.y; }\nint sq(int n) { return n * n; }\nint main() { printf(\"%d\\n\", sq(dot(make(1, 2), make(3, 4)))); return 0; }"))
@@ -32,7 +37,7 @@ expectation is an oracle row from /usr/bin/cc.
 ---
 ```output
 interp make
-interp dot
+native dot
 native sq
 interp main
 121
