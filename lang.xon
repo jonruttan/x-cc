@@ -11,6 +11,6 @@
 ; (measured 2026-09-02; the x-coreutils manifest has the numbers).
 (dialect he)
 
-(requires-release "v0.10.0")
+(requires-release "v0.13.0")
 
 (entry "run.x")
