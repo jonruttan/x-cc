@@ -27,6 +27,8 @@ install: ## Install into <share>/langs/cc
 	cp -R $(PAYLOAD) "$(DEST)/"
 	printf '%s\n' '$(LANG_VERSION)' > "$(DEST)/version"
 	@echo "x-cc: installed to $(DEST)"
+	@echo "x-cc: writing the boot image"
+	"$(X)" --image -l cc || true
 	@echo "x-cc: try  x -l cc"
 
 .PHONY: uninstall
