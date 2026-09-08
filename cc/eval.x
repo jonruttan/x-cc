@@ -610,22 +610,20 @@
             (let ((tmp (%cc-alloca (%cc-kind-size ret))))
               (do (%cc-write-cells! tmp vals) tmp)))
           (do (set! %cc-sp saved-sp) v)))
-      (if (string=? name "putchar")
-        (do (display (list->string (list (integer->char (first args)))))
-            (first args))
-        (if (string=? name "puts")
-          (do (display (string-append (%cc-cstr (first args)) "\n")) 0)
-          (if (string=? name "printf")
-            (%cc-printf args)
-            (if (string=? name "malloc")
-              (%cc-heap (first args))
-              (if (string=? name "free")
-                0
-                (if (string=? name "exit")
-                  (do (set! %cc-exit-code (first args))
-                      (Err raise (lit cc-exit) "exit" ()))
-                  (%cc-oops
-                    (string-append "no such function: " name)))))))))))
+      (match
+        ((string=? name "putchar")
+          (do (display (list->string (list (integer->char (first args)))))
+              (first args)))
+        ((string=? name "puts")
+          (do (display (string-append (%cc-cstr (first args)) "\n")) 0))
+        ((string=? name "printf") (%cc-printf args))
+        ((string=? name "malloc") (%cc-heap (first args)))
+        ((string=? name "free") 0)
+        ((string=? name "exit")
+          (do (set! %cc-exit-code (first args))
+              (Err raise (lit cc-exit) "exit" ())))
+        (#t (%cc-oops
+              (string-append "no such function: " name)))))))
 
 (set! %cc-call
   (fn (_ name args)
