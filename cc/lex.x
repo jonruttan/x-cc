@@ -52,15 +52,16 @@
 (def %cc-escape
   (fn (_ src end i)
     (def b (byte-at src i))
-    (if (= b 110) (pair 10 (+ i 1))                       ; n
-      (if (= b 116) (pair 9 (+ i 1))                      ; t
-        (if (= b 114) (pair 13 (+ i 1))                   ; r
-          (if (= b 48) (pair 0 (+ i 1))                   ; 0
-            (if (= b 97) (pair 7 (+ i 1))                 ; a
-              (if (= b 98) (pair 8 (+ i 1))               ; b
-                (if (= b 102) (pair 12 (+ i 1))           ; f
-                  (if (= b 118) (pair 11 (+ i 1))         ; v
-                    (pair (+ 0 b) (+ i 1))))))))))))      ; \\ \' \" ...
+    (match
+      ((= b 110) (pair 10 (+ i 1)))                       ; n
+      ((= b 116) (pair 9 (+ i 1)))                        ; t
+      ((= b 114) (pair 13 (+ i 1)))                       ; r
+      ((= b 48)  (pair 0 (+ i 1)))                        ; 0
+      ((= b 97)  (pair 7 (+ i 1)))                        ; a
+      ((= b 98)  (pair 8 (+ i 1)))                        ; b
+      ((= b 102) (pair 12 (+ i 1)))                       ; f
+      ((= b 118) (pair 11 (+ i 1)))                       ; v
+      (#t (pair (+ 0 b) (+ i 1))))))                      ; \\ \' \" ...
 
 ; number: decimal, 0x hex, 0 octal; suffixes uUlL skipped
 (def %cc-lex-num
@@ -174,23 +175,24 @@
           (fn (self j depth start acc)
             (if (>= j end) (Err raise (lit cc) "cc: unterminated macro call" ())
               (let ((c (byte-at src j)))
-                (if (= c 34)                                  ; a string: skip it whole
-                  (let ((skipstr (fn (self2 k)
-                                   (if (>= k end) k
-                                     (if (= (byte-at src k) 92) (self2 (+ k 2))
-                                       (if (= (byte-at src k) 34) (+ k 1) (self2 (+ k 1))))))))
-                    (self (skipstr (+ j 1)) depth start acc))
-                  (if (= c 39)                                ; a char constant
+                (match
+                  ((= c 34)                                   ; a string: skip it whole
+                    (let ((skipstr (fn (self2 k)
+                                     (if (>= k end) k
+                                       (if (= (byte-at src k) 92) (self2 (+ k 2))
+                                         (if (= (byte-at src k) 34) (+ k 1) (self2 (+ k 1))))))))
+                      (self (skipstr (+ j 1)) depth start acc)))
+                  ((= c 39)                                   ; a char constant
                     (let ((k (if (= (byte-at src (+ j 1)) 92) (+ j 4) (+ j 3))))
-                      (self k depth start acc))
-                    (if (= c 40) (self (+ j 1) (+ depth 1) start acc)
-                      (if (= c 41)
-                        (if (= depth 1)
-                          (pair (reverse (pair (substring src start j) acc)) (+ j 1))
-                          (self (+ j 1) (- depth 1) start acc))
-                        (if (if (= c 44) (= depth 1) #f)
-                          (self (+ j 1) depth (+ j 1) (pair (substring src start j) acc))
-                          (self (+ j 1) depth start acc))))))))))
+                      (self k depth start acc)))
+                  ((= c 40) (self (+ j 1) (+ depth 1) start acc))
+                  ((= c 41)
+                    (if (= depth 1)
+                      (pair (reverse (pair (substring src start j) acc)) (+ j 1))
+                      (self (+ j 1) (- depth 1) start acc)))
+                  ((if (= c 44) (= depth 1) #f)
+                    (self (+ j 1) depth (+ j 1) (pair (substring src start j) acc)))
+                  (#t (self (+ j 1) depth start acc)))))))
         (go (+ j0 1) 1 (+ j0 1) ())))))
 
 (def %cc-trim
