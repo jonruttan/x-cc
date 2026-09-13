@@ -6,26 +6,24 @@
 ; @copyright 2026 Jon Ruttan
 ; @license MIT No Attribution (MIT-0)
 ;
-; THE CELL MODEL: memory is one Vector of cells; every scalar occupies
-; ONE cell, sizeof any scalar is 1, pointer arithmetic counts cells.
-; Addresses are plain ints (0 is NULL and guarded), so pointers, &, *,
-; arrays and malloc all mean what they mean in C -- only the SIZES
-; diverge from a byte machine, and byte-accurate sizes are the recorded
-; pending.  Locals live in memory (a stack growing DOWN from the top),
-; so &local works; the heap bumps UP from past the globals.
+; The cell model: memory is one Vector of cells; every scalar occupies one
+; cell, sizeof any scalar is 1, pointer arithmetic counts cells. Addresses are
+; plain ints (0 is NULL and guarded), so pointers, &, *, arrays and malloc all
+; mean what they mean in C -- only the sizes diverge from a byte machine, and
+; byte-accurate sizes are the recorded pending. Locals live in memory (a stack
+; growing down from the top), so &local works; the heap bumps up from past the
+; globals.
 ;
-; C division truncates toward zero -- the tower's / answers rationals,
-; so the evaluator owns its own div and mod.
+; C division truncates toward zero -- the tower's / answers rationals, so the
+; evaluator owns its own div and mod.
 
-; THE MEMORY IS RAW AND SHARED.  One string is the buffer; every
-; cell is one 8-byte word at byte offset 8*cell.  The interpreter
-; reads and writes through ptr ref-word/set-word! (one prim each);
-; build's native twins address the SAME bytes through %mem-ref-at /
-; %mem-set-at! with the buffer's data address baked in as a literal --
-; so a pointer is just a cell index on both sides and arrays cross the
-; native/interpreted boundary for free.  The collector is non-moving
-; (the whole reflection layer rides raw object pointers); the base is
-; still refreshed every run.
+; The memory is raw and shared. One string is the buffer; every cell is one
+; 8-byte word at byte offset 8*cell. The interpreter reads and writes through
+; ptr ref-word/set-word! (one prim each); build's native twins address the same
+; bytes through %mem-ref-at / %mem-set-at! with the buffer's data address baked
+; in as a literal -- so a pointer is a cell index on both sides and arrays cross
+; the native/interpreted boundary for free. The collector is non-moving (the
+; reflection layer rides raw object pointers); the base is refreshed every run.
 (def %cc-mem ())        ; the buffer string, held so it stays alive
 (def %cc-memp ())       ; its ptr object, for the interpreter's words
 (def %cc-membase 0)     ; its data address, for the native twins
@@ -43,11 +41,11 @@
 (def %cc-exit-code ())  ; set when exit() raises its sentinel
 (def %cc-natives ())    ; ((name . prim) ...) -- build's compiled twins
 
-; FUNCTION VALUES: a function's address is an id above every cell
-; address (so it is never NULL, never confused with memory), handed out
-; the first time a function's name is used as a value; a call through
-; a value maps the id back to the name and dispatches as a named call
-; would (native twin first).  The runtime's builtins take ids too.
+; Function values: a function's address is an id above every cell address (so
+; it is never NULL, never confused with memory), handed out the first time a
+; function's name is used as a value; a call through a value maps the id back
+; to the name and dispatches as a named call would (native twin first). The
+; runtime's builtins take ids too.
 (def %cc-fun-base 1048576)
 (def %cc-fun-ids ())    ; ((name . id) ...)
 (def %cc-builtins (list "putchar" "puts" "printf" "malloc" "free" "exit"))
@@ -115,7 +113,7 @@
         (do (clear 0) %cc-sp)))))
 
 ; heap cells, zero-filled like the stack's: the raw buffer behind the
-; memory is SPACE-filled at birth (0x20 bytes), and a global array's
+; memory is space-filled at birth (0x20 bytes), and a global array's
 ; uninitialized tail read 0x2020202020202020 until this cleared it
 (def %cc-heap
   (fn (_ n)
@@ -149,7 +147,7 @@
         (set! %cc-strtab (pair (pair text base) %cc-strtab))
         base))))
 
-; a C string OUT of memory (cells to the NUL)
+; a C string out of memory (cells to the NUL)
 (def %cc-cstr
   (fn (_ addr)
     (def go
@@ -361,7 +359,7 @@
                 (do (%cc-store (+ dst i) (%cc-load (+ src i))) (self (+ i 1))))))
     (go 0)))
 
-; cells out as a list, and back in: a returned struct is READ before
+; cells out as a list, and back in: a returned struct is read before
 ; its frame pops -- the caller's fresh slot can be the very cells the
 ; callee's first parameter held, and alloca zero-fills them (the bug:
 ; `return a;` of a mutated struct parameter came back all zero)
@@ -628,13 +626,13 @@
 (set! %cc-call
   (fn (_ name args)
     ; a native twin's entry is (keep pad entry . prim).  KEEP lists
-    ; WHICH of the C parameters the lane function takes: the lane has
+    ; which of the C parameters the lane function takes: the lane has
     ; four argument slots, and a parameter past them lives in a scratch
     ; cell instead, so a 6-parameter C function may reach a 4-parameter
     ; lane function.  The kept ones need not be a prefix -- a recursion
     ; hoists whichever parameters it never changes.  The accumulator inits (from build's
     ; loop transform) pad the call after those.  A pad slot is a
-    ; literal int, or a compiled init function over ALL the parameters
+    ; literal int, or a compiled init function over all the parameters
     ; -- applied to the actual args, once, right here.  ENTRY, when
     ; present, is the entry effects (the spilled variables' initial
     ; stores) as a compiled function over all the parameters, run first.
@@ -653,7 +651,7 @@
                     (map (fn (_ p) (if (number? p) p (apply p args)))
                       pad)))))
           ; a struct answer is an address the twin built at; copy it
-          ; into a fresh slot in THIS frame, so a second call to the
+          ; into a fresh slot in this frame, so a second call to the
           ; same function cannot overwrite the first one's result
           (if (= retsize 0) v
             (let ((vals (%cc-read-cells v retsize)))
@@ -785,7 +783,7 @@
 ; running
 (def %cc-run-core
   (fn (_ src jit?)
-    ; ONE vector for the process, and only the DIRTY ranges cleared per
+    ; one vector for the process, and only the dirty ranges cleared per
     ; run (an interpreted 16K full clear out-allocated the vector it
     ; replaced; the dirty ranges are hundreds of cells)
     (if (null? %cc-mem)

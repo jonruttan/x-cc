@@ -1,7 +1,7 @@
 # @weight 2
 
 Early exits in the compile-asm eligible class.  return/break/continue
-inside a loop body are GUARDED EXITS -- (guard . value) pairs the fold
+inside a loop body are guarded exits -- (guard . value) pairs the fold
 collects beside the update map, the guard being the conjunction of the
 path conditions above it -- and the lowered body is those exits as
 nested ifs ending in the ordinary self-call.  `break` exits with the

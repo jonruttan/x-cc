@@ -1,18 +1,17 @@
 #!/bin/sh
-# # x-cc -- POSIX cc on x-lang
+# # x-cc -- a C compiler on x-lang
 #
 # ## tests/spec-gate.sh -- shim onto the lang kit's gate
 #
-# @description Sources the PLATFORM's spec-gate; vendors nothing.  Runs the
+# @description Sources the platform's spec-gate; vendors nothing.  Runs the
 #   suite and compares its failures to tests/contract/known-failures.txt.
 # @author [Jon Ruttan](jonruttan@gmail.com)
 # @copyright 2026 Jon Ruttan
 # @license MIT No Attribution (MIT-0)
 #
-# THE PLATFORM SHIPS THE GATE; BUNDLES DO NOT VENDOR IT.  Three bundles once
-# carried a byte-identical copy, and a trap bug had to be fixed in all three
-# on the same day -- the case that moved it into tools/lang-kit/.  This file
-# only says where the bundle is and which x to ask for the kit.
+# The platform ships the gate; a bundle does not vendor it. The gate lives in
+# the platform's tools/lang-kit/. This file only says where the bundle is and
+# which x to ask for the kit.
 #
 # Set X to point at a particular x; X_LANG_KIT overrides the kit location.
 set -e

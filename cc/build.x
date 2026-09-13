@@ -1,74 +1,66 @@
 ; # x-cc -- a C compiler on x-lang
 ;
-; ## cc/build.x -- the compile-asm backend, slice one
+; ## cc/build.x -- the compile-asm backend
 ;
 ; @author [Jon Ruttan](jonruttan@gmail.com)
 ; @copyright 2026 Jon Ruttan
 ; @license MIT No Attribution (MIT-0)
 ;
-; THE ELIGIBLE CLASS: a C function lowers to the engine's JIT when it
-; is integers all the way -- int parameters, expressions over params,
-; literals, + - * / % & | ^ << >> comparisons && || ! ~ the ternary,
-; and calls to ITSELF (self-recursion rides the fn's first-param name,
-; x-lang#583's slot-0 convention).
+; The eligible class: a C function lowers to the engine's JIT when it is
+; integers all the way -- int parameters, expressions over params, literals,
+; + - * / % & | ^ << >> comparisons && || ! ~ the ternary, and calls to itself
+; (self-recursion rides the fn's first-param name, x-lang#583's slot-0
+; convention).
 ;
-; THE LANE'S ONE ARITY RULE, measured rather than assumed: a lane
-; function may take ANY number of parameters, but a SELF-CALL takes at
-; most four -- and it must pass every parameter the function has, or
-; the callee binds garbage and segfaults.  So a non-recursive function
-; has no limit, while anything riding a self-call (every loop) fits
-; four threaded variables, the rest spilling to cells.  Two body
-; shapes lower:
+; The lane's one arity rule, measured: a lane function may take any number of
+; parameters, but a self-call takes at most four and must pass every parameter
+; the function has, or the callee binds garbage and crashes. So a non-recursive
+; function has no limit, while anything riding a self-call (every loop) fits
+; four threaded variables, the rest spilling to cells. Two body shapes lower:
 ;   1. if/return/blocks -- fib and friends (%cc-lower-expr-fun)
-;   2. { decls; while|for; return } -- LOOPS, transformed to tail
-;      self-recursion: params AND accumulators ride the self-call
-;      with their folded new values, accumulators' literal inits
-;      supplied by arg-padding at the call boundary (%cc-lower-loop).
-;      The body fold (%cc-fold-stmts) takes assignments/++/-- to any
-;      threadable variable (a mutated param is fine), body-local
-;      temps (substitution-only, no slot), if/else (each written
-;      variable merges as a ternary), EXITS -- return/break/continue
-;      as guarded exits, plus loop-invariant pre-loop `if (C) return
-;      E;` guards -- and INITS over the parameters: decl inits,
-;      pre-loop assignments and the for-INIT fold in order, and a
-;      non-literal init pads as its own lane function over the params
-;      applied at the call boundary -- NESTED LOOPS, two deep, as a
-;      state machine over the one self-call (see the nested section
-;      in %cc-lower-loop) -- and POINTERS: the program's memory is one
-;      raw buffer both sides address, so a pointer is a cell index on
-;      both and arrays cross the boundary; in a body, reads become
-;      load temps and stores become effects, emitted in program order
-;      before the tail (%cc-extract, %cc-effects-do); a top-level
-;      local array takes scratch cells and its name substitutes away.
-;      A body that both stores and exits lowers as the ordered STREAM,
-;      each exit tested in its place among the stores (%cc-stream-do).
-;      SEQUENTIAL LOOPS run as phases of the one self-call: a phase
-;      counter rides as one more threaded variable and each loop's
-;      exit is the transition call into the next.  NESTING is any
-;      depth (the state machine is recursive).  Threaded variables
-;      past the lane's four arguments SPILL to scratch cells, read
-;      and written as memory, their entry values stored by one
-;      compiled entry function at the call boundary.  Reads under a
-;      short circuit run under a cond effect on the guard.
-;   3. CROSS-CALLS inline: a non-recursive callee of the if/return
-;      shape lowers with its own parameters, which then substitute to
-;      the lowered arguments (%cc-inline); in a loop body a cross-call
-;      evaluates at its program point through a temp, so its reads
-;      order against the stores.
-;   3b. STRAIGHT-LINE bodies -- assignments then a return -- take the
-;      same fold with no self-call at all (%cc-lower-straight).
-;   4. GLOBALS are memory at a known address (%cc-globals-subst): a
-;      scalar reads and writes as *(ADDR), an array is its base.
-; What stays interpreted, each a recorded pending: a RECURSIVE
-; function of more than four parameters (its self-call cannot pass
-; them), callees with loops or recursion (a lane function calls only
-; itself, so a callee must inline), calls through pointers, and struct
-; kinds.
+;   2. { decls; while|for; return } -- loops, transformed to tail
+;      self-recursion: params and accumulators ride the self-call with their
+;      folded new values, accumulators' literal inits supplied by arg-padding
+;      at the call boundary (%cc-lower-loop). The body fold (%cc-fold-stmts)
+;      takes assignments/++/-- to any threadable variable (a mutated param is
+;      fine), body-local temps (substitution-only, no slot), if/else (each
+;      written variable merges as a ternary), exits -- return/break/continue as
+;      guarded exits, plus loop-invariant pre-loop `if (C) return E;` guards --
+;      and inits over the parameters: decl inits, pre-loop assignments and the
+;      for-INIT fold in order, and a non-literal init pads as its own lane
+;      function over the params applied at the call boundary. Nested loops, two
+;      deep, become a state machine over the one self-call (see the nested
+;      section in %cc-lower-loop). Pointers: the program's memory is one raw
+;      buffer both sides address, so a pointer is a cell index on both and
+;      arrays cross the boundary; in a body, reads become load temps and stores
+;      become effects, emitted in program order before the tail (%cc-extract,
+;      %cc-effects-do); a top-level local array takes scratch cells and its name
+;      substitutes away. A body that both stores and exits lowers as the ordered
+;      stream, each exit tested in its place among the stores (%cc-stream-do).
+;      Sequential loops run as phases of the one self-call: a phase counter
+;      rides as one more threaded variable and each loop's exit is the
+;      transition call into the next. Nesting is any depth (the state machine is
+;      recursive). Threaded variables past the lane's four arguments spill to
+;      scratch cells, read and written as memory, their entry values stored by
+;      one compiled entry function at the call boundary. Reads under a short
+;      circuit run under a cond effect on the guard.
+;   3. Cross-calls inline: a non-recursive callee of the if/return shape lowers
+;      with its own parameters, which then substitute to the lowered arguments
+;      (%cc-inline); in a loop body a cross-call evaluates at its program point
+;      through a temp, so its reads order against the stores.
+;   3b. Straight-line bodies -- assignments then a return -- take the same fold
+;      with no self-call at all (%cc-lower-straight).
+;   4. Globals are memory at a known address (%cc-globals-subst): a scalar reads
+;      and writes as *(ADDR), an array is its base.
+; What stays interpreted, each a recorded pending: a recursive function of more
+; than four parameters (its self-call cannot pass them), callees with loops or
+; recursion (a lane function calls only itself, so a callee must inline), calls
+; through pointers, and struct kinds.
 ;
-; Adoption is sha256.x's pattern: the whole attempt sits in a guard;
-; a function that will not lower or will not compile simply stays
-; interpreted.  `build` reports which twin each function got, then
-; runs -- same output as `run`, faster where it counts.
+; Adoption is sha256.x's pattern: the whole attempt sits in a guard, and a
+; function that will not lower or compile stays interpreted. `build` reports
+; which twin each function got, then runs -- same output as `run`, faster where
+; it counts.
 
 (import x/tool/compile)
 
@@ -186,7 +178,7 @@
 
 ; --- cross-calls: inlining ---------------------------------------------------
 ; The lane calls only the function it is compiling, so a call to
-; ANOTHER function inlines: a callee of the if/return shape lowers
+; another function inlines: a callee of the if/return shape lowers
 ; with its own parameters as the variables, then each parameter symbol
 ; substitutes to the lowered argument -- all at once, so a callee
 ; parameter named like one of the caller's cannot capture.  Mutual
@@ -279,12 +271,12 @@
 ; --- loops: the tail-recursion transform -----------------------------------
 ; The lane has no loop -- only whole-function self-recursion.  So a C
 ; function shaped { decls; while|for; return R } becomes a tail-
-; recursive function whose accumulator and loop variables ride as EXTRA
+; recursive function whose accumulator and loop variables ride as extra
 ; parameters after the real ones: init in the arg-padding at the call
-; boundary, updated in the self-call.  The whole thing is ONE lane
-; function whose body IS the loop:
+; boundary, updated in the self-call.  The whole thing is one lane
+; function whose body is the loop:
 ;   (fn (name p... a...) (if COND (name p... new-a...) R))
-; Slice one: a flat body of assignments/++/-- to the accumulators,
+; This path takes a flat body of assignments/++/-- to the accumulators,
 ; literal inits, params+accs <= 4.  Nested control in the body, non-
 ; literal inits, and param mutation stay interpreted.
 
@@ -398,10 +390,10 @@
 
 ; the update fold: loop-body statements to an updates alist, in order.
 ; State is (map locals assigned): MAP is var -> cexpr in terms of the
-; iteration's ENTRY values; LOCALS are names declared in the body --
+; iteration's entry values; LOCALS are names declared in the body --
 ; substitution-only, they never need a parameter slot (a `t = a % b`
 ; temp folds straight into whoever reads it); ASSIGNED is the names
-; written, for the if-merge.  Any variable in EXT (params AND
+; written, for the if-merge.  Any variable in EXT (params and
 ; accumulators -- a mutated param just rides the self-call like an
 ; accumulator) or in LOCALS may be assigned.  An `if` folds each branch
 ; from the current map and merges every variable either branch wrote
@@ -413,17 +405,17 @@
     (let ((r (%cc-assoc-str v m)))
       (if (null? r) (list (lit var) v) (rest r)))))
 
-; EXITS: return/break/continue inside the body are GUARDED EXITS --
+; EXITS: return/break/continue inside the body are guarded exits --
 ; (guard-cexpr . value-cexpr) in appearance order, the guard the
 ; conjunction of the path conditions above it ((num 1) = unconditional,
 ; and the rest of that sequence is dead).  `return E` exits with E;
 ; `break` exits with the function's R evaluated at the break-point
-; map; `continue` exits with a SELF-CALL whose args come from the
+; map; `continue` exits with a self-call whose args come from the
 ; continue-point map with the for-step applied.  The lowered body is
 ; the exits as nested ifs ending in the ordinary self-call.  CTX is
 ; (ret-e step-node name).
 ; EFFECTS: memory is the one thing substitution cannot model, so the
-; fold carries an ORDERED effects list beside the map.  A memory read
+; fold carries an ordered effects list beside the map.  A memory read
 ; inside an expression is pulled out at its evaluation point into a
 ; (load K ADDR) effect -- K a temp cell in the native scratch region --
 ; and the expression reads (mt K) instead; a store to memory is a
@@ -472,7 +464,7 @@
                 (go (rest node))))))))))
 
 ; pull memory reads out of a cexpr in evaluation order; answers
-; (node' . effects') with the loads APPENDED.  Addresses substitute
+; (node' . effects') with the loads appended.  Addresses substitute
 ; the current map here, so they read this point's values.
 (def %cc-extract
   (fn (self node m effs)
@@ -805,7 +797,7 @@
         (pair (first inits)
           (self (rest inits) (rest accs) name v))))))
 
-; substitute through STATEMENTS (local arrays become literal bases)
+; substitute through statements (local arrays become literal bases)
 (def %cc-subst-stmts ())
 (def %cc-subst-stmt
   (fn (self s sub)
@@ -930,7 +922,7 @@
               (if (self (first (rest (rest (rest e))))) #t (self (rest effs))))
             (self (rest effs))))))))
 
-; THE STREAM: effects and exits in program order, lowered with each
+; The stream: effects and exits in program order, lowered with each
 ; exit tested in its place -- (if GUARD VALUE REST); an unconditional
 ; exit ends the stream.  A cond whose arms hold no exit is one
 ; statement; one that exits inside an arm carries the REST into both
@@ -977,7 +969,7 @@
         (def ret (first (rest (rest (rest split)))))
         (def ret-e0 (first (rest ret)))
         (if (null? ret-e0) (%cc-no "loop fn has a bare return"))
-        ; SEQUENTIAL LOOPS run as PHASES of the one self-call: a phase
+        ; Sequential loops run as phases of the one self-call: a phase
         ; counter rides as one more threaded variable (%ph -- no C name
         ; can collide), each loop's exit is the transition call into
         ; the next (the statements between them, its init and its
@@ -987,14 +979,14 @@
         (def accs0 (map (fn (_ d) (first (rest d))) decls))
         ; %ph first: it must keep its slot (a transition sets it)
         (def accs-all (if multi (pair "%ph" accs0) accs0))
-        ; SPILLS: every self-call passes all of the lane's four
-        ; argument slots, so THREADED VARIABLES past the fourth --
+        ; Spills: every self-call passes all of the lane's four
+        ; argument slots, so threaded variables past the fourth --
         ; parameters and accumulators alike -- live in scratch cells
         ; instead: their names substitute to *(CELL) through the loops,
         ; the guards and the return, they read and write as memory from
         ; there, and their entry values store at the call boundary (the
         ; entry effects, below).  Parameters keep the slots first, then
-        ; accumulators.  A spilled PARAMETER is one the lane function
+        ; accumulators.  A spilled parameter is one the lane function
         ; never takes, so the call passes fewer arguments than the C
         ; function has -- %cc-call reads the kept count from the table.
         (def take (fn (self2 l n) (if (if (null? l) #t (<= n 0)) () (pair (first l) (self2 (rest l) (- n 1))))))
@@ -1003,7 +995,7 @@
         ; substitution, so it can never be one of the spilled names:
         ; sequential loops reserve its slot, a parameter spilling to
         ; make room
-        ; ONE count for both sides: keeping N parameters and spilling
+        ; One count for both sides: keeping N parameters and spilling
         ; all but the first N are the same decision, and splitting them
         ; left the (multi) 4th parameter neither kept nor spilled -- a
         ; free variable at lowering
@@ -1040,8 +1032,8 @@
         ; the first loop's init, before any spill substitution: it folds
         ; into the init map over the parameters like the decl inits
         (def init-node (loop-init (rest (first loops0))))
-        ; THE INITS: decl inits, pre-loop assignments and the first
-        ; loop's for-INIT fold in order into a map over the PARAMETERS
+        ; The inits: decl inits, pre-loop assignments and the first
+        ; loop's for-init fold in order into a map over the parameters
         ; (each later init substitutes the earlier ones away), so every
         ; accumulator's entry value is an expression over params alone.
         ; A literal pads as an int; anything else pads as its own tiny
@@ -1109,18 +1101,17 @@
             (if (null? (%cc-st-exits st2)) st2
               (%cc-no (string-append what " may not exit")))))
         ; a body's effects run in a `do` before its tail; a body that
-        ; both stores and exits lowers as the ordered STREAM, each exit
+        ; both stores and exits lowers as the ordered stream, each exit
         ; tested in its place among the stores (%cc-stream-do)
         (def with-effects
           (fn (_ effs exits tail)
             (if (null? exits) (%cc-effects-do effs name ext tail)
               (if (%cc-real-effects? effs) (%cc-stream-do effs name ext tail)
                 (wrap-with tail exits)))))
-        ; a loop's guarded reset of its inner loop, for entry and for
-        ; the transition into it: (if I-cond (block PRE... J-init
-        ; RESET-OF-INNER...)) -- guarded, so PRE and J-init never leak
-        ; into R on the last exit; recursive, so entering a loop anew
-        ; enters every loop inside it anew
+        ; a loop's guarded reset of its inner loop, for entry and for the
+        ; transition into it: (if I-cond (block PRE... J-init RESET-OF-INNER...))
+        ; -- guarded, so PRE and J-init never leak into R on the last exit;
+        ; recursive, so entering a loop anew enters every loop inside it anew.
         (def reset-of
           (fn (self2 loop)
             (def nest (split-inner (loop-body loop) ()))
@@ -1134,14 +1125,14 @@
                 (if (null? reset-stmts) ()
                   (list (list (lit if) (loop-cond loop)
                           (list (lit block) reset-stmts) ())))))))
-        ; ONE LOOP, given what it answers when its condition fails --
+        ; One loop, given what it answers when its condition fails --
         ; R for the last loop, the transition call into the next for
         ; the others, the enclosing loop's transition for an inner
         ; loop -- and the effects that run before that answer.  Also
         ; what a break aims at (nothing, when those effects store: a
         ; static break target cannot carry them).  Answers
         ; (expr . assigned).
-        ; --- NESTED LOOPS: a state machine over the one self-call ----
+        ; --- nested loops: a state machine over the one self-call ----
         ; The body splits at its first top-level loop into PRE, the
         ; inner loop, and POST.  Each re-entry runs one step of
         ; whichever loop is active:
@@ -1151,7 +1142,7 @@
         ; the guarded reset.  An inner `break` is the transition call
         ; and an inner `continue` the inner self-call: folding from a
         ; map equals folding from identity then substituting, so the
-        ; transition is a STATIC cexpr the fold's break already
+        ; transition is a static cexpr the fold's break already
         ; substitutes.
         (def one-loop
           (fn (self2 loop exit-c exit-effs)
@@ -1190,7 +1181,7 @@
                 (pair
                   (list (lit if) lcond (first r) lexit)
                   (append (rest r) (first (rest (rest st-t)))))))))
-        ; the transition INTO the k-th loop (phase k-1): the statements
+        ; the transition into the k-th loop (phase k-1): the statements
         ; between the loops, its for-init, its inner reset, the phase
         ; advanced -- folded pure from identity into a static self-call
         (def trans-into
@@ -1209,7 +1200,7 @@
                 (%cc-fold-stmts stmts (%cc-st () () () () ()) ext
                   (list ret-e () name))
                 "a transition between loops"))
-            ; (call . effects): the next loop's init may STORE (its
+            ; (call . effects): the next loop's init may store (its
             ; counter spilled to a cell), and those run before the call
             (pair (call-from (first st)) (%cc-st-effects st))))
         ; the loops from the k-th on, selecting on the phase: (expr . assigned)
@@ -1229,8 +1220,8 @@
         (def loop-expr (first built))
         (def assigned (rest built))
         ; entry: the first loop's reset folded onto the init map gives
-        ; the pads (the kept accumulators' entry values) and the ENTRY
-        ; EFFECTS -- the spills' initial stores, then whatever the reset
+        ; the pads (the kept accumulators' entry values) and the entry
+        ; effects -- the spills' initial stores, then whatever the reset
         ; stores or loads -- one lane function over the parameters that
         ; %cc-call runs before the pads
         (def st-entry
@@ -1250,7 +1241,7 @@
         (def inits
           (map (fn (_ a)
                  (let ((e (%cc-var-of a imap-final)))
-                   ; NOT `lit` -- a def in a called body binds globally
+                   ; not `lit` -- a def in a called body binds globally
                    ; and `lit` is the quote operative
                    (def litv (%cc-int-lit e))
                    (if (not (null? litv)) litv
@@ -1268,7 +1259,7 @@
               (list (lit fn) (pair (lit %cc-init) psyms)
                 (%cc-effects-do entry-effs "" params 0)))))
         ; pre-loop guards re-run on every self-call re-entry, so each
-        ; must be LOOP-INVARIANT: it may read only parameters the body
+        ; must be loop-invariant: it may read only parameters the body
         ; never assigns (an accumulator holds its init only on first
         ; entry).  Guards wrap the loop outermost-first.
         (def invariant?
@@ -1325,22 +1316,20 @@
           (self (rest effs)))))))
 
 ; --- structs: field access as address arithmetic -----------------------------
-; The lane has no notion of a field, but the cell model already says
-; where one lives: a struct value IS its address, and a field is a
-; fixed offset from it.  So before lowering, every `.` and `->` becomes
-; explicit arithmetic over the shared memory -- `p->x` is `*(p + off)`,
-; `a[i].y` is `*(a + i*size + off)` -- and the existing load/store
-; machinery takes it from there.
+; The lane has no notion of a field, but the cell model already says where one
+; lives: a struct value is its address, and a field is a fixed offset. So
+; before lowering, every `.` and `->` becomes explicit arithmetic over the
+; shared memory -- `p->x` is `*(p + off)`, `a[i].y` is `*(a + i*size + off)` --
+; and the load/store machinery takes it from there.
 ;
-; The one semantic trap is a struct passed BY VALUE: the argument is
-; the caller's address, and C says the callee mutates a copy.  Reading
-; through the address is right, writing through it is not, so a
-; function that assigns a field of a by-value struct parameter refuses.
-; Through a POINTER, writing is the point, and is allowed.
+; The one semantic trap is a struct passed by value: the argument is the
+; caller's address, and C says the callee mutates a copy. Reading through the
+; address is right, writing through it is not, so a function that assigns a
+; field of a by-value struct parameter refuses. Through a pointer, writing is
+; the point and is allowed.
 ;
-; Anything whose kind this cannot determine refuses rather than
-; guessing: an unscaled index into an array of structs would be
-; silently wrong, which is the worst thing a compiler can be.
+; Anything whose kind this cannot determine refuses rather than guessing: an
+; unscaled index into an array of structs would be silently wrong.
 (def %cc-kind-env
   (fn (self stmts acc)
     (if (null? stmts) acc
@@ -1402,13 +1391,12 @@
 (def %cc-saddr ())
 (def %cc-sval ())
 
-; LOCAL AGGREGATES: an array or struct declared in a function needs
-; storage, and the native scratch region above the program's memory is
-; where it goes -- the name then stands for its base address, exactly
-; as a struct parameter does.  One block per function, not per frame,
-; so a genuinely recursive function with one refuses (its frames would
-; share the storage); a loop function's self-call is the same frame and
-; is fine.
+; Local aggregates: an array or struct declared in a function needs storage,
+; and the native scratch region above the program's memory is where it goes --
+; the name then stands for its base address, as a struct parameter does. One
+; block per function, not per frame, so a genuinely recursive function with one
+; refuses (its frames would share the storage); a loop function's self-call is
+; the same frame and is fine.
 (def %cc-local-bases ())
 (def %cc-base-of
   (fn (_ name)
@@ -1432,12 +1420,12 @@
             (list (lit un) "*" (%cc-saddr node env))
             node))))))
 
-; the ADDRESS a node names, as an expression over cells
+; the address a node names, as an expression over cells
 (set! %cc-saddr
   (fn (_ node env)
     (let ((t (first node)))
       (if (eq? t (lit var))
-        ; a local aggregate IS its scratch block; a struct parameter
+        ; a local aggregate is its scratch block; a struct parameter
         ; holds the caller's address
         (let ((b (%cc-base-of (first (rest node)))))
           (if (not (null? b)) (list (lit num) b)
@@ -1653,7 +1641,7 @@
 
 ; --- recursion past four parameters: hoisting the invariant ones -------------
 ; A self-call must pass every parameter the function has, and takes at
-; most four.  But a parameter that EVERY self-call passes along
+; most four.  But a parameter that every self-call passes along
 ; unchanged has the same value in every frame, so it does not need a
 ; slot at all: it can live in one scratch cell, written once at entry.
 ; The varying parameters keep their slots and the self-call passes only
@@ -1671,10 +1659,10 @@
     (def go (fn (self es) (if (null? es) #f (if (= (first es) x) #t (self (rest es))))))
     (go l)))
 
-; the sub-nodes of a form.  A TAGGED node is (tag . children), but a
-; plain LIST of nodes -- a statement list, a call's arguments -- has a
-; node in first position, and walking (rest ...) there silently skips
-; it.  That bug hid every self-call in a function's first statement.
+; the sub-nodes of a form. A tagged node is (tag . children), but a plain list
+; of nodes -- a statement list, a call's arguments -- has a node in first
+; position, so walking (rest ...) there skips it (which hid every self-call in
+; a function's first statement).
 (def %cc-kids
   (fn (_ node) (if (pair? (first node)) node (rest node))))
 
@@ -1763,7 +1751,7 @@
     (def need (- n 4))
     (if (< (length inv) need)
       (%cc-no "recursion past four parameters, too few of them invariant"))
-    ; hoist the LAST invariant ones: the earlier parameters are the
+    ; hoist the last invariant ones: the earlier parameters are the
     ; ones a reader expects to see change
     (def drop-n (fn (self l k) (if (<= k 0) l (if (null? l) () (self (rest l) (- k 1))))))
     (def hoisted (drop-n inv (- (length inv) need)))
@@ -1854,10 +1842,10 @@
           (let ((name (first (first fs))))
             (def params (first (rest (first fs))))
             (def body (first (rest (rest (first fs)))))
-            ; (name params body kinds ret).  A struct RETURNED by value
+            ; (name params body kinds ret).  A struct returned by value
             ; is an address here, like every other struct value: the
-            ; body answers wherever its result was built, and the CALL
-            ; BOUNDARY copies those cells into a fresh slot in the
+            ; body answers wherever its result was built, and the call
+            ; boundary copies those cells into a fresh slot in the
             ; caller's frame -- which is what the interpreter does, and
             ; what keeps two calls to the same function from sharing
             ; one block.  RETSIZE is how many cells that is, 0 for a
@@ -1871,9 +1859,9 @@
                     (let ((r (first (rest tail))))
                       (if (if (pair? r) (eq? (first r) (lit struct)) #f)
                         (%cc-kind-size r) 0))))))
-            ; X_CC_WHY=1 reports each refusal: the adoption rule is to
-             ; fall back silently, which makes a function that SHOULD
-             ; lower and does not very hard to see
+            ; X_CC_WHY=1 reports each refusal: the adoption rule is to fall back
+             ; silently, which makes a function that should lower and does not
+             ; hard to see.
             (def verdict
               (guard (e (do (if %cc-why?
                               (do (display "why ") (display name)
@@ -1903,7 +1891,7 @@
                   (def entry
                     (let ((e (first (rest (rest lowered)))))
                       (if (null? e) () (compile-asm e))))
-                  ; KEEP is the argument POSITIONS the lane function
+                  ; KEEP is the argument positions the lane function
                   ; takes: a spilled or hoisted parameter is one it
                   ; never sees, and those need not be a prefix
                   (def keep (first (rest (rest (rest lowered)))))

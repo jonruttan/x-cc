@@ -2,8 +2,8 @@
 
 Structs returned by value.  A struct value is an address, so a
 returning function answers wherever it built its result -- and because
-that place is one block per function rather than per call, the CALL
-BOUNDARY copies those cells into a fresh slot in the caller's frame.
+that place is one block per function rather than per call, the call
+boundary copies those cells into a fresh slot in the caller's frame.
 That is what the interpreter already does, and it is what keeps two
 calls to the same function from sharing one result: in
 `add(make(1, 2), make(3, 4))` both arguments come from `make`, and

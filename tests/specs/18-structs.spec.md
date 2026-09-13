@@ -1,14 +1,14 @@
 # @weight 2
 
 Struct fields, lowered.  The lane has no notion of a field, but the
-cell model already says where one lives: a struct value IS its
+cell model already says where one lives: a struct value is its
 address, and a field is a fixed offset from it.  So before lowering,
 every `.` and `->` becomes explicit arithmetic over the shared memory
 -- `p->x` is `*(p + off)`, `a[i].y` is `*(a + i*size + off)` -- and
 the existing load and store machinery takes it from there.  A struct
-passed BY VALUE is the one trap: the argument is the caller's address
-and C says the callee mutates a copy, so reading through it is right
-and writing through it is not.  Every expectation is an oracle row
+passed by value is the one asymmetry: the argument is the caller's
+address and C says the callee mutates a copy, so reading through it is
+right and writing through it is not.  Every expectation is an oracle row
 from /usr/bin/cc.
 
 ## fields as arithmetic

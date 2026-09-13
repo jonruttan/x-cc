@@ -6,9 +6,9 @@
 ; @copyright 2026 Jon Ruttan
 ; @license MIT No Attribution (MIT-0)
 ;
-; TOKENS: (num N) (str S) (id S) (kw SYM) (op S).  Character constants
+; Tokens: (num N) (str S) (id S) (kw SYM) (op S).  Character constants
 ; arrive as (num CODE) -- they are ints in C.  Every C89 keyword is
-; recognized (so the parser refuses the unimplemented ones LOUDLY,
+; recognized (so the parser refuses the unimplemented ones loudly,
 ; never misreads them as identifiers).  Object-like macros splice here,
 ; token-wise: an id in the macro table lexes its body and continues --
 ; one level, self-reference guarded by the in-expansion name list.
@@ -153,7 +153,7 @@
     (go l)))
 
 ; --- function-like macros ---------------------------------------------------
-; The arguments are collected as TEXT from the source (balanced parens,
+; The arguments are collected as text from the source (balanced parens,
 ; split at top-level commas, string and char literals opaque); the body
 ; text has each parameter identifier replaced by its argument text --
 ; identifier boundaries respected, string literals untouched -- and the
@@ -268,7 +268,7 @@
                 (self (+ i 1) start acc))))))))
     (go 0 0 ())))
 
-; the driver: text + macros to a token list; EXPANDING carries the
+; the driver: text + macros to a token list; `expanding` carries the
 ; macro names currently open, so a self-referential define terminates
 (def %cc-lex-go
   (fn (self src end i macros expanding acc)

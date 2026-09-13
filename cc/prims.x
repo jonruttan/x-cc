@@ -6,7 +6,7 @@
 ; @copyright 2026 Jon Ruttan
 ; @license MIT No Attribution (MIT-0)
 ;
-; The arc's rules throughout: byte doors per character, Vector for the
+; Performance rules throughout: byte doors per character, Vector for the
 ; O(1) memory the pointer model needs, no defs at depth in anything hot.
 
 (import x/sys/file)

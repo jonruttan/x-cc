@@ -1,14 +1,14 @@
 # @weight 2
 
-Four limits of the lowering design, lifted.  GLOBALS: the program is
+Four cases the lowering covers.  Globals: the program is
 loaded before anything lowers, so a global is memory at a known
 address -- a scalar reads and writes as *(ADDR), an array is its base;
-a parameter or local of the same name shadows.  SHORT CIRCUITS: the
+a parameter or local of the same name shadows.  Short circuits: the
 guarded operand's reads run under a cond effect on the guard, so a
-read the C never reaches never happens.  SPILLS: threaded variables
+read the C never reaches never happens.  Spills: threaded variables
 past the lane's four arguments live in scratch cells, read and written
 as memory, their entry values stored at the call boundary by one
-compiled entry function.  DEEPER LOOPS: the nested state machine is
+compiled entry function.  Deeper loops: the nested state machine is
 recursive, so a loop inside a loop inside a loop lowers.  Every
 expectation is an oracle row from /usr/bin/cc; the native twins print
 what the interpreter prints.
