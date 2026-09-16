@@ -2,18 +2,19 @@
 
 <p align="center"><img src="docs/bitwise-banner.svg" alt="x-cc, with Bitwise the owl" width="100%"></p>
 
-A C compiler on x-lang: the full front end (preprocessor subset,
-lexer, recursive-descent parser with all fifteen expression levels)
-and an evaluator with a real memory model, so
+A C compiler on x-lang -- the self-hosting arc's final tier, slice
+one: the full front end (preprocessor subset, lexer, recursive-descent
+parser with all fifteen expression levels) and an evaluator with a
+real memory model, so
 
     x -l cc -- run prog.c
 
-executes C, oracle-checked: every spec expectation comes from the same
+EXECUTES C, oracle-checked: every spec expectation comes from the same
 source compiled with /usr/bin/cc and run.  fib recurses, pointers
 write through, arrays decay into functions, bubble sort sorts, and the
 output matches the real binary byte for byte.
 
-The cell model: memory is one vector of cells; every scalar is one
+THE CELL MODEL: memory is one vector of cells; every scalar is one
 cell, sizeof any scalar is 1, pointer arithmetic counts cells.
 Addresses are real (0 is NULL and guarded), locals live in memory so
 &local works, the stack grows down and the heap up.  Programs that
@@ -74,8 +75,8 @@ joined token.
 Refused loudly, each a recorded pending: goto, floats, casts to
 function-pointer types, byte-accurate sizeof.
 
-`build` lowers the eligible functions through the engine's compile-asm
-lane to native machine code, no external toolchain; the rest stay
+`build` lowers the ELIGIBLE functions through the engine's compile-asm
+lane to NATIVE machine code, no external toolchain; the rest stay
 interpreted (sha256.x's adoption pattern: refuse, fall back).  Three
 body shapes lower: `if`/`return` recursion (fib), straight-line
 assignments ending in a return, and **loops** -- a
@@ -91,7 +92,7 @@ and `isprime` go native -- inits over the parameters (a non-literal
 init pads as its own tiny lane function, applied at the call boundary)
 -- nested loops, two deep, as a state machine over the one self-call
 (each re-entry runs a step of whichever loop is active; an inner
-`break` is the transition to the outer step) -- and pointers.  The
+`break` is the transition to the outer step) -- and POINTERS.  The
 program's memory is one raw buffer that the interpreter and the native
 twins address alike (the lane's `%mem-ref-at`/`%mem-set-at!` with the
 buffer's data address baked in), so a pointer is a cell index on both
@@ -102,12 +103,14 @@ program order before the tail -- and when exits sit among the stores,
 the stream lowers with each exit tested in its place.  **Sequential
 loops** run as phases of the one self-call: a phase counter rides as
 one more threaded variable and each loop's exit is the transition call
-into the next.  **Cross-calls inline**: a non-recursive callee of the
-if/return shape lowers with its own parameters, which substitute to
-the lowered arguments (`cube` calls `sq`, `sumsq` calls `sq` in its
-loop, an init calls `cube`); inside a loop body a cross-call evaluates
-at its program point through a temp, so its reads order against the
-stores.  **Globals** are memory at a known address, a scalar read and
+into the next.  **Cross-calls name the callee's twin**: callees are
+compiled before their callers, each native twin gets a door taking the
+C parameters in order, and a caller names that door through a free
+variable, so a callee with a loop or its own recursion is an ordinary
+call.  A callee with no twin is inlined instead, lowering with its own
+parameters, which substitute to the lowered arguments.  Inside a loop
+body a cross-call evaluates at its program point through a temp, so
+its reads order against the stores.  **Globals** are memory at a known address, a scalar read and
 written as `*(ADDR)`, an array its base.  Reads under `&&`, `||` and
 `?:` run under a cond effect on the guard, so a read the C never
 reaches never happens.  Threaded variables past the lane's four
@@ -121,12 +124,12 @@ runs, same output as `run`: fib(24) 67s -> 10.5s wall, a
 under the boot).  The **bitwise family lowers too** -- `&` `|` `^`
 `<<` `>>` are single ARM64 instructions, and `>>` is arithmetic, so it
 matches C on a signed word -- which makes shift-and-mask code (a
-djb2 hash, a popcount loop) native.  **Arity**: a lane function takes
-any number of parameters, and only a self-call is limited to four,
-which it must fill completely.  So an eight-parameter leaf is native,
-a five-parameter recursion is not, and a loop past four threaded
-variables spills the rest -- parameters included, the call passing
-only what the lane kept.  `X_CC_WHY=1`
+djb2 hash, a popcount loop) native.  **Arity**, measured rather than
+assumed: a lane function takes any number of parameters, and only a
+SELF-CALL is limited to four, which it must fill completely.  So an
+eight-parameter leaf is native, a five-parameter recursion is not, and
+a loop past four threaded variables spills the rest -- parameters
+included, the call passing only what the lane kept.  `X_CC_WHY=1`
 reports why each refused function refused, both paths.
 
 A **third body shape** lowers as well: assignments and a return, with
@@ -137,15 +140,15 @@ so a rotation through a temp, an early return and a swap through
 memory all go native.
 
 **Struct fields lower too.**  The lane has no notion of a field, but
-the cell model already says where one lives: a struct value is its
+the cell model already says where one lives: a struct value IS its
 address, and a field is a fixed offset from it, so before lowering
 every `.` and `->` becomes explicit arithmetic -- `p->x` is
 `*(p + off)`, `a[i].y` is `*(a + i*size + off)` -- and the load and
 store machinery takes it from there.  A pointer walk down a linked
 list, a sum over an array of structs, and a function reading two
-by-value struct parameters are all native.  Writing through a pointer
-is allowed; assigning a field of a by-value parameter would write the
-caller's copy, so it refuses.
+by-value struct parameters are all native.  Writing through a POINTER
+is the point and is allowed; assigning a field of a BY-VALUE parameter
+would write the caller's copy, so it refuses.
 
 **Local aggregates** get storage in the same pass: an array or struct
 declared in a function takes a block of scratch cells, its name stands
@@ -157,7 +160,7 @@ a loop, and an array of structs indexes with the right stride.
 
 **Recursion past four parameters** lowers when it can: a self-call
 must pass every parameter and takes at most four, but a parameter
-every self-call passes along unchanged holds the same value in every
+every self-call passes along UNCHANGED holds the same value in every
 frame, so it is hoisted into a cell written once at entry and the
 self-call carries only the ones that vary.  A recursion whose
 parameters all vary stays interpreted.  **Structs returned by value**
@@ -165,16 +168,14 @@ lower too -- the answer is the address the result was built at, and
 the call boundary copies those cells into a fresh slot in the caller's
 frame, so `add(make(1, 2), make(3, 4))` cannot alias.
 
-What remains are the two the lane itself cannot express, both filed
-against the engine: a callee with a loop or its own recursion (it must
-inline, and an expression cannot loop) needs `compile-asm` to call a
-prim named at compile time, `jonruttan/x-lang#603`; a call through a
-function pointer needs one chosen at run time,
-`jonruttan/x-lang#604`.  The self-call already builds an args list and
-branches to an address it loads, and free variables already carry
-objects into compiled code.
+What remains: mutual recursion, where one of the pair compiles first
+and the door it would call does not exist yet; a call through a
+function pointer, which needs a head the lane computes at run time
+(`(%call HEAD ...)`, x-lang#604); and a struct returned by value from
+a called function, whose result has to be copied out at a frame only
+the interpreted boundary has.
 
-Paired with x-lang v0.13.0 (`lang.xon` is the checkable row).
+Paired with x-lang v0.10.0 (`lang.xon` is the checkable row).
 
 ## Tests
 
@@ -183,7 +184,7 @@ Paired with x-lang v0.13.0 (`lang.xon` is the checkable row).
 
 ## Layout
 
-    lang.xon          what this bundle is (self-contained)
+    lang.xon          what this bundle IS (self-contained)
     run.x             the entry: operands mean "be cc"
     cc/pp.x           comments out, #include dropped, #define collected
     cc/lex.x          C tokens, macros spliced token-wise

@@ -1,8 +1,8 @@
 # @weight 2
 
 Non-literal inits in the compile-asm eligible class.  An accumulator's
-entry value may be any expression over the parameters: decl inits,
-pre-loop assignments and the for-init fold in order into a map (each
+entry value may be any expression over the PARAMETERS: decl inits,
+pre-loop assignments and the for-INIT fold in order into a map (each
 later init substitutes the earlier ones away), and a non-literal init
 pads as its own tiny lane function over the params, applied to the
 actual args at the call boundary -- once, at entry, native.  Every
@@ -66,7 +66,7 @@ interp main
 
 ## the refusal
 
-### an init that calls a function stays interpreted
+### an init that calls a function
 
 ```cc
 (display (cc-build-run "#include <stdio.h>\nint tri(int n) { int s = 0; int i; for (i = 1; i <= n; i++) s = s + i; return s; }\nint viacall(int n) { int s = tri(n); int i; for (i = 0; i < n; i++) s = s + 1; return s; }\nint main() { printf(\"%d %d\\n\", viacall(4), tri(4)); return 0; }"))
@@ -74,7 +74,7 @@ interp main
 ---
 ```output
 native tri
-interp viacall
+native viacall
 interp main
 14 10
 0
