@@ -168,12 +168,19 @@ lower too -- the answer is the address the result was built at, and
 the call boundary copies those cells into a fresh slot in the caller's
 frame, so `add(make(1, 2), make(3, 4))` cannot alias.
 
+**A call through a function pointer** lowers as a dispatch on the
+function value: ids are handed out in program order before anything
+compiles, so the chain of tests names each target's door, falling
+through to the lane's `(%call HEAD ...)` on a value matching none,
+which refuses at run time as the interpreter does.  `f(f(x))` through
+a parameter and `ops[i](a, b)` through a global table are native.
+
 What remains: mutual recursion, where one of the pair compiles first
-and the door it would call does not exist yet; a call through a
-function pointer, which needs a head the lane computes at run time
-(`(%call HEAD ...)`, x-lang#604); and a struct returned by value from
-a called function, whose result has to be copied out at a frame only
-the interpreted boundary has.
+and the door it would call does not exist yet; a call through a value
+whose head is not cheap to repeat, or whose program takes the address
+of a function that has no door; and a struct returned by value from a
+called function, whose result has to be copied out at a frame only the
+interpreted boundary has.
 
 Paired with x-lang v0.10.0 (`lang.xon` is the checkable row).
 
