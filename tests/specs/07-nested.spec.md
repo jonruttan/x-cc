@@ -1,7 +1,7 @@
 # @weight 2
 
 Nested loops in the compile-asm eligible class.  The lane self-calls
-only, so an inner loop is a STATE MACHINE over the one self-call: each
+only, so an inner loop is a state machine over the one self-call: each
 re-entry runs one step of whichever loop is active --
 `(if I-cond (if J-cond INNER-STEP TRANSITION) R)` -- where the
 transition folds the statements after the inner loop, the outer step,

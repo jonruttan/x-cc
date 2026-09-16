@@ -1,13 +1,13 @@
 # @weight 2
 
-Three shapes the lowerer used to refuse.  STORES WITH EXITS: the fold's
+Three body shapes in the lowering.  Stores with exits: the fold's
 effect stream carries an exit marker at each exit's program point, and
 the stream lowers with every exit tested in its place among the stores
 (a conditional that exits carries the continuation into both arms).
-SEQUENTIAL LOOPS: two or more loops in a row run as phases of the one
+Sequential loops: two or more loops in a row run as phases of the one
 self-call -- a phase counter rides as one more threaded variable, and
 each loop's exit is the transition call into the next, its init folded
-and the phase advanced.  CROSS-CALLS: a non-recursive callee of the
+and the phase advanced.  Cross-calls: a non-recursive callee of the
 if/return shape inlines, its parameters substituting to the lowered
 arguments; inside a loop body a cross-call evaluates at its program
 point through a temp, so its reads order against the stores.  Every

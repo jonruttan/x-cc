@@ -1,8 +1,8 @@
 # @weight 2
 
 Non-literal inits in the compile-asm eligible class.  An accumulator's
-entry value may be any expression over the PARAMETERS: decl inits,
-pre-loop assignments and the for-INIT fold in order into a map (each
+entry value may be any expression over the parameters: decl inits,
+pre-loop assignments and the for-init fold in order into a map (each
 later init substitutes the earlier ones away), and a non-literal init
 pads as its own tiny lane function over the params, applied to the
 actual args at the call boundary -- once, at entry, native.  Every

@@ -1,6 +1,6 @@
 # tests/contract/known-failures.txt -- the ratchet.
 #
-# The recorded set of failing test names, compared BY NAME by spec-gate.
+# The recorded set of failing test names, compared by name by spec-gate.
 # Red in both directions: a new failure is a regression, a recorded failure
 # that passes must be removed.  The list may only shrink.
 #

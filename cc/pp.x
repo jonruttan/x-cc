@@ -8,7 +8,7 @@
 ;
 ; Comments strip first (string- and char-aware), then the # lines:
 ; #include drops (the runtime provides the library the tests use),
-; object-like #define records a macro the LEXER splices token-wise --
+; object-like #define records a macro the lexer splices token-wise --
 ; substitution never touches text, so strings are safe by construction.
 ; Function-like macros are collected here as (NAME %fn (PARAMS) . BODY)
 ; and expanded in the lexer.  #ifdef/#ifndef/#elif/#else/#endif/#undef
@@ -203,7 +203,7 @@
 
 ; source to (clean-text . macro-alist): comments stripped, # lines
 ; pulled out and replaced with blanks (token separation kept)
-; the walk carries a STACK of conditional entries, (ACTIVE . TAKEN): a
+; the walk carries a stack of conditional entries, (ACTIVE . TAKEN): a
 ; line lives when every open conditional is active; TAKEN says a branch
 ; of this conditional already ran, so #elif and #else stay off.  An
 ; inactive region still tracks its own nesting, so its #endif pairs;

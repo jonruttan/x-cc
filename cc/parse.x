@@ -6,12 +6,11 @@
 ; @copyright 2026 Jon Ruttan
 ; @license MIT No Attribution (MIT-0)
 ;
-; GRAMMAR ONLY, functionally threaded: every function answers
+; Grammar only, functionally threaded: every function answers
 ; (ast . remaining-tokens).  The full C expression ladder, fifteen
-; levels, each level one flat function -- the arc's thrice-learned
-; misnesting lesson applied from the start.
+; levels, each level one flat function.
 ;
-; THE AST:
+; The AST:
 ;   toplevel  (fun NAME PARAMS BODY KINDS RET-KIND) (gdecl NAME KIND INIT|())
 ;   stmts     (block ITEMS) (if C T E|()) (while C B) (do B C)
 ;             (for I|() C|() U|() B) (return E|()) (break) (continue)
@@ -94,10 +93,10 @@
         #f))))
 
 ; --- types, as far as the cell model needs them ----------------------------
-; KINDS: scalar | (array N) | (array N K) | (struct S) | (ptr K).  Every
+; Kinds: scalar | (array N) | (array N K) | (struct S) | (ptr K).  Every
 ; scalar is one cell; a struct is its fields laid end to end (a field's
 ; offset is the cells before it); an array of K is N*size(K) cells; a
-; pointer is one cell, and its K is kept ONLY when it points at a
+; pointer is one cell, and its K is kept only when it points at a
 ; struct, because that is when arithmetic on it must scale and `->`
 ; must know its fields.  The parser keeps the struct and typedef tables
 ; (the evaluator reads them; parse always precedes load in a process).

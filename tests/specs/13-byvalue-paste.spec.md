@@ -26,7 +26,7 @@ expectation is an oracle row from /usr/bin/cc.
 
 ### by value, natively
 
-In the cell model a struct value IS its address, so a by-value
+In the cell model a struct value is its address, so a by-value
 parameter's fields lower to address arithmetic and a struct return is
 the address its result was built at, copied into the caller's frame at
 the call boundary (18-structs and 21-sret have the full story).

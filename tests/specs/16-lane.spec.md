@@ -1,11 +1,10 @@
 # @weight 2
 
-The lane's contract, measured rather than assumed.  Two things the
-compiler believed about the JIT were false: it HAS the bitwise family
-(`&` `|` `^` `<<` `>>` compile to ARM64 and/orr/eor/lslv/asrv, and `>>`
-is arithmetic, matching C on a signed word), and a lane function may
-take ANY number of parameters.  The one real arity rule is that a
-SELF-CALL takes at most four arguments and must pass every parameter
+The lane's contract.  The JIT has the bitwise family (`&` `|` `^`
+`<<` `>>` compile to ARM64 and/orr/eor/lslv/asrv, and `>>` is
+arithmetic, matching C on a signed word), and a lane function may take
+any number of parameters.  The one arity rule is that a self-call
+takes at most four arguments and must pass every parameter
 the function has -- so a non-recursive function has no limit, while
 anything riding a self-call fits four threaded variables and the rest
 spill to cells, parameters included.  Every expectation is an oracle

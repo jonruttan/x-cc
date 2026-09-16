@@ -1,7 +1,7 @@
 # @weight 3
 
 Pointers in the compile-asm eligible class.  The program's memory is
-ONE raw buffer (a string's bytes) that the interpreter addresses
+one raw buffer (a string's bytes) that the interpreter addresses
 through ptr ref-word/set-word! and the native twins through the lane's
 %mem-ref-at / %mem-set-at! with the buffer's data address baked in --
 so a pointer is a cell index on both sides and arrays cross the

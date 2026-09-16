@@ -13,7 +13,7 @@
 
 (def cc-version "0.1.0")
 
-; token lists render bare, the arc's usual twenty lines
+; token lists render bare
 (def %cc-write ())
 (def %cc-x-write write)
 (def %cc-write-items

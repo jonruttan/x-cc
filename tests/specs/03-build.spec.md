@@ -2,7 +2,7 @@
 
 The build slice: cc-build-run lowers the eligible functions through
 the engine's compile-asm lane, reports each verdict (native or
-interp), and runs -- SAME program output as cc-run, natively where it
+interp), and runs -- same program output as cc-run, natively where it
 counts.  The twin-agreement rule is the spec: build cases repeat run
 cases and must only add the report lines.
 

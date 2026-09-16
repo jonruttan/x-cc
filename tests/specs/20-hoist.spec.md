@@ -2,7 +2,7 @@
 
 Recursion past the lane's four arguments.  A self-call must pass every
 parameter the function has, and takes at most four.  But a parameter
-that EVERY self-call passes along unchanged holds the same value in
+that every self-call passes along unchanged holds the same value in
 every frame, so it needs no slot: it lives in one scratch cell,
 written once at entry, and the self-call passes only the parameters
 that actually vary.  A parameter the recursion changes cannot be

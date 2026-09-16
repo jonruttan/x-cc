@@ -2,7 +2,7 @@
 
 Loops in the compile-asm eligible class.  A C function shaped
 `{ decls; while|for; return R }` transforms into tail self-recursion:
-every threadable variable -- the parameters AND the accumulators --
+every threadable variable -- the parameters and the accumulators --
 rides the self-call with its folded new value; accumulators get their
 literal inits by arg-padding at the call boundary.  Output is
 oracle-checked against the same source through /usr/bin/cc; the build
@@ -72,7 +72,7 @@ interp main
 
 The `int t;` inside the body is a substitution variable -- it never
 needs a parameter slot; `b = a + b; a = b - a;` folds so the second
-assignment reads the FIRST's new value, C's sequential semantics.
+assignment reads the first's new value, C's sequential semantics.
 
 ```cc
 (display (cc-build-run "#include <stdio.h>\nint fibit(int n) { int a = 0; int b = 1; int i; for (i = 0; i < n; i++) { int t; b = a + b; a = b - a; } return a; }\nint main() { printf(\"%d\\n\", fibit(10)); return 0; }"))
