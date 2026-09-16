@@ -15,4 +15,4 @@ on:
 
 jobs:
   ci:
-    uses: jonruttan/x-lang/.github/workflows/bundle.yml@ci-bundle-workflow
+    uses: jonruttan/x-lang/.github/workflows/bundle.yml@main
