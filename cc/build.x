@@ -60,13 +60,18 @@
 ;      stores.
 ;   3b. STRAIGHT-LINE bodies -- assignments then a return -- take the
 ;      same fold with no self-call at all (%cc-lower-straight).
+;   3c. A CALL THROUGH A VALUE dispatches on the function id: the ids
+;      are handed out in program order before anything compiles, so the
+;      chain of tests names each target's door, falling through to the
+;      lane's (%call HEAD ...) on a value that matches none.
 ;   4. GLOBALS are memory at a known address (%cc-globals-subst): a
 ;      scalar reads and writes as *(ADDR), an array is its base.
 ; What stays interpreted, each a recorded pending: a recursive
 ; function of more than four parameters (its self-call cannot pass
 ; them), mutual recursion (one of the pair compiles first, and the
-; door it would call does not exist yet), calls through pointers, and
-; a struct returned by value from a called function.
+; door it would call does not exist yet), a call through a value whose
+; head is not cheap to repeat or whose targets do not all have doors,
+; and a struct returned by value from a called function.
 ;
 ; Adoption is sha256.x's pattern: the whole attempt sits in a guard;
 ; a function that will not lower or will not compile simply stays
@@ -179,18 +184,27 @@
           (let ((callee (first (rest node))))
             (def args
               (map (fn (_ a) (self a fname params)) (first (rest (rest node)))))
-            (if (string=? callee fname)
-              (if (> (length args) 4)
-                (%cc-no "the lane takes at most 4 args")
-                (pair (convert fname %symbol) args))
+            (match
+              ; a variable holding a function value, not a function name
+              ((%cc-member-str? callee params)
+                (%cc-lower-indirect (convert callee %symbol) args))
+              ((string=? callee fname)
+                (if (> (length args) 4)
+                  (%cc-no "the lane takes at most 4 args")
+                  (pair (convert fname %symbol) args)))
               ; another function: call its compiled twin by name when
               ; there is one, and inline its body when there is not
-              (let ((abi (%cc-abi-of callee)))
-                (if (if (null? abi) #f (<= (length args) 4))
-                  (do (%cc-check-names callee ())
-                      (%cc-need-fvar! callee abi)
-                      (pair (convert callee %symbol) args))
-                  (%cc-inline callee args))))))
+              (#t
+                (let ((abi (%cc-abi-of callee)))
+                  (if (if (null? abi) #f (<= (length args) 4))
+                    (do (%cc-check-names callee ())
+                        (%cc-need-fvar! callee abi)
+                        (pair (convert callee %symbol) args))
+                    (%cc-inline callee args)))))))
+        ((eq? t (lit callx))
+          (%cc-lower-indirect
+            (self (%cc-strip-deref (first (rest node))) fname params)
+            (map (fn (_ a) (self a fname params)) (first (rest (rest node))))))
         (#t (%cc-no "form stays interpreted"))))))
 
 ; --- cross-calls: inlining ---------------------------------------------------
@@ -320,6 +334,71 @@
         (if (null? entry) call (list (lit do) (%cc-fn-body entry) call)))
       (pair (pair (lit %cc-twin) twin) %cc-fvars) #f)))
 
+; --- calls through a value ---------------------------------------------------
+; A function value is an id, handed out in program order before anything
+; compiles, so every target's id is known while this code is generated.  The
+; dispatch is a chain of tests on that id, each arm a call to that function's
+; door; a value matching none falls through to (%call HEAD ...), which refuses
+; at run time as the interpreter does.  Every function whose address the
+; program takes needs a door, since a pointer could name any of them and the
+; lane has no way back to the interpreter.
+(def %cc-indirect-ok?
+  (fn (_)
+    (def go
+      (fn (self ns)
+        (if (null? ns) #t
+          (if (null? (%cc-abi-of (first ns))) #f (self (rest ns))))))
+    (go %cc-addr-taken)))
+
+; The head is tested once per arm, so it has to be free of effects and
+; cheap to repeat: a parameter, a literal, a read, and arithmetic over
+; those.  A call anywhere in it is neither, and refuses.
+(def %cc-pure-ops
+  (list (lit +) (lit -) (lit *) (lit /) (lit %) (lit &) (lit |) (lit ^)
+    (lit <<) (lit >>) (lit ~) (lit %mem-ref-at)))
+
+(def %cc-head-repeatable?
+  (fn (self h)
+    (if (symbol? h) #t
+      (if (number? h) #t
+        (if (not (pair? h)) #f
+          (let ((op (first h)))
+            (def known?
+              (let ((go (fn (self2 os)
+                          (if (null? os) #f
+                            (if (eq? (first os) op) #t (self2 (rest os)))))))
+                (go %cc-pure-ops)))
+            (if (not known?) #f
+              (let ((go (fn (self2 xs)
+                          (if (null? xs) #t
+                            (if (self (first xs)) (self2 (rest xs)) #f)))))
+                (go (rest h))))))))))
+
+(def %cc-lower-indirect
+  (fn (_ h args)
+    (if (not (%cc-head-repeatable? h))
+      (%cc-no "a call through a computed value stays interpreted"))
+    (if (not (%cc-indirect-ok?))
+      (%cc-no "a function whose address is taken has no native door"))
+    (if (> (length args) 4) (%cc-no "the lane takes at most 4 args"))
+    (def go
+      (fn (self es)
+        (if (null? es) (pair (lit %call) (pair h args))
+          (let ((nm (first (first es))))
+            (do (%cc-check-names nm ())
+                (%cc-need-fvar! nm (rest (first es)))
+                (list (lit if) (list (lit =) h (%cc-fun-id nm))
+                  (pair (convert nm %symbol) args)
+                  (self (rest es))))))))
+    (go %cc-abi)))
+
+; `*f` is `f` for a function value, as in C
+(def %cc-strip-deref
+  (fn (self node)
+    (if (if (eq? (first node) (lit un)) (string=? (first (rest node)) "*") #f)
+      (self (first (rest (rest node))))
+      node)))
+
 ; a statement list where every path returns, as one expression
 (set! %cc-lower-body
   (fn (self stmts fname params)
@@ -422,6 +501,10 @@
       (if (eq? t (lit call))
         (list (lit call) (first (rest node))
           (map (fn (_ a) (self a sub)) (first (rest (rest node)))))
+      ; a call through a value: the head is an expression too
+      (if (eq? t (lit callx))
+        (list (lit callx) (self (first (rest node)) sub)
+          (map (fn (_ a) (self a sub)) (first (rest (rest node)))))
       ; memory forms: a subscript's base and index, an assignment's
       ; target and value, an increment's target -- a local array's
       ; name lives inside these
@@ -435,7 +518,7 @@
             (if (eq? t (lit preinc)) #t
               (if (eq? t (lit postdec)) #t (eq? t (lit predec)))))
         (list t (self (first (rest node)) sub))
-        node))))))))))))))
+        node)))))))))))))))
 
 ; a raw expression that is an assignment/inc to a variable, as
 ; (varname . new-value-cexpr), else nil
@@ -1586,13 +1669,16 @@
         (if (eq? t (lit call))
           (list (lit call) (first (rest node))
             (map (fn (_ a) (self a env byval)) (first (rest (rest node)))))
+        (if (eq? t (lit callx))
+          (list (lit callx) (self (first (rest node)) env byval)
+            (map (fn (_ a) (self a env byval)) (first (rest (rest node)))))
         (if (eq? t (lit var))
           ; an aggregate's name decays to its address
           (if (%cc-kind-decays? (%cc-lk node env)) (%cc-sval node env) node)
         (if (if (eq? t (lit num)) #t (eq? t (lit str)))
           node
           (pair t (map (fn (_ x) (if (pair? x) (self x env byval) x))
-                    (rest node)))))))))))))
+                    (rest node))))))))))))))
 
 (def %cc-srw-stmts ())
 (def %cc-srw-stmt
@@ -1914,9 +2000,14 @@
 (def %cc-why? #f)
 (def %cc-loop-why ())   ; the loop path's refusal, kept for the report
 
+; The first pass says nothing: a refusal there may only mean a door that
+; had not been built yet, and the retry below is where a function's
+; verdict is settled.
+(def %cc-quiet? #f)
+
 (def %cc-report-why
   (fn (_ name e)
-    (if (not %cc-why?) ()
+    (if (if %cc-quiet? #t (not %cc-why?)) ()
       (do (display "why ") (display name) (display ": ") (write e)
           (if (null? %cc-loop-why) ()
             (do (display " | loop path: ") (write %cc-loop-why)))
@@ -2017,20 +2108,23 @@
               (def ent
                 (if (null? entry-form) ()
                   (compile-asm entry-form %cc-fvars #f)))
+              ; the door another compiled function calls by name.  A
+              ; struct return has none: its result has to be copied out,
+              ; and only the interpreted boundary has a frame to copy into.
+              (def door
+                (if (> retsize 0) ()
+                  (if (%cc-abi-plain? (length params) pads entry-form keep)
+                    prim
+                    (%cc-abi-entry params pads entry-form keep prim))))
+              ; both tables move together, after everything that can
+              ; refuse has run: a twin registered without its door would
+              ; be called by the boundary and missed by its callers
               (set! %cc-natives
                 (pair (pair name
                         (pair keep (pair pad (pair ent (pair retsize prim)))))
                   %cc-natives))
-              ; the door another compiled function calls by name.  A
-              ; struct return has none: its result has to be copied out,
-              ; and only the interpreted boundary has a frame to copy into.
-              (if (> retsize 0) ()
-                (set! %cc-abi
-                  (pair (pair name
-                          (if (%cc-abi-plain? (length params) pads entry-form keep)
-                            prim
-                            (%cc-abi-entry params pads entry-form keep prim)))
-                    %cc-abi)))
+              (if (null? door) ()
+                (set! %cc-abi (pair (pair name door) %cc-abi)))
               (lit native))))))
     (let ((go (fn (self es)
                 (if (null? es) ()
@@ -2038,7 +2132,21 @@
                         (pair (pair (first (first es)) (one (first es)))
                           verdicts))
                       (self (rest es)))))))
-      (go (%cc-order prog)))
+      (do (set! %cc-quiet? #t) (go (%cc-order prog)) (set! %cc-quiet? #f)))
+    ; a refusal may have been an ordering one -- a door that did not exist
+    ; yet, or a function whose address is taken and had not compiled --
+    ; so every interpreted function is offered once more
+    (set! verdicts
+      (let ((go (fn (self es acc)
+                  (if (null? es) (reverse acc)
+                    (let ((e (first es)))
+                      (if (eq? (rest e) (lit interpreted))
+                        (self (rest es)
+                          (pair (pair (first e)
+                                  (one (pair (first e) (%cc-fun (first e)))))
+                            acc))
+                        (self (rest es) (pair e acc))))))))
+        (go verdicts ())))
     ; report in program order, whatever order they compiled in
     (map (fn (_ e) (pair (first e) (rest (%cc-assoc-str (first e) verdicts))))
       prog)))

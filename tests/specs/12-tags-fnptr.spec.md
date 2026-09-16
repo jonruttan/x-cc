@@ -51,7 +51,10 @@ same
 0
 ```
 
-### a native twin, called through a pointer from interpreted code
+### a call through a pointer, on both sides of the boundary
+
+The caller lowers too, dispatching on the function value (23-fnptr has
+that story), so nothing here crosses back into the interpreter.
 
 ```cc
 (display (cc-build-run "#include <stdio.h>\nint sq(int n) { return n * n; }\nint twice(int (*f)(int), int x) { return f(f(x)); }\nint main() { printf(\"%d\\n\", twice(sq, 3)); return 0; }"))
@@ -59,7 +62,7 @@ same
 ---
 ```output
 native sq
-interp twice
+native twice
 interp main
 81
 0

@@ -63,6 +63,46 @@
           (set! %cc-fun-ids (pair (pair name id) %cc-fun-ids))
           id)))))
 
+; The function names this program uses as VALUES rather than calling: a
+; `(var N)` naming a function, which is what `f = sq`, `&sq`, `apply(sq,
+; ...)` and an initializer list of them all read as.  Collected from the
+; whole parsed program, gdecl initializers included, because a native
+; dispatch on a function value has to know every target it might see.
+(def %cc-addr-taken ())
+
+(def %cc-scan-program!
+  (fn (_ prog)
+    (set! %cc-addr-taken ())
+    (def named?
+      (fn (_ n)
+        (if (null? (%cc-fun n)) (%cc-member-str? n %cc-builtins) #t)))
+    (def walk
+      (fn (self node)
+        (if (not (pair? node)) ()
+          (do
+            (if (if (pair? (first node)) #f (eq? (first node) (lit var)))
+              (let ((n (first (rest node))))
+                (if (if (named? n) (not (%cc-member-str? n %cc-addr-taken)) #f)
+                  (set! %cc-addr-taken (pair n %cc-addr-taken))
+                  ()))
+              ())
+            ; a call's head is a name, not a value; its arguments are
+            (let ((kids
+                    (if (if (pair? (first node)) #f (eq? (first node) (lit call)))
+                      (first (rest (rest node)))
+                      (if (pair? (first node)) node (rest node)))))
+              (let ((go (fn (self2 xs)
+                          (if (null? xs) ()
+                            (do (self (first xs)) (self2 (rest xs)))))))
+                (go kids)))))))
+    ; ids are handed out in program order now, so the compiler can test
+    ; against the same number the interpreter will produce
+    (def ids
+      (fn (self fs)
+        (if (null? fs) ()
+          (do (%cc-fun-id (first (first fs))) (self (rest fs))))))
+    (do (walk prog) (ids (reverse %cc-funs)))))
+
 (def %cc-fun-name
   (fn (_ id)
     (def go (fn (self es)
@@ -819,6 +859,7 @@
                           (pair (pair name (pair a kind)) %cc-genv)))))
                 (self (rest items)))))))
     (load! prog)
+    (%cc-scan-program! prog)
     (if jit?
       (let ((report (%cc-jit!)))
         (map (fn (_ v)
