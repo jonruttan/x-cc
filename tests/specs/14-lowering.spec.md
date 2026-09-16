@@ -1,18 +1,18 @@
 # @weight 2
 
-Three body shapes in the lowering.  Stores with exits: the fold's
+Three shapes the lowerer used to refuse.  STORES WITH EXITS: the fold's
 effect stream carries an exit marker at each exit's program point, and
 the stream lowers with every exit tested in its place among the stores
 (a conditional that exits carries the continuation into both arms).
-Sequential loops: two or more loops in a row run as phases of the one
+SEQUENTIAL LOOPS: two or more loops in a row run as phases of the one
 self-call -- a phase counter rides as one more threaded variable, and
 each loop's exit is the transition call into the next, its init folded
-and the phase advanced.  Cross-calls: a non-recursive callee of the
-if/return shape inlines, its parameters substituting to the lowered
-arguments; inside a loop body a cross-call evaluates at its program
-point through a temp, so its reads order against the stores.  Every
-expectation is an oracle row from /usr/bin/cc; the native twins print
-what the interpreter prints.
+and the phase advanced.  CROSS-CALLS: a callee whose twin is compiled
+is called by name, and one whose twin is not is inlined instead -- its
+parameters substituting to the lowered arguments.  Inside a loop body
+a cross-call evaluates at its program point through a temp, so its
+reads order against the stores.  Every expectation is an oracle row
+from /usr/bin/cc; the native twins print what the interpreter prints.
 
 ## stores with exits
 
@@ -51,7 +51,7 @@ interp main
 
 ## cross-calls
 
-### leaf callees inline, in bodies, inits and loops; recursion does not
+### callees in bodies, inits and loops; mutual recursion stays interpreted
 
 ```cc
 (display (cc-build-run "#include <stdio.h>\nint sq(int x) { return x * x; }\nint cube(int x) { return sq(x) * x; }\nint max2(int a, int b) { return a > b ? a : b; }\nint sumsq(int n) { int i; int s; s = 0; for (i = 1; i <= n; i++) s = s + sq(i); return s; }\nint upto(int n) { int i; int s = cube(n); for (i = 0; i < n; i++) s = s + max2(i, 3); return s; }\nint get(int *a, int i) { return a[i]; }\nint dbl(int *a, int n) { int i; for (i = 0; i < n; i++) a[i] = get(a, i) * 2; return get(a, 0) + get(a, n - 1); }\nint fact(int n) { return n < 2 ? 1 : n * fact(n - 1); }\nint f2(int n) { return fact(n) + 1; }\nint od(int n);\nint ev(int n) { return n == 0 ? 1 : od(n - 1); }\nint od(int n) { return n == 0 ? 0 : ev(n - 1); }\nint main() { int a[3] = {1, 2, 3}; int d = dbl(a, 3); printf(\"%d %d %d %d %d %d %d\\n\", cube(3), sumsq(4), upto(4), d, a[1], f2(5), ev(7)); return 0; }"))
@@ -66,7 +66,7 @@ native upto
 native get
 native dbl
 native fact
-interp f2
+native f2
 interp ev
 interp od
 interp main
