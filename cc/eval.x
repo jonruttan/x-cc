@@ -13,9 +13,6 @@
 ; byte-accurate sizes are the recorded pending. Locals live in memory (a stack
 ; growing down from the top), so &local works; the heap bumps up from past the
 ; globals.
-;
-; C division truncates toward zero -- the tower's / answers rationals, so the
-; evaluator owns its own div and mod.
 
 ; The memory is raw and shared. One string is the buffer; every cell is one
 ; 8-byte word at byte offset 8*cell. The interpreter reads and writes through
@@ -202,7 +199,7 @@
     (if (= n 0) "0"
       (let ((go (fn (self t acc)
                   (if (= t 0) acc
-                    (self (/ (- t (% t 10)) 10)
+                    (self (/ t 10)
                       (pair (integer->char (+ 48 (% t 10))) acc))))))
         (if (< n 0)
           (string-append "-" (list->string (go (- 0 n) ())))
@@ -214,20 +211,17 @@
       (let ((go (fn (self t acc)
                   (if (= t 0) (list->string acc)
                     (let ((d (% t 16)))
-                      (self (/ (- t d) 16)
+                      (self (/ t 16)
                         (pair (integer->char
                                 (if (< d 10) (+ 48 d) (+ 87 d)))
                           acc)))))))
         (go n ())))))
 
-; C's truncating division and its matching remainder
+; division and remainder, with the evaluator's own report for a zero divisor
 (def %cc-div
-  (fn (_ a b)
-    (if (= b 0) (%cc-oops "division by zero")
-      (let ((q (/ a b)))
-        (- q (% q 1))))))
+  (fn (_ a b) (if (= b 0) (%cc-oops "division by zero") (/ a b))))
 (def %cc-mod
-  (fn (_ a b) (- a (* b (%cc-div a b)))))
+  (fn (_ a b) (if (= b 0) (%cc-oops "division by zero") (% a b))))
 
 (def %cc-tru (fn (_ v) (not (= v 0))))
 (def %cc-b (fn (_ x) (if x 1 0)))
