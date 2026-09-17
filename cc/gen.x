@@ -22,13 +22,15 @@
 ; parameters, assignment, ++ and --, `if`/`else`, `while`, `do`, `for`,
 ; `break`, `continue`, `return` and calls (recursion included), over integer
 ; constants, + - * / %, & | ^ << >>, the six comparisons, &&, ||, the
-; ternary, the comma and unary - ~ !, and `putchar` unless the program
-; defines its own.  Everything else refuses by name: globals, pointers,
-; aggregates, more than four arguments, and the rest of the runtime.
+; ternary, the comma and unary - ~ !, and `putchar` and `puts` of a literal
+; unless the program defines its own.  Everything else refuses by name:
+; globals, pointers, aggregates, more than four arguments, and the rest of
+; the runtime.
 ;
 ; The convention is this compiler's own, since nothing else links with what
 ; it writes: arguments in x0, x1, x2 and x8, the answer in x0, frames off
-; x20 in a region below the machine stack, and x19 the frame's base.
+; x20 in a region below the machine stack, x19 the frame's base, x21 the
+; runtime helper and x22 the string area.
 
 (import x/tool/asm)
 (import x/platform/syscall)
@@ -57,6 +59,17 @@
 ; stack below it, and each function's prologue takes its frame off x20.
 (def %cc-gen-region 65536)
 
+; the bytes of several pieces, in order
+(def %cc-gen-cat
+  (fn (self pieces)
+    (if (null? pieces) () (append (first pieces) (self (rest pieces))))))
+
+; adr RD, #IMM -- the address IMM bytes on from this instruction
+(def %cc-gen-adr
+  (fn (_ rd imm)
+    (| 0x10000000
+      (| (<< (& imm 3) 29) (| (<< (& (>> imm 2) 0x7FFFF) 5) rd)))))
+
 ; The entry, and the one piece of runtime compiled code calls: a write.
 ; Neither the system call nor a program-counter-relative address has a
 ; portable mnemonic, so both are written out per target.  The entry puts the
@@ -65,31 +78,44 @@
 ; how many in x2.  Those are already arm64's system-call registers, and
 ; x86-64's indirect call marshals x0 and x2 into the two its own convention
 ; wants, with x1 already in place.
+;
+; x22 gets the address of the string area, which follows the code: the
+; entry is a fixed length per target, so CODELEN is all it takes to reach
+; past the code from here.
 (def %cc-gen-entry
-  (fn (_ target)
+  (fn (_ target codelen)
     (def exit-nr (syscall-id (lit exit)))
     (def write-nr (syscall-id (lit write)))
     (if (eq? target (lit macho-arm64))
-      ; adr x21, write3; mov x20, sp; sub sp, #64K; bl main (six words on);
-      ; movz x16, #exit; svc #0x80; then write3: movz x16, #write; svc; ret
-      (append (%cc-gen-le32 0x100000D5)
-        (append (%cc-gen-le32 0x910003F4)
-          (append (%cc-gen-le32 (| 0xD14003FF (<< (/ %cc-gen-region 4096) 10)))
-            (append (%cc-gen-le32 0x94000006)
-              (append (%cc-gen-le32 (| 0xD2800010 (<< exit-nr 5)))
-                (append (%cc-gen-le32 0xD4001001)
-                  (append (%cc-gen-le32 (| 0xD2800010 (<< write-nr 5)))
-                    (append (%cc-gen-le32 0xD4001001)
-                      (%cc-gen-le32 0xD65F03C0)))))))))
-      ; lea r13, [rip+25]; mov r12, rsp; sub rsp, 64K; call main (eighteen
-      ; bytes on); mov rdi, rax; mov eax, exit; syscall; then write3:
+      ; ten words: adr x21, write3; adr x22, strings; mov x20, sp;
+      ; sub sp, #64K; bl main (six words on); movz x16, #exit; svc #0x80;
+      ; then write3: movz x16, #write; svc #0x80; ret
+      (%cc-gen-cat
+        (list (%cc-gen-le32 (%cc-gen-adr 21 28))
+              (%cc-gen-le32 (%cc-gen-adr 22 (+ 36 codelen)))
+              (%cc-gen-le32 0x910003F4)
+              (%cc-gen-le32 (| 0xD14003FF (<< (/ %cc-gen-region 4096) 10)))
+              (%cc-gen-le32 0x94000006)
+              (%cc-gen-le32 (| 0xD2800010 (<< exit-nr 5)))
+              (%cc-gen-le32 0xD4001001)
+              (%cc-gen-le32 (| 0xD2800010 (<< write-nr 5)))
+              (%cc-gen-le32 0xD4001001)
+              (%cc-gen-le32 0xD65F03C0)))
+      ; forty-seven bytes: lea r13, [rip+32] (write3); lea r14, [rip+...]
+      ; (strings); mov r12, rsp; sub rsp, 64K; call main (eighteen bytes
+      ; on); mov rdi, rax; mov eax, exit; syscall; then write3:
       ; mov eax, write; syscall; ret
-      (append (list 0x4C 0x8D 0x2D 25 0 0 0 0x49 0x89 0xE4 0x48 0x81 0xEC)
-        (append (%cc-gen-le32 %cc-gen-region)
-          (append (list 0xE8 18 0 0 0 0x48 0x89 0xC7 0xB8)
-            (append (%cc-gen-le32 exit-nr)
-              (append (list 0x0F 0x05 0xB8)
-                (append (%cc-gen-le32 write-nr) (list 0x0F 0x05 0xC3))))))))))
+      (%cc-gen-cat
+        (list (list 0x4C 0x8D 0x2D) (%cc-gen-le32 32)
+              (list 0x4C 0x8D 0x35) (%cc-gen-le32 (+ 33 codelen))
+              (list 0x49 0x89 0xE4)
+              (list 0x48 0x81 0xEC) (%cc-gen-le32 %cc-gen-region)
+              (list 0xE8) (%cc-gen-le32 18)
+              (list 0x48 0x89 0xC7)
+              (list 0xB8) (%cc-gen-le32 exit-nr)
+              (list 0x0F 0x05)
+              (list 0xB8) (%cc-gen-le32 write-nr)
+              (list 0x0F 0x05 0xC3))))))
 
 ; --- expressions -------------------------------------------------------------
 
@@ -169,6 +195,46 @@
 (def %cc-gen-funs ())       ; ((name . label) ...), every function in the program
 (def %cc-gen-epilogue ())   ; where `return` goes in the function being compiled
 (def %cc-gen-scratch 0)     ; the frame's last slot, which the runtime writes from
+
+; The string literals a program uses, laid end to end after the code and
+; NUL-terminated.  They are read-only, so they ride in the same segment; x22
+; holds where they start, taken program-counter-relatively by the entry.
+(def %cc-gen-strings ())    ; ((text . offset) ...)
+(def %cc-gen-strbytes 0)
+
+(def %cc-gen-string!
+  (fn (_ text)
+    (def go (fn (self es)
+              (if (null? es) ()
+                (if (string=? (first (first es)) text) (rest (first es))
+                  (self (rest es))))))
+    (let ((hit (go %cc-gen-strings)))
+      (if (not (null? hit)) hit
+        (let ((off %cc-gen-strbytes))
+          (set! %cc-gen-strings (pair (pair text off) %cc-gen-strings))
+          (set! %cc-gen-strbytes (+ off (+ (byte-len text) 1)))
+          off)))))
+
+; the bytes of every literal, in the order they were given offsets
+(def %cc-gen-string-bytes
+  (fn (_)
+    (def go
+      (fn (self es acc)
+        (if (null? es) acc
+          (let ((text (first (first es))))
+            (def one
+              (fn (self2 i out)
+                (if (< i 0) out
+                  (self2 (- i 1) (pair (byte-at text i) out)))))
+            (self (rest es) (append (one (- (byte-len text) 1) (list 0)) acc))))))
+    (go %cc-gen-strings ())))
+
+; a literal's address: where the strings start, plus its offset
+(def %cc-gen-string-at!
+  (fn (_ text)
+    (let ((off (%cc-gen-string! text)))
+      (do (%cc-gen! (lit mov) x0 x22)
+          (if (= off 0) () (%cc-gen! (lit add) x0 x0 (imm off)))))))
 
 ; the registers a call hands its arguments in, in order
 (def %cc-gen-args (list x0 x1 x2 x8))
@@ -307,9 +373,31 @@
 ; that is the one on top.  The answer comes back in x0.
 (def %cc-gen-call!
   (fn (_ name args)
-    (if (if (string=? name "putchar") (null? (%cc-gen-fun-find name)) #f)
-      (%cc-gen-putchar! args)
+    (if (null? (%cc-gen-fun-find name))
+      (match
+        ((string=? name "putchar") (%cc-gen-putchar! args))
+        ((string=? name "puts") (%cc-gen-puts! args))
+        (#t (%cc-gen-call-fun! name args)))
       (%cc-gen-call-fun! name args))))
+
+; puts, for a literal: the text and the newline it adds, in one write.
+; Both are known here, so the newline goes into the string area on the end
+; of the text and nothing walks the string at run time.  It answers zero,
+; which is one of the answers C allows: any number that is not negative.
+(def %cc-gen-puts!
+  (fn (_ args)
+    (if (not (= (length args) 1))
+      (%cc-gen-no "puts with other than one argument"))
+    (def arg (first args))
+    (if (not (eq? (first arg) (lit str)))
+      (%cc-gen-no "puts of something other than a literal"))
+    (def text (string-append (first (rest arg)) "\n"))
+    (do (%cc-gen-string-at! text)
+        (%cc-gen! (lit mov) x1 x0)
+        (%cc-gen! (lit mov) x0 (imm 1))
+        (%cc-gen! (lit mov) x2 (imm (byte-len text)))
+        (%cc-gen! (lit blr) x21)
+        (%cc-gen-const! 0))))
 
 (def %cc-gen-call-fun!
   (fn (_ name args)
@@ -550,6 +638,8 @@
     (def a (asm-new 262144))
     (set! %cc-gen-asm a)
     (set! %cc-gen-nlabels 0)
+    (set! %cc-gen-strings ())
+    (set! %cc-gen-strbytes 0)
     (set! %cc-gen-link (if (eq? target (lit macho-arm64)) %cc-gen-lr ()))
     (set! %cc-gen-callop (if (eq? target (lit macho-arm64)) (lit bl) (lit call)))
     ; every function gets its label before any code, so a call can name one
@@ -572,7 +662,8 @@
     (def code (%cc-gen-read (asm-finalize! a) (- n 1) ()))
     (asm-free! a)
     (set! %cc-gen-asm ())
-    (append (%cc-gen-entry target) code)))
+    (%cc-gen-cat
+      (list (%cc-gen-entry target n) code (%cc-gen-string-bytes)))))
 
 ; compile SRC to an executable at PATH
 (def cc-compile

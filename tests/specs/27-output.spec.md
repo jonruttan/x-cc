@@ -56,11 +56,11 @@ B
 
 ## the refusal
 
-### a program's own putchar wins, and puts is not compiled yet
+### printf is not compiled yet
 
 ```cc
 (display (guard (e (do (display "refused: ") (write e) ""))
-  (cc-exe-run "#include <stdio.h>\nint main(void) { puts(\"hi\"); return 0; }")))
+  (cc-exe-run "#include <stdio.h>\nint main(void) { printf(\"%d\\n\", 7); return 0; }")))
 ```
 ---
-    refused: #<err:cc cc: compile: not built yet: a call to puts>
+    refused: #<err:cc cc: compile: not built yet: a call to printf>
