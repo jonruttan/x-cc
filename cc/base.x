@@ -9,7 +9,8 @@
 (import cc/prims)
 
 (provide cc/base cc-version cc-preprocess cc-lex cc-parse cc-run
-  cc-build-run cc-argv cc-main %cc-repl-print)
+  cc-build-run cc-compile cc-compile-bytes cc-exe-run cc-argv cc-main
+  %cc-repl-print)
 
 (def cc-version "0.1.0")
 
@@ -41,4 +42,8 @@
 (include-once "./parse.x")
 (include-once "./eval.x")
 (include-once "./build.x")
+(include-once "./image.x")
+(include-once "./macho.x")
+(include-once "./elf.x")
+(include-once "./gen.x")
 (include-once "./cli.x")

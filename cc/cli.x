@@ -7,9 +7,10 @@
 ; @license MIT No Attribution (MIT-0)
 ;
 ;   x -l cc -- run FILE.c
+;   x -l cc -- build FILE.c [-o OUT]
 ;
-; `run` is the evaluator; `build` is reserved for the compile-asm
-; backend to come.  The exit status is the program's own.
+; `run` interprets the program and exits with its status.  `build` compiles
+; it to an executable at OUT, a.out when no -o is given.
 
 (def %cc-cli-engine-flag?
   (fn (_ s)
@@ -33,15 +34,25 @@
       (if (null? argv) ()
         (if (string=? (first argv) "run") (lit run)
           (if (string=? (first argv) "build") (lit build) ()))))
+    (def usage "usage: cc run FILE.c | cc build FILE.c [-o OUT]\n")
     (if (null? mode)
-      (do (file-write 2 "usage: cc run|build FILE.c\n") (sys-exit 2))
+      (do (file-write 2 usage) (sys-exit 2))
       (if (null? (rest argv))
-        (do (file-write 2 "usage: cc run|build FILE.c\n") (sys-exit 2))
+        (do (file-write 2 usage) (sys-exit 2))
         (let ((path (first (rest argv))))
           (if (file-exists? path)
             (sys-exit
               (if (eq? mode (lit build))
-                (cc-build-run (file-read-all path))
+                (let ((opts (rest (rest argv))))
+                  (def out
+                    (if (if (pair? opts)
+                          (if (string=? (first opts) "-o") (pair? (rest opts)) #f)
+                          #f)
+                      (first (rest opts))
+                      "a.out"))
+                  (guard (e (do (display "cc: build failed: ") (%cc-x-write e)
+                                (newline) 1))
+                    (do (cc-compile (file-read-all path) out) 0)))
                 (cc-run (file-read-all path))))
             (do (file-write 2
                   (string-append "cc: no such file: "

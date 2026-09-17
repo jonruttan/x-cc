@@ -10,15 +10,18 @@
 ; O(1) memory the pointer model needs, no defs at depth in anything hot.
 
 (import x/sys/file)
+(import x/sys/proc)
 (import x/type/vector)
+(import x/codec/sha256)
 
 (provide cc/prims
   char->integer integer->char byte-at byte-len
   string-length substring string-append string-concat string=?
   list->string convert length reverse append map filter set-first!
   vec-make vec-ref vec-set!
-  mem-make mem-ptr ptr-int word-ref word-set!
-  file-read-all file-exists? file-write
+  mem-make mem-ptr ptr-int word-ref word-set! mem-set-byte! mem-ref-byte
+  file-read-all file-exists? file-write file-write-exec!
+  sha256-hex-n sha256-jit! proc-capture
   sys-exit sys-getenv)
 
 (def char->integer (prim-ref (lit char) (lit ->int)))
@@ -63,10 +66,30 @@
 (def ptr-int (prim-ref (lit ptr) (lit ->int)))
 (def word-ref (prim-ref (lit ptr) (lit ref-word)))
 (def word-set! (prim-ref (lit ptr) (lit set-word!)))
+; one byte at an offset; the str namespace has a byte reader and no writer
+(def %cc-ptr-set (prim-ref (lit ptr) (lit set!)))
+(def mem-set-byte! (fn (_ p i b) (%cc-ptr-set p i (& b 255) 1)))
+(def %cc-ptr-ref (prim-ref (lit ptr) (lit ref)))
+(def mem-ref-byte (fn (_ p i) (%cc-ptr-ref p i 1)))
+
+; the first N bytes of a buffer, digested
+(def sha256-hex-n (fn (_ s n) (Sha256 hex-n s n)))
+; build the compiled digest engine once; pure x carries on if it cannot
+(def sha256-jit! (fn (_) (Sha256 jit!)))
+
+; run argv as a child: (status . stdout)
+(def proc-capture (fn (_ argv) (Proc capture argv)))
 
 (def file-read-all (fn (_ path) (File read-all path)))
 (def file-exists? (fn (_ path) (File exists? path)))
 (def file-write
   (fn (_ fd s) (File write fd s (string-length s))))
+; N bytes of a buffer to PATH, created or truncated, mode 0755
+(def file-write-exec!
+  (fn (_ path buf n)
+    (def fd (File open path (list (lit wronly) (lit creat) (lit trunc)) 493))
+    (if (< fd 0)
+      (Err raise (lit cc) (string-append "cc: cannot write " path) ())
+      (do (File write fd buf n) (File close fd)))))
 (def sys-exit (fn (_ n) (Sys exit n)))
 (def sys-getenv (fn (_ n) (Sys getenv n)))
