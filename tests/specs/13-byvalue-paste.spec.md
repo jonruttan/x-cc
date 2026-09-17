@@ -26,7 +26,7 @@ expectation is an oracle row from /usr/bin/cc.
 
 ### a struct in and a struct out
 
-In the cell model a struct value is its address, and a struct returned
+A struct value is its address, and a struct returned
 by value is copied into the caller's frame at the call boundary
 (18-structs and 21-sret have more).
 

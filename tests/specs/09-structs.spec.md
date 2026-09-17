@@ -1,10 +1,9 @@
 # @weight 3
 
-Structs in the cell model.  A struct is its fields laid end to end,
-a field is an offset in cells, `p->f` is a load at `p + offset`, and a
-pointer to a struct steps by the struct's size.  Every expectation
-here is an oracle row from /usr/bin/cc, except the sizeof case, which
-is the cell model on the record.
+Structs.  A field sits at the offset its own alignment allows, `p->f`
+is a load of the field's width at `p + offset`, and a pointer to a
+struct steps by the struct's size.  Every expectation here is an
+oracle row from /usr/bin/cc.
 
 ## fields
 
@@ -71,18 +70,29 @@ is the cell model on the record.
 0
 ```
 
-## the cell model, on the record
+## sizes
 
-### sizeof a struct counts its cells
-
-Two int fields are two cells; the real machine says 8.  Programs that
-scale by sizeof (the malloc idiom above) run unchanged.
+### sizeof a struct, and an array of them inside one
 
 ```cc
 (display (cc-run "#include <stdio.h>\nstruct P { int x; int y; };\nstruct Q { struct P a[3]; int n; };\nint main() { printf(\"%d %d\\n\", sizeof(struct P), sizeof(struct Q)); return 0; }"))
 ```
 ---
 ```output
-2 7
+8 28
+0
+```
+
+### a member's alignment pads the struct
+
+`int i` cannot start at offset 1, so the `char` before it is followed by
+three bytes of padding, and the struct's size rounds up to four.
+
+```cc
+(display (cc-run "#include <stdio.h>\nstruct M { char c; int i; short s; };\nint main() { struct M m; m.c = 1; m.i = 70000; m.s = -2; printf(\"%d %d %d %d %d\\n\", sizeof(struct M), sizeof(char), sizeof(short), m.i, m.s); return 0; }"))
+```
+---
+```output
+12 1 2 70000 -2
 0
 ```

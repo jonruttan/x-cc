@@ -1,8 +1,8 @@
 # @weight 3
 
 Pointers.  The program's memory is one raw buffer (a string's bytes),
-addressed through ptr ref-word/set-word!, so a pointer is a cell
-index.  A function reads and writes a caller's array through a
+addressed by byte offset, so a pointer is an
+offset.  A function reads and writes a caller's array through a
 pointer parameter, and every read inside a loop sees exactly the
 stores C puts before it.  Every expectation is an
 oracle row from /usr/bin/cc.
@@ -49,7 +49,7 @@ a[j+1] = t;` -- two loads captured before either store.
 
 ## a local array
 
-### store then load of the same cell in one iteration
+### store then load of the same element in one iteration
 
 ```cc
 (display (cc-run "#include <stdio.h>\nint locarr(int n) { int a[32]; int i; int s = 0; for (i = 0; i < n; i++) { a[i] = i * 3; s = s + a[i]; } return s; }\nint main() { printf(\"%d\\n\", locarr(5)); return 0; }"))

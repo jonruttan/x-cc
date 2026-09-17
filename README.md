@@ -24,8 +24,7 @@ wraps as C's `int` does.
 Compiled so far: `int main(void) { return EXPR; }`, where EXPR is
 built from integer constants, `+ - * / %`, `& | ^ << >>`, the six
 comparisons, and unary `- ~ !`.  Anything else refuses by name.
-Locals, control flow, calls, the runtime library and byte-accurate
-types come next.
+Locals, control flow, calls and the runtime library come next.
 
     x -l cc -- run prog.c
 
@@ -36,12 +35,12 @@ and run.  Under `run`, fib recurses, pointers write through, arrays
 decay into functions, bubble sort sorts, and the output matches the
 real binary byte for byte.
 
-THE CELL MODEL: memory is one vector of cells; every scalar is one
-cell, sizeof any scalar is 1, pointer arithmetic counts cells.
-Addresses are real (0 is NULL and guarded), locals live in memory so
-&local works, the stack grows down and the heap up.  Programs that
-scale by sizeof -- the malloc idiom -- run unchanged; byte-accurate
-sizes are the recorded pending.
+MEMORY IS BYTES: one buffer, an address is a byte offset into it (0 is
+NULL and guarded), and every read and write takes the width of its
+type -- `char` 1, `short` 2, `int` 4, `long` and pointers 8, with
+signed types sign-extending.  `sizeof`, a field's offset and a
+struct's padding are what /usr/bin/cc counts.  Locals live in memory
+so &local works, the stack grows down and the heap up.
 
 Working: int/char/void/pointer/array declarations (specifier soup
 accepted, erased); all C89 operators with C precedence, short-circuit
@@ -55,8 +54,8 @@ malloc, free, exit), object-like `#define` spliced token-wise; // and
 
 Structs, too: `struct S { ... };`, `typedef struct { ... } T;`,
 fields by `.` and `->`, nested structs, arrays of structs, pointers to
-structs stepping by the struct's size, struct assignment as a cell
-copy, `sizeof` a struct as its cell count, and the linked list built
+structs stepping by the struct's size, struct assignment as a byte
+copy, `sizeof` a struct with its padding, and the linked list built
 from `malloc(sizeof(struct N))` -- oracle-checked.  A field access
 whose chain the evaluator cannot type (a call's result) resolves by
 the field's name when exactly one struct has it.
@@ -71,7 +70,7 @@ no parentheses are added, as in C.
 `#ifdef`/`#ifndef`/`#elif`/`#else`/`#endif`/`#undef` and the `#if`
 forms a build header needs (`0`, `1`, `defined`) select lines; an
 inactive region still tracks its nesting.  Initializer lists lay
-values into cells by kind -- `int a[] = {…}` sized by the list,
+values into memory by kind -- `int a[] = {…}` sized by the list,
 `struct P p = {…}`, nested lists for arrays of structs, missing
 trailing items zero, `char s[] = "…"` from the string's bytes.
 
@@ -81,7 +80,7 @@ RED:` labels).  A union is a struct whose fields all sit at offset 0,
 sized by its widest -- overlap, copy, nesting anonymously in a struct.
 Function pointers: `int (*f)(int, int)` as a local, global, parameter,
 struct field or typedef, arrays of them with initializer lists; a
-function's name is its value (an id above every cell address, never
+function's name is its value (an id above every memory address, never
 NULL), and `f(x)`, `(*f)(x)`, `ops[i](x)`, `p->fn(x)` all dispatch as
 the named call would.
 
@@ -94,7 +93,8 @@ text as a string literal and `A ## B` pastes, the rescan lexing the
 joined token.
 
 Refused loudly, each a recorded pending: goto, floats, casts to
-function-pointer types, byte-accurate sizeof.
+function-pointer types.  Unsigned types take their own width and read
+zero-extended, and unsigned arithmetic is the recorded pending.
 
 Paired with x-lang v0.13.0 (`lang.xon` is the checkable row).
 
@@ -110,7 +110,7 @@ Paired with x-lang v0.13.0 (`lang.xon` is the checkable row).
     cc/pp.x           comments out, #include dropped, #define collected
     cc/lex.x          C tokens, macros spliced token-wise
     cc/parse.x        the fifteen-level ladder, declarations, statements
-    cc/eval.x         the cell machine: memory, frames, calls, builtins
+    cc/eval.x         the machine: memory, frames, calls, builtins
     cc/gen.x          code generation, through x/tool/asm
     cc/image.x        the byte image an executable is built in
     cc/macho.x        the macOS executable and its ad-hoc signature

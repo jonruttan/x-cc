@@ -20,6 +20,7 @@
   list->string convert length reverse append map filter set-first!
   vec-make vec-ref vec-set!
   mem-make mem-ptr ptr-int word-ref word-set! mem-set-byte! mem-ref-byte
+  mem-ref-at mem-set-at!
   file-read-all file-exists? file-write file-write-exec!
   sha256-hex-n sha256-jit! proc-capture
   sys-exit sys-getenv)
@@ -71,6 +72,10 @@
 (def mem-set-byte! (fn (_ p i b) (%cc-ptr-set p i (& b 255) 1)))
 (def %cc-ptr-ref (prim-ref (lit ptr) (lit ref)))
 (def mem-ref-byte (fn (_ p i) (%cc-ptr-ref p i 1)))
+; W bytes at an offset, W one of 1 2 4 8; a read is zero-extended, so a
+; signed type sign-extends it itself
+(def mem-ref-at (fn (_ p i w) (%cc-ptr-ref p i w)))
+(def mem-set-at! (fn (_ p i v w) (%cc-ptr-set p i v w)))
 
 ; the first N bytes of a buffer, digested
 (def sha256-hex-n (fn (_ s n) (Sha256 hex-n s n)))
