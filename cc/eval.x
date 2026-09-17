@@ -36,7 +36,6 @@
 (def %cc-funs ())       ; ((name params . body) ...)
 (def %cc-strtab ())     ; ((text . addr) ...), interned
 (def %cc-exit-code ())  ; set when exit() raises its sentinel
-(def %cc-natives ())    ; ((name . prim) ...) -- build's compiled twins
 
 ; Function values: a function's address is an id above every cell address (so
 ; it is never NULL, never confused with memory), handed out the first time a
@@ -46,6 +45,15 @@
 (def %cc-fun-base 1048576)
 (def %cc-fun-ids ())    ; ((name . id) ...)
 (def %cc-builtins (list "putchar" "puts" "printf" "malloc" "free" "exit"))
+
+; is the string S one of the strings in L
+(def %cc-member-str?
+  (fn (_ s l)
+    (def go
+      (fn (self es)
+        (if (null? es) #f
+          (if (string=? (first es) s) #t (self (rest es))))))
+    (go l)))
 
 (def %cc-fun-id
   (fn (_ name)
@@ -106,22 +114,6 @@
               (if (null? es) (%cc-oops "call through a value that is not a function")
                 (if (= (rest (first es)) id) (first (first es)) (self (rest es))))))
     (go %cc-fun-ids)))
-
-; the arguments at the given positions, in order
-(def %cc-pick
-  (fn (_ l idxs)
-    (def nth (fn (self xs k) (if (null? xs) 0 (if (<= k 0) (first xs) (self (rest xs) (- k 1))))))
-    (map (fn (_ i) (nth l i)) idxs)))
-
-(def %cc-native
-  (fn (_ name)
-    (def go
-      (fn (self es)
-        (if (null? es) ()
-          (if (string=? (first (first es)) name)
-            (rest (first es))
-            (self (rest es))))))
-    (go %cc-natives)))
 
 (def %cc-oops
   (fn (_ msg)
@@ -607,8 +599,6 @@
                             "printf: only %d %c %s %x %% so far"))))))))))))
     (go 0 (rest args) ())))
 
-; the interpreted path; %cc-call proper dispatches to a native twin
-; first when build made one
 (def %cc-call-interp
   (fn (_ name args)
     (def f (%cc-fun name))
@@ -657,40 +647,7 @@
         (#t (%cc-oops
               (string-append "no such function: " name)))))))
 
-(set! %cc-call
-  (fn (_ name args)
-    ; a native twin's entry is (keep pad entry . prim).  KEEP lists
-    ; which of the C parameters the lane function takes: the lane has
-    ; four argument slots, and a parameter past them lives in a scratch
-    ; cell instead, so a 6-parameter C function may reach a 4-parameter
-    ; lane function.  The kept ones need not be a prefix -- a recursion
-    ; hoists whichever parameters it never changes.  The accumulator inits (from build's
-    ; loop transform) pad the call after those.  A pad slot is a
-    ; literal int, or a compiled init function over all the parameters
-    ; -- applied to the actual args, once, right here.  ENTRY, when
-    ; present, is the entry effects (the spilled variables' initial
-    ; stores) as a compiled function over all the parameters, run first.
-    (let ((e (%cc-native name)))
-      (if (null? e)
-        (%cc-call-interp name args)
-        (let ((keep (first e)))
-          (def pad (first (rest e)))
-          (def entry (first (rest (rest e))))
-          (def retsize (first (rest (rest (rest e)))))
-          (def prim (rest (rest (rest (rest e)))))
-          (def v
-            (do (if (null? entry) () (apply entry args))
-                (apply prim
-                  (append (%cc-pick args keep)
-                    (map (fn (_ p) (if (number? p) p (apply p args)))
-                      pad)))))
-          ; a struct answer is an address the twin built at; copy it
-          ; into a fresh slot in this frame, so a second call to the
-          ; same function cannot overwrite the first one's result
-          (if (= retsize 0) v
-            (let ((vals (%cc-read-cells v retsize)))
-              (def tmp (%cc-alloca retsize))
-              (do (%cc-write-cells! tmp vals) tmp))))))))
+(set! %cc-call %cc-call-interp)
 
 ; --- statements --------------------------------------------------------------
 ; control: () | (return V) | (break) | (continue)
@@ -812,11 +769,8 @@
       (do (%cc-raw-set! i 0)
           (self (+ i 1) end)))))
 
-; the shared core: jit? #t lowers the eligible functions through the
-; engine's compile-asm lane (build.x) and reports each verdict before
-; running
 (def %cc-run-core
-  (fn (_ src jit?)
+  (fn (_ src)
     ; one vector for the process, and only the dirty ranges cleared per
     ; run (an interpreted 16K full clear out-allocated the vector it
     ; replaced; the dirty ranges are hundreds of cells)
@@ -854,15 +808,6 @@
                 (self (rest items)))))))
     (load! prog)
     (%cc-scan-program! prog)
-    (if jit?
-      (let ((report (%cc-jit!)))
-        (map (fn (_ v)
-               (display
-                 (string-append
-                   (if (eq? (rest v) (lit native)) "native " "interp ")
-                   (string-append (first v) "\n"))))
-          report))
-      ())
     (guard (e
              (if (null? %cc-exit-code)
                ; a genuine failure: say it and answer 1, the loud way
@@ -873,7 +818,4 @@
                (& %cc-exit-code 255)))
       (& (%cc-call "main" ()) 255))))
 
-(def cc-run
-  (fn (_ src)
-    (do (set! %cc-natives ())
-        (%cc-run-core src #f))))
+(def cc-run (fn (_ src) (%cc-run-core src)))

@@ -6,7 +6,7 @@ struct whose fields all sit at offset 0, sized by its widest field; a
 function's name used as a value is an id above every cell address,
 and a call through a value -- a variable, `(*f)`, an array element, a
 struct field -- maps the id back to the function and dispatches as a
-named call would, native twin first.  `#elif` continues a conditional
+named call would.  `#elif` continues a conditional
 whose earlier branches did not run.  Every expectation is an oracle
 row from /usr/bin/cc.
 
@@ -53,17 +53,11 @@ same
 
 ### a call through a pointer, on both sides of the boundary
 
-The caller lowers too, dispatching on the function value (23-fnptr has
-that story), so nothing here crosses back into the interpreter.
-
 ```cc
-(display (cc-build-run "#include <stdio.h>\nint sq(int n) { return n * n; }\nint twice(int (*f)(int), int x) { return f(f(x)); }\nint main() { printf(\"%d\\n\", twice(sq, 3)); return 0; }"))
+(display (cc-run "#include <stdio.h>\nint sq(int n) { return n * n; }\nint twice(int (*f)(int), int x) { return f(f(x)); }\nint main() { printf(\"%d\\n\", twice(sq, 3)); return 0; }"))
 ```
 ---
 ```output
-native sq
-native twice
-interp main
 81
 0
 ```

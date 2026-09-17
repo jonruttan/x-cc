@@ -78,15 +78,13 @@ Every expectation is an oracle row from /usr/bin/cc.
 ---
     refused: #<err:cc cc: parse: not built yet: goto>
 
-### an initialized local array keeps its function interpreted
+### an initialized local array
 
 ```cc
-(display (cc-build-run "#include <stdio.h>\nint sum3(int n) { int a[3] = {1, 2, 3}; int s = 0; int i; for (i = 0; i < 3; i++) s = s + a[i] * n; return s; }\nint main() { printf(\"%d\\n\", sum3(2)); return 0; }"))
+(display (cc-run "#include <stdio.h>\nint sum3(int n) { int a[3] = {1, 2, 3}; int s = 0; int i; for (i = 0; i < 3; i++) s = s + a[i] * n; return s; }\nint main() { printf(\"%d\\n\", sum3(2)); return 0; }"))
 ```
 ---
 ```output
-interp sum3
-interp main
 12
 0
 ```
