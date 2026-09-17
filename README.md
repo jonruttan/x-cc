@@ -26,15 +26,19 @@ locals and parameters, assignment, `++` and `--`, `if`/`else`,
 `while`, `do`, `for`, `break`, `continue`, `return` and calls,
 recursion included, over integer constants, `+ - * / %`,
 `& | ^ << >>`, the six comparisons, `&&`, `||`, the ternary, the
-comma and unary `- ~ !`.
+comma and unary `- ~ !`.  A compiled program prints with `putchar`:
+the entry writes out a helper that makes the write system call and
+hands compiled code its address, since neither the system call nor a
+program-counter-relative address has a portable mnemonic.
 
 The calling convention is the compiler's own, since nothing else links
 with what it writes: arguments in four registers, the answer in one,
 and a frame per call taken from a region below the machine stack.  A
 local is one eight-byte slot; narrower slots for `char` and `short`
 wait on narrower loads and stores in the platform assembler.  Anything
-else refuses by name: globals, pointers, aggregates and a fifth
-argument, which come next along with the runtime library.
+else refuses by name: globals, pointers, aggregates, a fifth argument,
+and the rest of the runtime -- `puts` and `printf` want string data,
+which is what globals will bring.
 
     x -l cc -- run prog.c
 
