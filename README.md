@@ -2,17 +2,39 @@
 
 <p align="center"><img src="docs/bitwise-banner.svg" alt="x-cc, with Bitwise the owl" width="100%"></p>
 
-A C compiler on x-lang -- the self-hosting arc's final tier, slice
-one: the full front end (preprocessor subset, lexer, recursive-descent
-parser with all fifteen expression levels) and an evaluator with a
-real memory model, so
+A C compiler on x-lang: a front end (preprocessor subset, lexer,
+recursive-descent parser with all fifteen expression levels), a code
+generator on the platform assembler, and Mach-O and ELF writers, so
+
+    x -l cc -- build prog.c -o prog
+
+writes an executable that the operating system runs directly: an arm64
+Mach-O on macOS, an x86-64 ELF on Linux, for the platform the compiler
+runs on.  No external assembler, linker or `codesign` is involved: the
+instructions are encoded by x/tool/asm, the container is laid out, and
+the Mach-O's ad-hoc code signature is hashed in x.
+
+The Mach-O is dynamic, naming dyld and libSystem as the macOS kernel
+requires of every executable; the ELF is static.  Both make system calls
+directly rather than calling into a C library.  The code generator
+evaluates expressions on a stack machine; an operator whose result can
+leave `int`'s 32 bits sign-extends it again from bit 31, so arithmetic
+wraps as C's `int` does.
+
+Compiled so far: `int main(void) { return EXPR; }`, where EXPR is
+built from integer constants, `+ - * / %`, `& | ^ << >>`, the six
+comparisons, and unary `- ~ !`.  Anything else refuses by name.
+Locals, control flow, calls, the runtime library and byte-accurate
+types come next.
 
     x -l cc -- run prog.c
 
-EXECUTES C, oracle-checked: every spec expectation comes from the same
-source compiled with /usr/bin/cc and run.  fib recurses, pointers
-write through, arrays decay into functions, bubble sort sorts, and the
-output matches the real binary byte for byte.
+runs the same front end through an evaluator with a real memory model
+instead, and is the reference the compiler is checked against: every
+spec expectation comes from the same source compiled with /usr/bin/cc
+and run.  Under `run`, fib recurses, pointers write through, arrays
+decay into functions, bubble sort sorts, and the output matches the
+real binary byte for byte.
 
 THE CELL MODEL: memory is one vector of cells; every scalar is one
 cell, sizeof any scalar is 1, pointer arithmetic counts cells.
@@ -75,9 +97,10 @@ joined token.
 Refused loudly, each a recorded pending: goto, floats, casts to
 function-pointer types, byte-accurate sizeof.
 
-`build` lowers the ELIGIBLE functions through the engine's compile-asm
-lane to NATIVE machine code, no external toolchain; the rest stay
-interpreted (sha256.x's adoption pattern: refuse, fall back).  Three
+Inside a running evaluator, `cc-build-run` lowers the eligible functions
+through the engine's compile-asm lane to native code in memory; the
+rest stay interpreted (sha256.x's adoption pattern: refuse, fall back).
+It produces no executable.  Three
 body shapes lower: `if`/`return` recursion (fib), straight-line
 assignments ending in a return, and **loops** -- a
 `{ decls; while|for; return }` function transforms into tail self-
@@ -118,8 +141,8 @@ arguments **spill** to scratch cells, read and written as memory,
 their entry values stored by one compiled entry function at the call
 boundary.  Loops nest to **any depth**: the state machine is
 recursive, and a matrix product with a store between its levels goes
-native.  `x -l cc -- build prog.c` reports each function's verdict and
-runs, same output as `run`: fib(24) 67s -> 10.5s wall, a
+native.  `cc-build-run` reports each function's verdict and runs, with
+the same output as `run`: fib(24) 67s -> 10.5s wall, a
 2,000,000-iteration loop 79s -> 9.5s (the loop itself at machine speed
 under the boot).  The **bitwise family lowers too** -- `&` `|` `^`
 `<<` `>>` are single ARM64 instructions, and `>>` is arithmetic, so it
@@ -197,8 +220,12 @@ Paired with x-lang v0.10.0 (`lang.xon` is the checkable row).
     cc/lex.x          C tokens, macros spliced token-wise
     cc/parse.x        the fifteen-level ladder, declarations, statements
     cc/eval.x         the cell machine: memory, frames, calls, builtins
-    cc/build.x        the eligible-class lowerer onto compile-asm
-    cc/cli.x          run FILE.c | build FILE.c
+    cc/build.x        the in-memory lowerer onto compile-asm
+    cc/gen.x          code generation, through x/tool/asm
+    cc/image.x        the byte image an executable is built in
+    cc/macho.x        the macOS executable and its ad-hoc signature
+    cc/elf.x          the Linux executable
+    cc/cli.x          run FILE.c | build FILE.c [-o OUT]
     tests/            markdown specs + the platform's runner, vendored nowhere
 
 <p align="center"><img src="docs/bitwise-mark.svg" alt="Bitwise" width="96"></p>
