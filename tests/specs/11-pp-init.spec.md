@@ -4,7 +4,7 @@ Conditional directives, and initializer lists.  The preprocessor's
 walk carries a stack of conditional flags -- a line lives when every
 open conditional is true; an inactive region still tracks its nesting
 so its #endif pairs, and its defines are ignored.  An initializer list
-lays values into cells by kind: an array's elements or a struct's
+lays values into memory by kind: an array's elements or a struct's
 fields in order, nested lists recursing, missing trailing items zero;
 `[]` takes its size from the list, or from a string's bytes plus NUL.
 Every expectation is an oracle row from /usr/bin/cc.

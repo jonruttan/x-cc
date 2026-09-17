@@ -1,7 +1,7 @@
 # @weight 2
 
 Structs returned by value.  A struct value is an address, so the call
-boundary copies the returned cells into a fresh slot in the caller's
+boundary copies the returned bytes into a fresh slot in the caller's
 frame; that is what keeps two calls to one function from sharing a
 result, as in `add(make(1, 2), make(3, 4))`, where each argument is
 copied out before the next call runs.  Every expectation is an oracle

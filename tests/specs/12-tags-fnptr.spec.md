@@ -3,7 +3,7 @@
 Enums, unions, function pointers, and #elif.  An enumerator is a
 constant folded at parse time (the type is a scalar); a union is a
 struct whose fields all sit at offset 0, sized by its widest field; a
-function's name used as a value is an id above every cell address,
+function's name used as a value is an id above every memory address,
 and a call through a value -- a variable, `(*f)`, an array element, a
 struct field -- maps the id back to the function and dispatches as a
 named call would.  `#elif` continues a conditional

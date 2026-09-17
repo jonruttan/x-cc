@@ -209,19 +209,19 @@ b 5
 0
 ```
 
-## the cell model, on the record
+## sizes
 
-### sizeof counts cells, not bytes
+### sizeof counts bytes
 
-Every scalar is one cell here; sizeof(int) is 1 and an array's sizeof
-is its element count.  Byte-accurate sizes are the recorded pending;
-programs that scale by sizeof (the malloc idiom) run unchanged.
+Sizes are the ones the platforms this runs on count: `int` 4, `char` 1,
+`short` 2, `long` and a pointer 8, and an array its count times its
+element.
 
 ```cc
 (display (cc-run "#include <stdio.h>\nint main() { int a[5]; printf(\"%d %d\\n\", sizeof(a), sizeof(int)); return 0; }"))
 ```
 ---
 ```output
-5 1
+20 4
 0
 ```

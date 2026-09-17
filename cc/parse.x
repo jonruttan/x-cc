@@ -27,7 +27,7 @@
 ; (the types section), switch (clauses in order, fallthrough the
 ; evaluator's), initializer lists (INIT may be (initlist ITEMS); an
 ; unsized array takes its size from one) and function pointers (the
-; `(*NAME)(params)` declarator is one cell; a call whose callee is
+; `(*NAME)(params)` declarator is a pointer-wide value; a call whose callee is
 ; any expression but a bare name is (callx E ARGS)) parse.  Refused
 ; loudly: goto, floats -- each a recorded pending.
 
@@ -92,14 +92,45 @@
                             (eq? k (lit extern))))))))))))
         #f))))
 
-; --- types, as far as the cell model needs them ----------------------------
-; Kinds: scalar | (array N) | (array N K) | (struct S) | (ptr K).  Every
-; scalar is one cell; a struct is its fields laid end to end (a field's
-; offset is the cells before it); an array of K is N*size(K) cells; a
-; pointer is one cell, and its K is kept only when it points at a
-; struct, because that is when arithmetic on it must scale and `->`
-; must know its fields.  The parser keeps the struct and typedef tables
-; (the evaluator reads them; parse always precedes load in a process).
+; The scalar the specifiers name.  `unsigned`/`signed` pick the flavour and
+; the width keyword picks the width; `long long` is `long`, and specifiers
+; that say nothing about either (const, static, extern) are swallowed.  Plain
+; `char` is signed, as it is on the platforms this compiles for.
+(def %cc-p-scalar-of
+  (fn (_ toks)
+    (def go
+      (fn (self ts width unsigned?)
+        (if (not (%cc-p-type-kw? ts)) (pair (pair width unsigned?) ts)
+          (let ((k (first (rest (first ts)))))
+            (match
+              ((eq? k (lit unsigned)) (self (rest ts) width #t))
+              ((eq? k (lit signed)) (self (rest ts) width #f))
+              ((eq? k (lit char)) (self (rest ts) (lit char) unsigned?))
+              ((eq? k (lit short)) (self (rest ts) (lit short) unsigned?))
+              ((eq? k (lit long)) (self (rest ts) (lit long) unsigned?))
+              ((eq? k (lit void)) (self (rest ts) (lit void) unsigned?))
+              (#t (self (rest ts) width unsigned?)))))))
+    (def got (go toks () #f))
+    (def width (first (first got)))
+    (def unsigned? (rest (first got)))
+    (pair
+      (match
+        ((eq? width (lit void)) (lit void))
+        ((eq? width (lit char)) (if unsigned? (lit uchar) (lit char)))
+        ((eq? width (lit short)) (if unsigned? (lit ushort) (lit short)))
+        ((eq? width (lit long)) (if unsigned? (lit ulong) (lit long)))
+        (#t (if unsigned? (lit uint) (lit int))))
+      (rest got))))
+
+; --- types, as far as the memory model needs them --------------------------
+; Kinds: a scalar's own name (char uchar short ushort int uint long ulong
+; void fnptr) | (array N K) | (struct S) | (ptr K).  Sizes are bytes, as the
+; platforms this compiles for count them; a struct is its fields at aligned
+; offsets, padded; an array of K is N*size(K); a pointer is 8 and keeps its
+; pointee, which is what arithmetic scales by, what a read through it takes
+; its width from, and where `->` finds its fields.  The parser keeps the
+; struct and typedef tables (the evaluator reads them; parse always precedes
+; load in a process).
 (def %cc-p-structs ())     ; ((name size . ((fname off kind) ...)) ...)
 (def %cc-p-typedefs ())    ; ((name . kind) ...)
 (def %cc-p-anon 0)
@@ -112,19 +143,52 @@
                   (self (rest es))))))
     (go %cc-p-structs)))
 
+; Sizes in bytes, as the platforms this compiles for count them (LP64):
+; char 1, short 2, int 4, long 8, and every pointer 8.  An array is its
+; count times its element; a struct is what its layout came to.
 (def %cc-kind-size
   (fn (self kind)
-    (if (not (pair? kind)) 1
-      (if (eq? (first kind) (lit array))
-        (* (first (rest kind))
-          (if (null? (rest (rest kind))) 1
-            (self (first (rest (rest kind))))))
-        (if (eq? (first kind) (lit struct))
+    (if (not (pair? kind))
+      (match
+        ((eq? kind (lit char)) 1)
+        ((eq? kind (lit uchar)) 1)
+        ((eq? kind (lit short)) 2)
+        ((eq? kind (lit ushort)) 2)
+        ((eq? kind (lit int)) 4)
+        ((eq? kind (lit uint)) 4)
+        ((eq? kind (lit void)) 1)
+        (#t 8))
+      (match
+        ((eq? (first kind) (lit array))
+          (* (first (rest kind))
+            (if (null? (rest (rest kind))) 4
+              (self (first (rest (rest kind)))))))
+        ((eq? (first kind) (lit struct))
           (let ((e (%cc-p-struct-entry (first (rest kind)))))
             (if (null? e)
               (%cc-p-err (string-append "unknown struct: " (first (rest kind))))
-              (first (rest e))))
-          1)))))
+              (first (rest e)))))
+        (#t 8)))))
+
+; What an address of this kind must be a multiple of: a scalar its own size,
+; an array its element's, a struct its widest member's.
+(def %cc-kind-align
+  (fn (self kind)
+    (if (not (pair? kind)) (%cc-kind-size kind)
+      (match
+        ((eq? (first kind) (lit array))
+          (if (null? (rest (rest kind))) 4 (self (first (rest (rest kind))))))
+        ((eq? (first kind) (lit struct))
+          (let ((e (%cc-p-struct-entry (first (rest kind)))))
+            (if (null? e) 1
+              (let ((go (fn (self2 fs a)
+                          (if (null? fs) a
+                            (let ((fa (self (first (rest (rest (first fs)))))))
+                              (self2 (rest fs) (if (> fa a) fa a)))))))
+                (go (rest (rest e)) 1)))))
+        (#t 8)))))
+
+(def %cc-round-up (fn (_ n a) (let ((m (+ n (- a 1)))) (- m (% m a)))))
 
 (def %cc-p-typedef-name?
   (fn (_ toks)
@@ -139,7 +203,7 @@
 (def %cc-p-typedef-kind
   (fn (_ n)
     (def go (fn (self es)
-              (if (null? es) (lit scalar)
+              (if (null? es) (lit int)
                 (if (string=? (first (first es)) n) (rest (first es)) (self (rest es))))))
     (go %cc-p-typedefs)))
 
@@ -216,7 +280,7 @@
     (go toks 0)))
 
 ; a balanced ( ... ), skipped: the parameter list of a function-pointer
-; declarator (types erased in the cell model); answers the rest
+; declarator (a cast's type is erased); answers the rest
 (def %cc-p-skip-parens
   (fn (_ toks)
     (def go
@@ -234,10 +298,9 @@
   (fn (_ toks)
     (if (%cc-p-op? toks "(") (%cc-p-op? (rest toks) "*") #f)))
 
-; a pointer to a struct keeps its pointee; every other pointer is a cell
-(def %cc-p-pointer-to
-  (fn (_ k)
-    (if (if (pair? k) (eq? (first k) (lit struct)) #f) (list (lit ptr) k) (lit scalar))))
+; a pointer keeps its pointee: arithmetic on it scales by the pointee's size,
+; `->` needs its fields, and a read through it takes its width
+(def %cc-p-pointer-to (fn (_ k) (list (lit ptr) k)))
 
 (def %cc-p-struct-body ())
 
@@ -269,11 +332,11 @@
             ; enum [NAME] [{ enumerators }]: the constants register, the
             ; type is a scalar
             (let ((ts2 (if (%cc-p-id? (rest ts)) (rest (rest ts)) (rest ts))))
-              (pair (lit scalar)
+              (pair (lit int)
                 (if (%cc-p-op? ts2 "{") (%cc-p-enum-body (rest ts2)) ts2)))
             (if (%cc-p-typedef-name? ts)
               (pair (%cc-p-typedef-kind (first (rest (first ts)))) (rest ts))
-              (pair (lit scalar) ts))))))
+              (%cc-p-scalar-of toks))))))
     (def stars
       (fn (self k ts2)
         (if (%cc-p-type-kw? ts2) (self k (rest ts2))
@@ -368,7 +431,7 @@
                     (pair ast ts)))))))))
     (go (first r) (rest r))))
 
-; a parenthesized type-name means a cast (erased in the cell model)
+; a parenthesized type-name means a cast (the type is erased)
 (def %cc-cast?
   (fn (_ toks)
     (if (%cc-p-op? toks "(")
@@ -539,7 +602,7 @@
 ; --- declarations ------------------------------------------------------------
 
 ; one declarator after the specifiers: *s NAME [N]? = init?, or the
-; function-pointer form (*NAME [N]?)(params) -- one cell, the parameter
+; function-pointer form (*NAME [N]?)(params) -- pointer-wide, the parameter
 ; types erased; answers ((decl NAME KIND INIT) . rest)
 (def %cc-p-declarator
   (fn (_ toks base)
@@ -553,10 +616,9 @@
         (if (%cc-p-op? ts2 "[")
           (if (%cc-p-op? (rest ts2) "]")
             ; int a[] = ...: the initializer sizes it
-            (pair (if (pair? k) (list (lit array) () k) (list (lit array) ()))
-              (rest (rest ts2)))
+            (pair (list (lit array) () k) (rest (rest ts2)))
             (let ((n (first (rest (first (rest ts2))))))
-              (pair (if (pair? k) (list (lit array) n k) (list (lit array) n))
+              (pair (list (lit array) n k)
                 (%cc-p-eat (rest (rest ts2)) "]"))))
           (pair k ts2))))
     ; (NAME KIND . rest)
@@ -565,7 +627,7 @@
         (let ((ts2 (rest (rest ts))))
           (if (not (%cc-p-id? ts2))
             (%cc-p-err "expected a name in a function-pointer declarator")
-            (let ((kr (suffix (lit scalar) (rest ts2))))
+            (let ((kr (suffix (lit fnptr) (rest ts2))))
               (pair (first (rest (first ts2)))
                 (pair (first kr) (%cc-p-skip-parens (%cc-p-eat (rest kr) ")")))))))
         (if (not (%cc-p-id? ts))
@@ -634,30 +696,37 @@
 ; widest field's; registers the struct and answers the rest
 (set! %cc-p-struct-body
   (fn (_ name toks union?)
+    ; A field sits at the next offset its own alignment allows, and the
+    ; struct's size rounds up to the widest member's, so an array of them
+    ; keeps every member aligned.  A union's fields all sit at 0.
     (def go
-      (fn (self ts off fields)
+      (fn (self ts off align fields)
         (if (%cc-p-op? ts "}")
           (do (set! %cc-p-structs
-                (pair (pair name (pair off (reverse fields))) %cc-p-structs))
+                (pair (pair name (pair (%cc-round-up off align) (reverse fields)))
+                  %cc-p-structs))
               (rest ts))
           (let ((r (%cc-p-decl-line ts)))
             (def lay
-              (fn (self2 ds o fs)
-                (if (null? ds) (pair o fs)
+              (fn (self2 ds o a fs)
+                (if (null? ds) (list o a fs)
                   (let ((d (first ds)))
                     (def k (first (rest (rest d))))
                     (def sz (%cc-kind-size k))
+                    (def ka (%cc-kind-align k))
+                    (def a2 (if (> ka a) ka a))
                     (if union?
-                      (self2 (rest ds) (if (> sz o) sz o)
+                      (self2 (rest ds) (if (> sz o) sz o) a2
                         (pair (list (first (rest d)) 0 k) fs))
-                      (self2 (rest ds) (+ o sz)
-                        (pair (list (first (rest d)) o k) fs)))))))
-            (def l (lay (first r) off fields))
-            (self (rest r) (first l) (rest l))))))
-    (go toks 0 ())))
+                      (let ((at (%cc-round-up o ka)))
+                        (self2 (rest ds) (+ at sz) a2
+                          (pair (list (first (rest d)) at k) fs))))))))
+            (def l (lay (first r) off align fields))
+            (self (rest r) (first l) (first (rest l)) (first (rest (rest l))))))))
+    (go toks 0 1 ())))
 
 ; typedef TYPE declarator ;  -- a name for a kind, nothing declared;
-; `typedef int (*NAME)(params);` names the one-cell function pointer
+; `typedef int (*NAME)(params);` names the function-pointer type
 (def %cc-p-typedef
   (fn (_ toks)
     (def tr (%cc-p-type toks))
@@ -667,7 +736,7 @@
       (let ((ts2 (rest (rest (rest sr)))))
         (if (not (%cc-p-id? ts2)) (%cc-p-err "expected a typedef name")
           (let ((name (first (rest (first ts2)))))
-            (set! %cc-p-typedefs (pair (pair name (lit scalar)) %cc-p-typedefs))
+            (set! %cc-p-typedefs (pair (pair name (lit fnptr)) %cc-p-typedefs))
             (%cc-p-eat (%cc-p-skip-parens (%cc-p-eat (rest ts2) ")")) ";"))))
       (if (not (%cc-p-id? (rest sr))) (%cc-p-err "expected a typedef name")
         (let ((name (first (rest (first (rest sr))))))
@@ -792,7 +861,7 @@
 
 ; --- top level ---------------------------------------------------------------
 
-; parameters: (void) | (type name, ...) -- names only in the cell model
+; parameters: (void) | (type name, ...) -- names and kinds
 (def %cc-p-params
   (fn (_ toks)
     (if (%cc-p-op? toks ")")
@@ -805,13 +874,13 @@
               (def tr (%cc-p-type ts))
               (def ts2 (rest tr))
               ; (NAME KIND . rest): a plain parameter, an array one
-              ; (a pointer), or a function pointer (one cell)
+              ; (a pointer), or a function pointer
               (def head
                 (if (%cc-p-fnptr-start? ts2)
                   (let ((ts3 (rest (rest ts2))))
                     (if (not (%cc-p-id? ts3)) (%cc-p-err "expected a parameter name")
                       (pair (first (rest (first ts3)))
-                        (pair (lit scalar)
+                        (pair (lit fnptr)
                           (%cc-p-skip-parens (%cc-p-eat (rest ts3) ")"))))))
                   (if (not (%cc-p-id? ts2))
                     (%cc-p-err "expected a parameter name")

@@ -6,30 +6,22 @@
 ; @copyright 2026 Jon Ruttan
 ; @license MIT No Attribution (MIT-0)
 ;
-; The cell model: memory is one Vector of cells; every scalar occupies one
-; cell, sizeof any scalar is 1, pointer arithmetic counts cells. Addresses are
-; plain ints (0 is NULL and guarded), so pointers, &, *, arrays and malloc all
-; mean what they mean in C -- only the sizes diverge from a byte machine, and
-; byte-accurate sizes are the recorded pending. Locals live in memory (a stack
-; growing down from the top), so &local works; the heap bumps up from past the
-; globals.
+; Memory is bytes: one buffer, and an address is a byte offset into it (0 is
+; NULL and guarded).  Every read and write carries the width of the type it
+; goes through -- char 1, short 2, int 4, long and pointers 8 -- and a signed
+; type sign-extends what it read, since the prim answers the bytes
+; zero-extended.  Sizes and offsets are therefore the ones /usr/bin/cc counts,
+; padding included.  Locals live in memory (a stack growing down from the top),
+; so &local works; the heap bumps up from past the globals, each allocation
+; eight-aligned.
 
-; The memory is raw and shared. One string is the buffer; every cell is one
-; 8-byte word at byte offset 8*cell. The interpreter reads and writes through
-; ptr ref-word/set-word! (one prim each); build's native twins address the same
-; bytes through %mem-ref-at / %mem-set-at! with the buffer's data address baked
-; in as a literal -- so a pointer is a cell index on both sides and arrays cross
-; the native/interpreted boundary for free. The collector is non-moving (the
-; reflection layer rides raw object pointers); the base is refreshed every run.
+; The collector is non-moving (the reflection layer rides raw object
+; pointers); the base is refreshed every run.
 (def %cc-mem ())        ; the buffer string, held so it stays alive
 (def %cc-memp ())       ; its ptr object, for the interpreter's words
-(def %cc-membase 0)     ; its data address, for the native twins
-; 16K cells for programs, plus a scratch region above them for the
-; native twins' local arrays and load temps.
-(def %cc-memsize 16384)
-(def %cc-scratch-cells 4096)
-(def %cc-raw-ref (fn (_ i) (word-ref %cc-memp (* 8 i))))
-(def %cc-raw-set! (fn (_ i v) (word-set! %cc-memp (* 8 i) v)))
+(def %cc-memsize 131072)   ; bytes of program memory
+(def %cc-raw-ref (fn (_ i w) (mem-ref-at %cc-memp i w)))
+(def %cc-raw-set! (fn (_ i v w) (mem-set-at! %cc-memp i v w)))
 (def %cc-sp 0)          ; stack pointer, grows down
 (def %cc-hp 0)          ; heap bump, grows up
 (def %cc-genv ())       ; ((name addr . kind) ...)
@@ -37,7 +29,7 @@
 (def %cc-strtab ())     ; ((text . addr) ...), interned
 (def %cc-exit-code ())  ; set when exit() raises its sentinel
 
-; Function values: a function's address is an id above every cell address (so
+; Function values: a function's address is an id above every memory address (so
 ; it is never NULL, never confused with memory), handed out the first time a
 ; function's name is used as a value; a call through a value maps the id back
 ; to the name and dispatches as a named call would (native twin first). The
@@ -119,39 +111,67 @@
   (fn (_ msg)
     (Err raise (lit cc) (string-append "cc: run: " msg) ())))
 
+; How wide a value of this kind is in memory, and whether it carries a
+; sign.  An aggregate never loads -- its name is its address -- so its
+; width is only ever the fallback.
+(def %cc-width
+  (fn (_ k) (if (%cc-kind-decays? k) 8 (%cc-kind-size k))))
+
+(def %cc-signed?
+  (fn (_ k)
+    (if (pair? k) #f
+      (match
+        ((eq? k (lit uchar)) #f)
+        ((eq? k (lit ushort)) #f)
+        ((eq? k (lit uint)) #f)
+        ((eq? k (lit ulong)) #f)
+        ((eq? k (lit fnptr)) #f)
+        (#t #t)))))
+
+; a W-byte read comes back zero-extended; a signed type takes its top bit
+; as the sign
+(def %cc-sext
+  (fn (_ v w)
+    (let ((top (<< 1 (- (* 8 w) 1))))
+      (if (>= v top) (- v (* 2 top)) v))))
+
 (def %cc-load
-  (fn (_ addr)
+  (fn (_ addr kind)
     (if (<= addr 0) (%cc-oops "null or negative address read")
-      (%cc-raw-ref addr))))
+      (let ((w (%cc-width kind)))
+        (let ((v (%cc-raw-ref addr w)))
+          (if (if (%cc-signed? kind) (< w 8) #f) (%cc-sext v w) v))))))
 
 (def %cc-store
-  (fn (_ addr v)
+  (fn (_ addr v kind)
     (if (<= addr 0) (%cc-oops "null or negative address write")
-      (%cc-raw-set! addr v))))
+      (%cc-raw-set! addr v (%cc-width kind)))))
 
-; stack cells, zero-filled; answers the base address
+; stack bytes, zero-filled, eight-aligned; answers the base address
 (def %cc-alloca
   (fn (_ n)
-    (set! %cc-sp (- %cc-sp n))
+    (def size (%cc-round-up (if (< n 1) 1 n) 8))
+    (set! %cc-sp (- %cc-sp size))
     (if (< %cc-sp %cc-sp-min) (set! %cc-sp-min %cc-sp) ())
-    (if (<= %cc-sp %cc-hp) (%cc-oops "stack overflow (cell memory)")
+    (if (<= %cc-sp %cc-hp) (%cc-oops "stack overflow")
       (let ((clear (fn (self i)
-                     (if (>= i n) ()
-                       (do (%cc-raw-set! (+ %cc-sp i) 0)
-                           (self (+ i 1)))))))
+                     (if (>= i size) ()
+                       (do (word-set! %cc-memp (+ %cc-sp i) 0)
+                           (self (+ i 8)))))))
         (do (clear 0) %cc-sp)))))
 
-; heap cells, zero-filled like the stack's: the raw buffer behind the
+; heap bytes, zero-filled like the stack's: the raw buffer behind the
 ; memory is space-filled at birth (0x20 bytes), and a global array's
 ; uninitialized tail read 0x2020202020202020 until this cleared it
 (def %cc-heap
   (fn (_ n)
+    (def size (%cc-round-up (if (< n 1) 1 n) 8))
     (def base %cc-hp)
-    (set! %cc-hp (+ %cc-hp n))
-    (if (>= %cc-hp %cc-sp) (%cc-oops "heap exhausted (cell memory)")
+    (set! %cc-hp (+ %cc-hp size))
+    (if (>= %cc-hp %cc-sp) (%cc-oops "heap exhausted")
       (let ((clear (fn (self i)
-                     (if (>= i n) ()
-                       (do (%cc-raw-set! (+ base i) 0) (self (+ i 1)))))))
+                     (if (>= i size) ()
+                       (do (word-set! %cc-memp (+ base i) 0) (self (+ i 8)))))))
         (do (clear 0) base)))))
 
 ; a C string into memory, interned; answers its address
@@ -169,19 +189,19 @@
         (def base (%cc-heap (+ n 1)))
         (def fill
           (fn (self i)
-            (if (>= i n) (%cc-raw-set! (+ base i) 0)
-              (do (%cc-raw-set! (+ base i) (+ 0 (byte-at text i)))
+            (if (>= i n) (%cc-raw-set! (+ base i) 0 1)
+              (do (%cc-raw-set! (+ base i) (+ 0 (byte-at text i)) 1)
                   (self (+ i 1))))))
         (fill 0)
         (set! %cc-strtab (pair (pair text base) %cc-strtab))
         base))))
 
-; a C string out of memory (cells to the NUL)
+; a C string out of memory (bytes to the NUL)
 (def %cc-cstr
   (fn (_ addr)
     (def go
       (fn (self a acc)
-        (let ((b (%cc-load a)))
+        (let ((b (%cc-raw-ref a 1)))
           (if (= b 0) (list->string (reverse acc))
             (self (+ a 1) (pair (integer->char b) acc))))))
     (go addr ())))
@@ -224,7 +244,7 @@
 ; complete before anything runs).  A struct value has no other life
 ; than its address: an array or struct NAME "decays" to where it lives,
 ; a field of struct kind answers its address, and assignment into a
-; struct-kinded place copies cells.
+; struct-kinded place copies bytes.
 
 (def %cc-kind-decays?
   (fn (_ k)
@@ -234,10 +254,10 @@
 ; the kind an element or pointee has: (array N K) -> K, (ptr K) -> K
 (def %cc-kind-elem
   (fn (_ k)
-    (if (not (pair? k)) (lit scalar)
+    (if (not (pair? k)) (lit int)
       (if (eq? (first k) (lit array))
-        (if (null? (rest (rest k))) (lit scalar) (first (rest (rest k))))
-        (if (eq? (first k) (lit ptr)) (first (rest k)) (lit scalar))))))
+        (if (null? (rest (rest k))) (lit int) (first (rest (rest k))))
+        (if (eq? (first k) (lit ptr)) (first (rest k)) (lit int))))))
 
 ; a struct's field, (off . kind), by struct name; nil when absent
 (def %cc-field
@@ -308,7 +328,7 @@
     (let ((t (first node)))
       (if (eq? t (lit var))
         (let ((e (%cc-find (first (rest node)) env)))
-          (if (null? e) (lit scalar) (rest (rest e))))
+          (if (null? e) (lit int) (rest (rest e))))
       (if (eq? t (lit dot))
         (let ((f (%cc-field (%cc-struct-name (self (first (rest node)) env)
                               (first (rest (rest node))))
@@ -325,23 +345,28 @@
       (if (eq? t (lit call))
         ; a named call's kind is the function's declared return kind
         (let ((f (if (null? (%cc-find (first (rest node)) env)) (%cc-fun (first (rest node))) ())))
-          (if (null? f) (lit scalar)
-            (let ((r (rest (rest (rest f))))) (if (null? r) (lit scalar) (first r)))))
+          (if (null? f) (lit int)
+            (let ((r (rest (rest (rest f))))) (if (null? r) (lit int) (first r)))))
       (if (if (eq? t (lit bin)) (if (string=? (first (rest node)) "+") #t (string=? (first (rest node)) "-")) #f)
         ; pointer arithmetic keeps the pointer's kind
         (let ((ka (self (first (rest (rest node))) env)))
           (if (if (pair? ka) (eq? (first ka) (lit ptr)) #f) ka
             (if (if (pair? ka) (eq? (first ka) (lit array)) #f)
               (list (lit ptr) (%cc-kind-elem ka))
-              (lit scalar))))
-        (lit scalar)))))))))))
+              (lit int))))
+        (lit int)))))))))))
 
-; cells one step of pointer arithmetic moves, for a node's kind
+; What `+ 1` moves an expression by: a pointer or an array steps by its
+; element's size, and everything else by one.  Only an address scales.
 (def %cc-step-of
   (fn (_ node env)
-    (%cc-kind-size (%cc-kind-elem (%cc-kind-of node env)))))
+    (let ((k (%cc-kind-of node env)))
+      (if (not (pair? k)) 1
+        (if (if (eq? (first k) (lit ptr)) #t (eq? (first k) (lit array)))
+          (%cc-kind-size (%cc-kind-elem k))
+          1)))))
 
-; an initializer laid into cells at A by KIND: a braced list fills an
+; an initializer laid into memory at A by KIND: a braced list fills an
 ; array's elements or a struct's fields in order (nested lists recurse;
 ; missing trailing items stay zero); a string fills a char array with
 ; its bytes and a NUL; a struct value copies; a scalar stores
@@ -371,34 +396,36 @@
         (let ((text (first (rest init))))
           (def n (byte-len text))
           (def go (fn (self2 i)
-                    (if (>= i n) (%cc-store (+ a i) 0)
-                      (do (%cc-store (+ a i) (+ 0 (byte-at text i))) (self2 (+ i 1))))))
+                    (if (>= i n) (%cc-raw-set! (+ a i) 0 1)
+                      (do (%cc-raw-set! (+ a i) (+ 0 (byte-at text i)) 1)
+                          (self2 (+ i 1))))))
           (go 0))
         (if (if (pair? kind) (eq? (first kind) (lit struct)) #f)
-          (%cc-copy-cells! a (%cc-eval init env) (%cc-kind-size kind))
-          (%cc-store a (%cc-eval init env)))))))
+          (%cc-copy-bytes! a (%cc-eval init env) (%cc-kind-size kind))
+          (%cc-store a (%cc-eval init env) kind))))))
 
-(def %cc-copy-cells!
+(def %cc-copy-bytes!
   (fn (_ dst src n)
     (def go (fn (self i)
               (if (>= i n) ()
-                (do (%cc-store (+ dst i) (%cc-load (+ src i))) (self (+ i 1))))))
+                (do (%cc-raw-set! (+ dst i) (%cc-raw-ref (+ src i) 1) 1)
+                    (self (+ i 1))))))
     (go 0)))
 
-; cells out as a list, and back in: a returned struct is read before
-; its frame pops -- the caller's fresh slot can be the very cells the
-; callee's first parameter held, and alloca zero-fills them (the bug:
-; `return a;` of a mutated struct parameter came back all zero)
-(def %cc-read-cells
+; bytes out as a list, and back in: a returned struct is read before its
+; frame pops -- the caller's fresh slot can be the very bytes the callee's
+; first parameter held, and alloca zero-fills them (the bug: `return a;` of
+; a mutated struct parameter came back all zero)
+(def %cc-read-bytes
   (fn (_ src n)
     (def go (fn (self i acc)
-              (if (< i 0) acc (self (- i 1) (pair (%cc-load (+ src i)) acc)))))
+              (if (< i 0) acc (self (- i 1) (pair (%cc-raw-ref (+ src i) 1) acc)))))
     (go (- n 1) ())))
-(def %cc-write-cells!
+(def %cc-write-bytes!
   (fn (_ dst vals)
     (def go (fn (self i vs)
               (if (null? vs) ()
-                (do (%cc-store (+ dst i) (first vs)) (self (+ i 1) (rest vs))))))
+                (do (%cc-raw-set! (+ dst i) (first vs) 1) (self (+ i 1) (rest vs))))))
     (go 0 vals)))
 
 (def %cc-struct-kind?
@@ -452,7 +479,7 @@
             ; an array or struct NAME decays to its address; a scalar loads
             (if (%cc-kind-decays? (rest (rest e)))
               (first (rest e))
-              (%cc-load (first (rest e))))))
+              (%cc-load (first (rest e)) (rest (rest e))))))
       (if (eq? t (lit str)) (%cc-intern (first (rest node)))
       (if (eq? t (lit bin))
         (let ((op (first (rest node))))
@@ -498,8 +525,8 @@
           (if (string=? op "*")
             ; *p of a pointer to a struct is the struct: its address
             (let ((a (%cc-eval (first (rest (rest node))) env)))
-              (if (%cc-kind-decays? (%cc-kind-elem (%cc-kind-of (first (rest (rest node))) env)))
-                a (%cc-load a)))
+              (let ((ek (%cc-kind-elem (%cc-kind-of (first (rest (rest node))) env))))
+                (if (%cc-kind-decays? ek) a (%cc-load a ek))))
             (if (string=? op "&")
               ; &f of a function name is the function's value
               (let ((sub (first (rest (rest node)))))
@@ -512,30 +539,40 @@
                     (- (- 0 v) 1)))))))         ; ~v = -v-1
       (if (eq? t (lit idx))
         (let ((addr (%cc-lval node env)))
-          (if (%cc-kind-decays? (%cc-kind-of node env)) addr (%cc-load addr)))
+          (let ((k (%cc-kind-of node env)))
+            (if (%cc-kind-decays? k) addr (%cc-load addr k))))
       (if (if (eq? t (lit dot)) #t (eq? t (lit arrow)))
         (let ((addr (%cc-lval node env)))
-          (if (%cc-kind-decays? (%cc-kind-of node env)) addr (%cc-load addr)))
+          (let ((k (%cc-kind-of node env)))
+            (if (%cc-kind-decays? k) addr (%cc-load addr k))))
       (if (eq? t (lit assign))
         (let ((v (%cc-eval (first (rest (rest node))) env)))
           (def k (%cc-kind-of (first (rest node)) env))
           (if (if (pair? k) (eq? (first k) (lit struct)) #f)
-            ; a struct-kinded place: copy the cells from the value's address
+            ; a struct-kinded place: copy the bytes from the value's address
             (let ((dst (%cc-lval (first (rest node)) env)))
-              (do (%cc-copy-cells! dst v (%cc-kind-size k)) dst))
-            (do (%cc-store (%cc-lval (first (rest node)) env) v) v)))
+              (do (%cc-copy-bytes! dst v (%cc-kind-size k)) dst))
+            (do (%cc-store (%cc-lval (first (rest node)) env) v k) v)))
       (if (eq? t (lit preinc))
         (let ((a (%cc-lval (first (rest node)) env)))
-          (let ((v (+ (%cc-load a) (%cc-step-of (first (rest node)) env)))) (do (%cc-store a v) v)))
+          (def k (%cc-kind-of (first (rest node)) env))
+          (let ((v (+ (%cc-load a k) (%cc-step-of (first (rest node)) env))))
+            (do (%cc-store a v k) v)))
       (if (eq? t (lit predec))
         (let ((a (%cc-lval (first (rest node)) env)))
-          (let ((v (- (%cc-load a) (%cc-step-of (first (rest node)) env)))) (do (%cc-store a v) v)))
+          (def k (%cc-kind-of (first (rest node)) env))
+          (let ((v (- (%cc-load a k) (%cc-step-of (first (rest node)) env))))
+            (do (%cc-store a v k) v)))
       (if (eq? t (lit postinc))
         (let ((a (%cc-lval (first (rest node)) env)))
-          (let ((v (%cc-load a))) (do (%cc-store a (+ v (%cc-step-of (first (rest node)) env))) v)))
+          (def k (%cc-kind-of (first (rest node)) env))
+          (let ((v (%cc-load a k)))
+            (do (%cc-store a (+ v (%cc-step-of (first (rest node)) env)) k) v)))
       (if (eq? t (lit postdec))
         (let ((a (%cc-lval (first (rest node)) env)))
-          (let ((v (%cc-load a))) (do (%cc-store a (- v (%cc-step-of (first (rest node)) env))) v)))
+          (def k (%cc-kind-of (first (rest node)) env))
+          (let ((v (%cc-load a k)))
+            (do (%cc-store a (- v (%cc-step-of (first (rest node)) env)) k) v)))
       (if (eq? t (lit ternary))
         (if (%cc-tru (%cc-eval (first (rest node)) env))
           (%cc-eval (first (rest (rest node))) env)
@@ -549,7 +586,8 @@
         ; a named call -- unless the name is a variable holding a function
         (let ((e (%cc-find (first (rest node)) env)))
           (%cc-call
-            (if (null? e) (first (rest node)) (%cc-fun-name (%cc-load (first (rest e)))))
+            (if (null? e) (first (rest node))
+              (%cc-fun-name (%cc-load (first (rest e)) (rest (rest e)))))
             (map (fn (_ a) (%cc-eval a env))
               (first (rest (rest node))))))
       (if (eq? t (lit callx))
@@ -603,7 +641,7 @@
   (fn (_ name args)
     (def f (%cc-fun name))
     (if (not (null? f))
-      ; a user function: params get stack cells (a struct parameter its
+      ; a user function: params get stack space (a struct parameter its
       ; size, copied from the argument's address), the body runs, a
       ; return control carries the value; the frame frees wholesale.  A
       ; struct returned by value moves out of the popped frame into a
@@ -612,25 +650,25 @@
         (def bind
           (fn (self ps ks as env)
             (if (null? ps) env
-              (let ((k (if (null? ks) (lit scalar) (first ks))))
-                (def size (if (%cc-struct-kind? k) (%cc-kind-size k) 1))
+              (let ((k (if (null? ks) (lit int) (first ks))))
+                (def size (%cc-kind-size k))
                 (def a (%cc-alloca size))
                 (do (if (%cc-struct-kind? k)
-                      (if (null? as) () (%cc-copy-cells! a (first as) size))
-                      (%cc-store a (if (null? as) 0 (first as))))
+                      (if (null? as) () (%cc-copy-bytes! a (first as) size))
+                      (%cc-store a (if (null? as) 0 (first as)) k))
                     (self (rest ps) (if (null? ks) () (rest ks))
                       (if (null? as) () (rest as))
                       (pair (pair (first ps) (pair a k)) env)))))))
         ; f is (params body kinds ret)
         (def env (bind (first f) (first (rest (rest f))) args ()))
-        (def ret (let ((r (rest (rest (rest f))))) (if (null? r) (lit scalar) (first r))))
+        (def ret (let ((r (rest (rest (rest f))))) (if (null? r) (lit int) (first r))))
         (def c (%cc-exec-block (first (rest f)) env))
         (def v (if (if (pair? c) (eq? (first c) (lit return)) #f) (first (rest c)) 0))
         (if (%cc-struct-kind? ret)
-          (let ((vals (%cc-read-cells v (%cc-kind-size ret))))
+          (let ((vals (%cc-read-bytes v (%cc-kind-size ret))))
             (set! %cc-sp saved-sp)
             (let ((tmp (%cc-alloca (%cc-kind-size ret))))
-              (do (%cc-write-cells! tmp vals) tmp)))
+              (do (%cc-write-bytes! tmp vals) tmp)))
           (do (set! %cc-sp saved-sp) v)))
       (match
         ((string=? name "putchar")
@@ -766,20 +804,21 @@
 (def %cc-mem-clear
   (fn (self i end)
     (if (>= i end) ()
-      (do (%cc-raw-set! i 0)
-          (self (+ i 1) end)))))
+      (do (word-set! %cc-memp i 0)
+          (self (+ i 8) end)))))
 
 (def %cc-run-core
   (fn (_ src)
     ; one vector for the process, and only the dirty ranges cleared per
-    ; run (an interpreted 16K full clear out-allocated the vector it
-    ; replaced; the dirty ranges are hundreds of cells)
+    ; run (a full clear of the buffer out-allocated the buffer itself; the
+    ; replaced; the dirty ranges are hundreds of bytes)
     (if (null? %cc-mem)
-      (set! %cc-mem (mem-make (* 8 (+ %cc-memsize %cc-scratch-cells))))
-      (do (%cc-mem-clear 0 %cc-hp)
+      (do (set! %cc-mem (mem-make %cc-memsize))
+          (set! %cc-memp (mem-ptr %cc-mem))
+          (%cc-mem-clear 0 %cc-memsize))
+      (do (%cc-mem-clear 0 (%cc-round-up %cc-hp 8))
           (%cc-mem-clear %cc-sp-min %cc-memsize)))
     (set! %cc-memp (mem-ptr %cc-mem))
-    (set! %cc-membase (ptr-int %cc-memp))
     (set! %cc-sp-min %cc-memsize)
     (set! %cc-sp %cc-memsize)
     (set! %cc-hp 16)
