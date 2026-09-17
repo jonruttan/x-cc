@@ -75,14 +75,12 @@ fi
 # bundle sets the same knob.
 export SPEC_SEAM_COLLECT=0
 
-# And a higher allocation ceiling, the other half of the no-collect knob:
-# nothing collects between snippets, so a batch's allocation is the sum of its
-# snippets, and this bundle's are the most allocating in the fleet -- every
-# `build` case compiles C to native through the engine's compile lane, which
-# keeps the bytes it emits (a warm process never recompiles). The platform's
-# default is 300M objects; this suite measured needing ~380M, so the ceiling is
-# raised to 600M -- headroom above the measured floor, still a guard, since a
-# runaway takes the machine down. Overridable, like the platform's own.
-export X_ALLOC_LIMIT_OBJS="${X_ALLOC_LIMIT_OBJS:-600000000}"
+# One spec file per process, and with it the platform's own 300M-object
+# ceiling rather than a raised one.  Nothing collects between snippets, so a
+# batch's allocation is the sum of its files, and interpreting a C program
+# allocates: on the release lang.xon declares, a batch of eight ran out of
+# 300M objects where each file alone needs a fraction of it.  Memory down,
+# not the guard up -- x-r5rs and x-r7rs set the same knob for the same reason.
+export SPEC_BATCH="${SPEC_BATCH:-1}"
 
 . "$X_ROOT/tests/spec-runner.sh"
