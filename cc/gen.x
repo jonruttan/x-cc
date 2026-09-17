@@ -22,8 +22,9 @@
 ; parameters, assignment, ++ and --, `if`/`else`, `while`, `do`, `for`,
 ; `break`, `continue`, `return` and calls (recursion included), over integer
 ; constants, + - * / %, & | ^ << >>, the six comparisons, &&, ||, the
-; ternary, the comma and unary - ~ !.  Everything else refuses by name:
-; globals, pointers, aggregates, and more than four arguments.
+; ternary, the comma and unary - ~ !, and `putchar` unless the program
+; defines its own.  Everything else refuses by name: globals, pointers,
+; aggregates, more than four arguments, and the rest of the runtime.
 ;
 ; The convention is this compiler's own, since nothing else links with what
 ; it writes: arguments in x0, x1, x2 and x8, the answer in x0, frames off
@@ -56,23 +57,39 @@
 ; stack below it, and each function's prologue takes its frame off x20.
 (def %cc-gen-region 65536)
 
+; The entry, and the one piece of runtime compiled code calls: a write.
+; Neither the system call nor a program-counter-relative address has a
+; portable mnemonic, so both are written out per target.  The entry puts the
+; helper's address in x21, where nothing the generator emits touches it, and
+; compiled code reaches the helper through it: fd in x0, the bytes in x1,
+; how many in x2.  Those are already arm64's system-call registers, and
+; x86-64's indirect call marshals x0 and x2 into the two its own convention
+; wants, with x1 already in place.
 (def %cc-gen-entry
   (fn (_ target)
-    (def nr (syscall-id (lit exit)))
+    (def exit-nr (syscall-id (lit exit)))
+    (def write-nr (syscall-id (lit write)))
     (if (eq? target (lit macho-arm64))
-      ; mov x20, sp; sub sp, #64K; bl main (three words on);
-      ; movz x16, #exit; svc #0x80
-      (append (%cc-gen-le32 0x910003F4)
-        (append (%cc-gen-le32 (| 0xD14003FF (<< (/ %cc-gen-region 4096) 10)))
-          (append (%cc-gen-le32 0x94000003)
-            (append (%cc-gen-le32 (| 0xD2800010 (<< nr 5)))
-              (%cc-gen-le32 0xD4001001)))))
-      ; mov r12, rsp; sub rsp, 64K; call main (ten bytes on);
-      ; mov rdi, rax; mov eax, exit; syscall
-      (append (list 0x49 0x89 0xE4 0x48 0x81 0xEC)
+      ; adr x21, write3; mov x20, sp; sub sp, #64K; bl main (six words on);
+      ; movz x16, #exit; svc #0x80; then write3: movz x16, #write; svc; ret
+      (append (%cc-gen-le32 0x100000D5)
+        (append (%cc-gen-le32 0x910003F4)
+          (append (%cc-gen-le32 (| 0xD14003FF (<< (/ %cc-gen-region 4096) 10)))
+            (append (%cc-gen-le32 0x94000006)
+              (append (%cc-gen-le32 (| 0xD2800010 (<< exit-nr 5)))
+                (append (%cc-gen-le32 0xD4001001)
+                  (append (%cc-gen-le32 (| 0xD2800010 (<< write-nr 5)))
+                    (append (%cc-gen-le32 0xD4001001)
+                      (%cc-gen-le32 0xD65F03C0)))))))))
+      ; lea r13, [rip+25]; mov r12, rsp; sub rsp, 64K; call main (eighteen
+      ; bytes on); mov rdi, rax; mov eax, exit; syscall; then write3:
+      ; mov eax, write; syscall; ret
+      (append (list 0x4C 0x8D 0x2D 25 0 0 0 0x49 0x89 0xE4 0x48 0x81 0xEC)
         (append (%cc-gen-le32 %cc-gen-region)
-          (append (list 0xE8 10 0 0 0 0x48 0x89 0xC7 0xB8)
-            (append (%cc-gen-le32 nr) (list 0x0F 0x05))))))))
+          (append (list 0xE8 18 0 0 0 0x48 0x89 0xC7 0xB8)
+            (append (%cc-gen-le32 exit-nr)
+              (append (list 0x0F 0x05 0xB8)
+                (append (%cc-gen-le32 write-nr) (list 0x0F 0x05 0xC3))))))))))
 
 ; --- expressions -------------------------------------------------------------
 
@@ -151,6 +168,7 @@
 (def %cc-gen-loops ())      ; ((break-label . continue-label) ...), innermost first
 (def %cc-gen-funs ())       ; ((name . label) ...), every function in the program
 (def %cc-gen-epilogue ())   ; where `return` goes in the function being compiled
+(def %cc-gen-scratch 0)     ; the frame's last slot, which the runtime writes from
 
 ; the registers a call hands its arguments in, in order
 (def %cc-gen-args (list x0 x1 x2 x8))
@@ -289,6 +307,12 @@
 ; that is the one on top.  The answer comes back in x0.
 (def %cc-gen-call!
   (fn (_ name args)
+    (if (if (string=? name "putchar") (null? (%cc-gen-fun-find name)) #f)
+      (%cc-gen-putchar! args)
+      (%cc-gen-call-fun! name args))))
+
+(def %cc-gen-call-fun!
+  (fn (_ name args)
     (def to (%cc-gen-fun-label name))
     (if (> (length args) (length %cc-gen-args))
       (%cc-gen-no (string-append "a call with more than four arguments: " name)))
@@ -311,16 +335,37 @@
   (fn (self n xs)
     (if (<= n 0) () (if (null? xs) () (pair (first xs) (self (- n 1) (rest xs)))))))
 
-(def %cc-gen-fun-label
+(def %cc-gen-fun-find
   (fn (_ name)
     (def go (fn (self es)
               (if (null? es) ()
                 (if (string=? (first (first es)) name) (rest (first es))
                   (self (rest es))))))
-    (let ((hit (go %cc-gen-funs)))
+    (go %cc-gen-funs)))
+
+(def %cc-gen-fun-label
+  (fn (_ name)
+    (let ((hit (%cc-gen-fun-find name)))
       (if (null? hit)
         (%cc-gen-no (string-append "a call to " name))
         hit))))
+
+; putchar, unless the program defines one of its own: the character goes to
+; the frame's scratch slot and one byte of it to standard output.  It answers
+; the character, as C's does.
+(def %cc-gen-putchar!
+  (fn (_ args)
+    (if (not (= (length args) 1))
+      (%cc-gen-no "putchar with other than one argument"))
+    (def off %cc-gen-scratch)
+    (do (%cc-gen-expr! (first args))
+        (%cc-gen! (lit str) x0 (mem x19 off))
+        (%cc-gen! (lit mov) x0 (imm 1))
+        (%cc-gen! (lit mov) x1 x19)
+        (if (= off 0) () (%cc-gen! (lit add) x1 x1 (imm off)))
+        (%cc-gen! (lit mov) x2 (imm 1))
+        (%cc-gen! (lit blr) x21)
+        (%cc-gen! (lit ldr) x0 (mem x19 off)))))
 
 ; --- statements --------------------------------------------------------------
 
@@ -462,7 +507,9 @@
     (let ((go (fn (self ps) (if (null? ps) () (do (%cc-gen-slot! (first ps)) (self (rest ps)))))))
       (go params))
     (%cc-gen-scan! body)
-    (def frame (let ((m (+ (* 8 %cc-gen-slots) 15))) (- m (% m 16))))
+    ; one slot past the named ones, for the runtime to write a byte from
+    (set! %cc-gen-scratch (* 8 %cc-gen-slots))
+    (def frame (let ((m (+ (* 8 (+ %cc-gen-slots 1)) 15))) (- m (% m 16))))
     (if (> frame 4080) (%cc-gen-no "a frame past four kilobytes"))
     (asm-label! %cc-gen-asm (%cc-gen-fun-label (first (rest f))))
     ; prologue: the caller's frame base is saved, this one taken off x20
