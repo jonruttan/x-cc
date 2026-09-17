@@ -21,10 +21,15 @@ evaluates expressions on a stack machine; an operator whose result can
 leave `int`'s 32 bits sign-extends it again from bit 31, so arithmetic
 wraps as C's `int` does.
 
-Compiled so far: `int main(void) { return EXPR; }`, where EXPR is
-built from integer constants, `+ - * / %`, `& | ^ << >>`, the six
-comparisons, and unary `- ~ !`.  Anything else refuses by name.
-Locals, control flow, calls and the runtime library come next.
+Compiled so far: `int main(void)` with integer locals, assignment,
+`++` and `--`, `if`/`else`, `while`, `do`, `for`, `break`, `continue`
+and `return`, over integer constants, `+ - * / %`, `& | ^ << >>`, the
+six comparisons, `&&`, `||`, the ternary, the comma and unary `- ~ !`.
+A local is one eight-byte slot in the frame the entry reserves;
+narrower slots for `char` and `short` wait on narrower loads and
+stores in the platform assembler.  Anything else refuses by name:
+globals, other functions, calls, pointers and aggregates, which come
+next along with the runtime library.
 
     x -l cc -- run prog.c
 

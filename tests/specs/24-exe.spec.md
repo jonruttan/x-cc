@@ -1,4 +1,5 @@
 # @weight 2
+# @timeout-scale 3
 
 Compiling to an executable.  `cc-compile` writes an executable for the
 platform the compiler runs on -- an ad-hoc signed arm64 Mach-O on macOS,
@@ -60,11 +61,11 @@ eight bits of what main returns.
 
 ## the refusal
 
-### anything past a single return is not compiled yet
+### a global is not compiled yet
 
 ```cc
 (display (guard (e (do (display "refused: ") (write e) ""))
-  (cc-exe-run "int main(void) { int x = 3; return x; }")))
+  (cc-exe-run "int g = 3;\nint main(void) { return g; }")))
 ```
 ---
-    refused: #<err:cc cc: compile: not built yet: a body other than one return>
+    refused: #<err:cc cc: compile: not built yet: global declarations>
