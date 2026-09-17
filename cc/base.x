@@ -9,7 +9,7 @@
 (import cc/prims)
 
 (provide cc/base cc-version cc-preprocess cc-lex cc-parse cc-run
-  cc-compile cc-compile-bytes cc-exe-run cc-argv cc-main
+  cc-compile cc-compile-image cc-exe-run cc-argv cc-main
   %cc-repl-print)
 
 (def cc-version "0.1.0")

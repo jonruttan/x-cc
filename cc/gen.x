@@ -18,19 +18,19 @@
 ; bits: an operator whose result can leave that range sign-extends it again
 ; from bit 31, so arithmetic wraps as C's does.
 ;
-; Compiled so far: main and the functions beside it, with integer locals and
-; parameters, assignment, ++ and --, `if`/`else`, `while`, `do`, `for`,
-; `break`, `continue`, `return` and calls (recursion included), over integer
-; constants, + - * / %, & | ^ << >>, the six comparisons, &&, ||, the
-; ternary, the comma and unary - ~ !, and `putchar` and `puts` of a literal
-; unless the program defines its own.  Everything else refuses by name:
-; globals, pointers, aggregates, more than four arguments, and the rest of
-; the runtime.
+; Compiled so far: main and the functions beside it, with integer globals,
+; locals and parameters, assignment, ++ and --, `if`/`else`, `while`, `do`,
+; `for`, `break`, `continue`, `return` and calls (recursion included), over
+; integer constants, + - * / %, & | ^ << >>, the six comparisons, &&, ||,
+; the ternary, the comma and unary - ~ !, and `putchar` and `puts` of a
+; literal unless the program defines its own.  Everything else refuses by
+; name: pointers, aggregates, more than four arguments, and the rest of the
+; runtime.
 ;
 ; The convention is this compiler's own, since nothing else links with what
 ; it writes: arguments in x0, x1, x2 and x8, the answer in x0, frames off
 ; x20 in a region below the machine stack, x19 the frame's base, x21 the
-; runtime helper and x22 the string area.
+; runtime helper and x22 the data.
 
 (import x/tool/asm)
 (import x/platform/syscall)
@@ -79,20 +79,21 @@
 ; x86-64's indirect call marshals x0 and x2 into the two its own convention
 ; wants, with x1 already in place.
 ;
-; x22 gets the address of the string area, which follows the code: the
-; entry is a fixed length per target, so CODELEN is all it takes to reach
-; past the code from here.
+; x22 gets the address of the data, which the container puts on the page
+; after the code.  DATAAT is how far that is from the entry's first byte,
+; which the container works out; the entry is a fixed length per target, so
+; the two instructions that take the address know where they stand.
 (def %cc-gen-entry
-  (fn (_ target codelen)
+  (fn (_ target dataat)
     (def exit-nr (syscall-id (lit exit)))
     (def write-nr (syscall-id (lit write)))
     (if (eq? target (lit macho-arm64))
-      ; ten words: adr x21, write3; adr x22, strings; mov x20, sp;
+      ; ten words: adr x21, write3; adr x22, the data; mov x20, sp;
       ; sub sp, #64K; bl main (six words on); movz x16, #exit; svc #0x80;
       ; then write3: movz x16, #write; svc #0x80; ret
       (%cc-gen-cat
         (list (%cc-gen-le32 (%cc-gen-adr 21 28))
-              (%cc-gen-le32 (%cc-gen-adr 22 (+ 36 codelen)))
+              (%cc-gen-le32 (%cc-gen-adr 22 (- dataat 4)))
               (%cc-gen-le32 0x910003F4)
               (%cc-gen-le32 (| 0xD14003FF (<< (/ %cc-gen-region 4096) 10)))
               (%cc-gen-le32 0x94000006)
@@ -102,12 +103,12 @@
               (%cc-gen-le32 0xD4001001)
               (%cc-gen-le32 0xD65F03C0)))
       ; forty-seven bytes: lea r13, [rip+32] (write3); lea r14, [rip+...]
-      ; (strings); mov r12, rsp; sub rsp, 64K; call main (eighteen bytes
+      ; (the data); mov r12, rsp; sub rsp, 64K; call main (eighteen bytes
       ; on); mov rdi, rax; mov eax, exit; syscall; then write3:
       ; mov eax, write; syscall; ret
       (%cc-gen-cat
         (list (list 0x4C 0x8D 0x2D) (%cc-gen-le32 32)
-              (list 0x4C 0x8D 0x35) (%cc-gen-le32 (+ 33 codelen))
+              (list 0x4C 0x8D 0x35) (%cc-gen-le32 (- dataat 14))
               (list 0x49 0x89 0xE4)
               (list 0x48 0x81 0xEC) (%cc-gen-le32 %cc-gen-region)
               (list 0xE8) (%cc-gen-le32 18)
@@ -116,6 +117,17 @@
               (list 0x0F 0x05)
               (list 0xB8) (%cc-gen-le32 write-nr)
               (list 0x0F 0x05 0xC3))))))
+
+; how long the entry is; the container lays the code out from here
+(def %cc-gen-entry-len
+  (fn (_ target) (if (eq? target (lit macho-arm64)) 40 47)))
+
+; where the container puts the data, as a distance from the entry's start
+(def %cc-gen-data-at
+  (fn (_ target codelen)
+    (if (eq? target (lit macho-arm64))
+      (%cc-macho-data-at codelen)
+      (%cc-elf-data-at codelen))))
 
 ; --- expressions -------------------------------------------------------------
 
@@ -136,11 +148,15 @@
         (%cc-gen! (lit lslv) x0 x0 x2)
         (%cc-gen! (lit asrv) x0 x0 x2))))
 
-; a constant into x0, as the int its low 32 bits make
-(def %cc-gen-const!
+; V as the int its low 32 bits make
+(def %cc-gen-int-of
   (fn (_ v)
     (let ((u (& v 4294967295)))
-      (asm-load-imm64! %cc-gen-asm x0 (if (>= u 2147483648) (- u 4294967296) u)))))
+      (if (>= u 2147483648) (- u 4294967296) u))))
+
+; a constant into x0
+(def %cc-gen-const!
+  (fn (_ v) (asm-load-imm64! %cc-gen-asm x0 (%cc-gen-int-of v))))
 
 ; x0 = 1 if the flags satisfy BRANCH, else 0
 (def %cc-gen-flag!
@@ -196,11 +212,16 @@
 (def %cc-gen-epilogue ())   ; where `return` goes in the function being compiled
 (def %cc-gen-scratch 0)     ; the frame's last slot, which the runtime writes from
 
-; The string literals a program uses, laid end to end after the code and
-; NUL-terminated.  They are read-only, so they ride in the same segment; x22
-; holds where they start, taken program-counter-relatively by the entry.
+; The data a program carries, in the segment the container maps readable and
+; writable on the page after the code: the globals first, an eight-byte slot
+; each, then the string literals end to end and NUL-terminated.  x22 holds
+; where the data starts, taken program-counter-relatively by the entry, and
+; everything in it is an offset from there.  The globals come first because
+; their offsets are wanted while the bodies compile, and a literal's is not
+; settled until one is met.
+(def %cc-gen-databytes 0)
+(def %cc-gen-globals ())    ; ((name offset . value) ...)
 (def %cc-gen-strings ())    ; ((text . offset) ...)
-(def %cc-gen-strbytes 0)
 
 (def %cc-gen-string!
   (fn (_ text)
@@ -210,10 +231,83 @@
                   (self (rest es))))))
     (let ((hit (go %cc-gen-strings)))
       (if (not (null? hit)) hit
-        (let ((off %cc-gen-strbytes))
+        (let ((off %cc-gen-databytes))
           (set! %cc-gen-strings (pair (pair text off) %cc-gen-strings))
-          (set! %cc-gen-strbytes (+ off (+ (byte-len text) 1)))
+          (set! %cc-gen-databytes (+ off (+ (byte-len text) 1)))
           off)))))
+
+(def %cc-gen-global-find
+  (fn (_ name)
+    (def go (fn (self es)
+              (if (null? es) ()
+                (if (string=? (first (first es)) name) (first (rest (first es)))
+                  (self (rest es))))))
+    (go %cc-gen-globals)))
+
+; a global takes its slot, and its initializer's value goes in it
+(def %cc-gen-global!
+  (fn (_ node)
+    (def name (first (rest node)))
+    (if (pair? (first (rest (rest node))))
+      (%cc-gen-no (string-append "a global that is not an integer: " name)))
+    (if (not (null? (%cc-gen-global-find name)))
+      (%cc-gen-no (string-append "a second declaration of " name)))
+    (def init (first (rest (rest (rest node)))))
+    (def off %cc-gen-databytes)
+    (set! %cc-gen-globals
+      (pair (pair name (pair off (if (null? init) 0 (%cc-gen-fold init))))
+        %cc-gen-globals))
+    (set! %cc-gen-databytes (+ off 8))))
+
+; What a global starts out holding.  C asks for a constant here, so the
+; value is worked out now and the program starts with it in place.
+(def %cc-gen-fold
+  (fn (self node)
+    (let ((t (first node)))
+      (match
+        ((eq? t (lit num)) (%cc-gen-int-of (first (rest node))))
+        ((eq? t (lit un))
+          (let ((op (first (rest node))) (v (self (first (rest (rest node))))))
+            (%cc-gen-int-of
+              (match
+                ((string=? op "-") (- 0 v))
+                ((string=? op "~") (- (- 0 v) 1))
+                ((string=? op "!") (if (= v 0) 1 0))
+                (#t (%cc-gen-no (string-append "a global initialized with " op)))))))
+        ((eq? t (lit bin))
+          (%cc-gen-int-of
+            (%cc-gen-fold-bin (first (rest node))
+              (self (first (rest (rest node))))
+              (self (first (rest (rest (rest node))))))))
+        (#t (%cc-gen-no "a global initialized by something other than a constant"))))))
+
+(def %cc-gen-fold-bin
+  (fn (_ op a b)
+    (match
+      ((string=? op "+") (+ a b))
+      ((string=? op "-") (- a b))
+      ((string=? op "*") (* a b))
+      ((string=? op "/") (/ a b))
+      ((string=? op "%") (% a b))
+      ((string=? op "&") (& a b))
+      ((string=? op "|") (| a b))
+      ((string=? op "^") (^ a b))
+      ((string=? op "<<") (<< a b))
+      ((string=? op ">>") (>> a b))
+      (#t (%cc-gen-no (string-append "a global initialized with " op))))))
+
+; the bytes of the data: every global's slot, then the literals
+(def %cc-gen-data-bytes
+  (fn (_)
+    (def go
+      (fn (self es acc)
+        (if (null? es) acc
+          (let ((v (rest (rest (first es)))))
+            (self (rest es)
+              (append
+                (append (%cc-gen-le32 v) (%cc-gen-le32 (if (< v 0) 0xFFFFFFFF 0)))
+                acc))))))
+    (append (go %cc-gen-globals ()) (%cc-gen-string-bytes))))
 
 ; the bytes of every literal, in the order they were given offsets
 (def %cc-gen-string-bytes
@@ -265,11 +359,16 @@
     (set! %cc-gen-env (pair (pair name off) %cc-gen-env))
     off))
 
-; the slot a name stands for, or a refusal naming it
-(def %cc-gen-slot-of
+; where a name lives -- a frame slot, or a global's slot in the data -- or a
+; refusal naming it.  A local of the same name wins, as C says.
+(def %cc-gen-place-of
   (fn (_ name)
     (let ((off (%cc-gen-find name)))
-      (if (null? off) (%cc-gen-no (string-append "the name " name)) off))))
+      (if (not (null? off)) (mem x19 off)
+        (let ((g (%cc-gen-global-find name)))
+          (if (null? g)
+            (%cc-gen-no (string-append "the name " name))
+            (mem x22 g)))))))
 
 (def %cc-gen-expr! ())
 (set! %cc-gen-expr!
@@ -300,14 +399,13 @@
                   (do (%cc-gen! (lit cmp) x0 x1)
                       (%cc-gen-flag! (%cc-gen-branch op)))))))
         ((eq? t (lit var))
-          (%cc-gen! (lit ldr) x0 (mem x19 (%cc-gen-slot-of (first (rest node))))))
+          (%cc-gen! (lit ldr) x0 (%cc-gen-place-of (first (rest node)))))
         ((eq? t (lit assign))
           (let ((lv (first (rest node))))
             (if (not (eq? (first lv) (lit var)))
               (%cc-gen-no "an assignment to something other than a name"))
             (do (self (first (rest (rest node))))
-                (%cc-gen! (lit str) x0
-                  (mem x19 (%cc-gen-slot-of (first (rest lv))))))))
+                (%cc-gen! (lit str) x0 (%cc-gen-place-of (first (rest lv)))))))
         ((%cc-gen-step? t) (%cc-gen-step! t node))
         ((eq? t (lit ternary))
           (let ((else- (%cc-gen-label)) (done (%cc-gen-label)))
@@ -355,17 +453,17 @@
     (def lv (first (rest node)))
     (if (not (eq? (first lv) (lit var)))
       (%cc-gen-no "a step of something other than a name"))
-    (def off (%cc-gen-slot-of (first (rest lv))))
+    (def at (%cc-gen-place-of (first (rest lv))))
     (def up (if (eq? t (lit preinc)) #t (eq? t (lit postinc))))
     (def after (if (eq? t (lit preinc)) #t (eq? t (lit predec))))
-    (do (%cc-gen! (lit ldr) x0 (mem x19 off))
+    (do (%cc-gen! (lit ldr) x0 at)
         ; the old value waits in x8 for the postfix forms: x2 is the
         ; re-extension's shift amount
         (%cc-gen! (lit mov) x8 x0)
         (%cc-gen! (lit mov) x1 (imm 1))
         (%cc-gen! (if up (lit add) (lit sub)) x0 x0 x1)
         (%cc-gen-int!)
-        (%cc-gen! (lit str) x0 (mem x19 off))
+        (%cc-gen! (lit str) x0 at)
         (if after () (%cc-gen! (lit mov) x0 x8)))))
 
 ; A call evaluates its arguments left to right, each onto the stack, then
@@ -483,11 +581,12 @@
                         (do (self (first items)) (self2 (rest items)))))))
             (go (first (rest node)))))
         ((eq? t (lit decl))
-          ; the scan gave it its slot before any code was emitted
-          (let ((off (%cc-gen-slot-of (first (rest node)))))
+          ; the scan gave it its slot before any code was emitted, and a
+          ; local of the name wins over a global of it
+          (let ((at (%cc-gen-place-of (first (rest node)))))
             (def init (first (rest (rest (rest node)))))
             (do (if (null? init) (%cc-gen-const! 0) (%cc-gen-expr! init))
-                (%cc-gen! (lit str) x0 (mem x19 off)))))
+                (%cc-gen! (lit str) x0 at))))
         ((eq? t (lit expr)) (%cc-gen-expr! (first (rest node))))
         ((eq? t (lit if))
           (let ((other (%cc-gen-label)) (done (%cc-gen-label)))
@@ -623,23 +722,28 @@
 
 ; --- the program -------------------------------------------------------------
 
-; the code for SRC on TARGET: the entry, then main, then the rest.  main
-; comes first because the entry branches to a fixed offset.
-(def cc-compile-bytes
+; the image for SRC on TARGET, as (CODE . DATA): the entry, then main, then
+; the rest.  main comes first because the entry branches to a fixed offset.
+(def cc-compile-image
   (fn (_ src target)
     (def prog (cc-parse (cc-lex src)))
-    (if (not (null? (filter (fn (_ it) (not (eq? (first it) (lit fun)))) prog)))
-      (%cc-gen-no "global declarations"))
-    (def mains (filter (fn (_ f) (string=? (first (rest f)) "main")) prog))
+    (def funs (filter (fn (_ it) (eq? (first it) (lit fun))) prog))
+    (def mains (filter (fn (_ f) (string=? (first (rest f)) "main")) funs))
     (if (null? mains) (%cc-gen-no "a program without main"))
     (def main (first mains))
     (if (not (null? (first (rest (rest main))))) (%cc-gen-no "parameters to main"))
-    (def others (filter (fn (_ f) (not (string=? (first (rest f)) "main"))) prog))
+    (def others (filter (fn (_ f) (not (string=? (first (rest f)) "main"))) funs))
+    ; the globals take the front of the data, before a body asks for one
+    (set! %cc-gen-globals ())
+    (set! %cc-gen-strings ())
+    (set! %cc-gen-databytes 0)
+    (let ((go (fn (self ds)
+                (if (null? ds) ()
+                  (do (%cc-gen-global! (first ds)) (self (rest ds)))))))
+      (go (filter (fn (_ it) (eq? (first it) (lit gdecl))) prog)))
     (def a (asm-new 262144))
     (set! %cc-gen-asm a)
     (set! %cc-gen-nlabels 0)
-    (set! %cc-gen-strings ())
-    (set! %cc-gen-strbytes 0)
     (set! %cc-gen-link (if (eq? target (lit macho-arm64)) %cc-gen-lr ()))
     (set! %cc-gen-callop (if (eq? target (lit macho-arm64)) (lit bl) (lit call)))
     ; every function gets its label before any code, so a call can name one
@@ -651,7 +755,7 @@
                         (pair (pair (first (rest (first fs))) (%cc-gen-label))
                           %cc-gen-funs))
                       (self (rest fs)))))))
-      (go prog))
+      (go funs))
     ; a refusal can raise partway through; the buffer is released first
     (guard (err (do (asm-free! a)
                     (set! %cc-gen-asm ())
@@ -662,17 +766,22 @@
     (def code (%cc-gen-read (asm-finalize! a) (- n 1) ()))
     (asm-free! a)
     (set! %cc-gen-asm ())
-    (%cc-gen-cat
-      (list (%cc-gen-entry target n) code (%cc-gen-string-bytes)))))
+    (def entry
+      (%cc-gen-entry target (%cc-gen-data-at target (+ (%cc-gen-entry-len target) n))))
+    ; the entry's two addresses are taken from where it stands, so a length
+    ; the layout did not expect would point them somewhere else
+    (if (not (= (length entry) (%cc-gen-entry-len target)))
+      (Err raise (lit cc) "cc: compile: the entry is not the length the layout takes it for" ()))
+    (pair (append entry code) (%cc-gen-data-bytes))))
 
 ; compile SRC to an executable at PATH
 (def cc-compile
   (fn (_ src path)
     (def target (%cc-gen-target))
-    (def bytes (cc-compile-bytes src target))
+    (def image (cc-compile-image src target))
     (if (eq? target (lit macho-arm64))
-      (%cc-macho-write! path bytes)
-      (%cc-elf-write! path bytes %cc-elf-machine-x86-64))))
+      (%cc-macho-write! path (first image) (rest image))
+      (%cc-elf-write! path (first image) (rest image) %cc-elf-machine-x86-64))))
 
 ; compile SRC, run the executable, print what it wrote, answer its status
 (def cc-exe-run

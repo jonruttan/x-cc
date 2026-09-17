@@ -14,19 +14,31 @@
 ; libSystem, although the program never calls into it: its runtime is
 ; system calls.
 ;
+; Three segments carry it: __TEXT holds the header, the load commands and
+; the code; __DATA follows on the next page, readable and writable, and
+; holds the globals and the string literals; __LINKEDIT holds the rest.
+;
 ; The signature is a SuperBlob holding one CodeDirectory, big-endian, which
 ; hashes every 4096-byte page below the signature's own offset, the last one
 ; short.  Every byte in that range is final before the pages are hashed.
 
 (def %cc-macho-vmbase 0x100000000)
 (def %cc-macho-segalign 16384)         ; the arm64 page
-(def %cc-macho-ncmds 16)
-(def %cc-macho-sizeofcmds 656)
-(def %cc-macho-codeoff 688)            ; the code follows the load commands
+(def %cc-macho-ncmds 17)
+(def %cc-macho-sizeofcmds 728)
+(def %cc-macho-codeoff 760)            ; the code follows the load commands
 (def %cc-macho-ident "cc")
 
 (def %cc-macho-round-up
   (fn (_ n align) (let ((m (+ n (- align 1)))) (- m (% m align)))))
+
+; Where the data goes, as a distance from the start of the code: the next
+; page after the code, since a segment starts on one.  The generator asks for
+; this to reach the data from the entry, and the writer lays it there.
+(def %cc-macho-data-at
+  (fn (_ codelen)
+    (- (%cc-macho-round-up (+ %cc-macho-codeoff codelen) %cc-macho-segalign)
+       %cc-macho-codeoff)))
 
 ; V as a two-byte ULEB128, for 128 <= V < 16384
 (def %cc-macho-uleb2
@@ -86,21 +98,28 @@
           ())
         %cc-macho-zero-hex)))
 
-; BYTES is the code, entry first.
+; CODE is the code, entry first; DATA the bytes of the data segment.
 ; Writes the executable to PATH and answers its size in bytes.
 (def %cc-macho-write!
-  (fn (_ path bytes)
+  (fn (_ path code data)
     (def vmbase %cc-macho-vmbase)
     (def codeoff %cc-macho-codeoff)
-    (def codelen (length bytes))
-    (def textsize (%cc-macho-round-up (+ codeoff codelen) %cc-macho-segalign))
+    (def codelen (length code))
+    (def datalen (length data))
+    ; __TEXT ends where the data begins, and the data takes whole pages: a
+    ; program with none still gets one, so every executable has the segment.
+    (def dataoff (+ codeoff (%cc-macho-data-at codelen)))
+    (def textsize dataoff)
+    (def datasize
+      (%cc-macho-round-up (if (= datalen 0) 1 datalen) %cc-macho-segalign))
+    (def linkedit (+ dataoff datasize))
     ; the link-edit data, in the order ld writes it
-    (def fixups textsize)
-    (def trie (+ textsize 56))
-    (def starts (+ textsize 104))
-    (def symoff (+ textsize 112))
-    (def stroff (+ textsize 144))
-    (def sigoff (+ textsize 176))
+    (def fixups linkedit)
+    (def trie (+ linkedit 56))
+    (def starts (+ linkedit 104))
+    (def symoff (+ linkedit 112))
+    (def stroff (+ linkedit 144))
+    (def sigoff (+ linkedit 176))
     (def idlen (+ (byte-len %cc-macho-ident) 1))
     (def nslots (/ (+ sigoff 4095) 4096))
     (def hashoff (+ 88 idlen))
@@ -127,50 +146,53 @@
     (%cc-img-u32! img 224 codeoff)
     (%cc-img-u32! img 228 2)               ; aligned to 4
     (%cc-img-u32! img 240 0x80000400)      ; PURE_INSTRUCTIONS SOME_INSTRUCTIONS
-    (%cc-macho-segment! img 256 "__LINKEDIT" (+ vmbase textsize)
-      (%cc-macho-round-up (- total textsize) %cc-macho-segalign)
-      textsize (- total textsize) 1 0)
-    (%cc-macho-data-cmd! img 328 0x80000034 fixups 56)   ; LC_DYLD_CHAINED_FIXUPS
-    (%cc-macho-data-cmd! img 344 0x80000033 trie 48)     ; LC_DYLD_EXPORTS_TRIE
-    (%cc-img-u32! img 360 0x02)            ; LC_SYMTAB
-    (%cc-img-u32! img 364 24)
-    (%cc-img-u32! img 368 symoff)
-    (%cc-img-u32! img 372 2)
-    (%cc-img-u32! img 376 stroff)
-    (%cc-img-u32! img 380 32)
-    (%cc-img-u32! img 384 0x0B)            ; LC_DYSYMTAB
-    (%cc-img-u32! img 388 80)
-    (%cc-img-u32! img 404 2)               ; two defined external symbols
-    (%cc-img-u32! img 408 2)               ; no undefined ones after them
-    (%cc-img-u32! img 464 0x0E)            ; LC_LOAD_DYLINKER
-    (%cc-img-u32! img 468 32)
-    (%cc-img-u32! img 472 12)
-    (%cc-img-ascii! img 476 "/usr/lib/dyld")
-    (%cc-img-u32! img 496 0x1B)            ; LC_UUID, filled in once the code is in
-    (%cc-img-u32! img 500 24)
-    (%cc-img-u32! img 520 0x32)            ; LC_BUILD_VERSION: macOS, 12.0, no tools
-    (%cc-img-u32! img 524 24)
-    (%cc-img-u32! img 528 1)
-    (%cc-img-u32! img 532 0x000C0000)
-    (%cc-img-u32! img 536 0x000C0000)
-    (%cc-img-u32! img 544 0x2A)            ; LC_SOURCE_VERSION
-    (%cc-img-u32! img 548 16)
-    (%cc-img-u32! img 560 0x80000028)      ; LC_MAIN
-    (%cc-img-u32! img 564 24)
-    (%cc-img-u64! img 568 codeoff)
-    (%cc-img-u32! img 584 0x0C)            ; LC_LOAD_DYLIB
-    (%cc-img-u32! img 588 56)
-    (%cc-img-u32! img 592 24)
-    (%cc-img-u32! img 596 2)
-    (%cc-img-u32! img 600 0x00010000)
-    (%cc-img-u32! img 604 0x00010000)
-    (%cc-img-ascii! img 608 "/usr/lib/libSystem.B.dylib")
-    (%cc-macho-data-cmd! img 640 0x26 starts 8)          ; LC_FUNCTION_STARTS
-    (%cc-macho-data-cmd! img 656 0x29 symoff 0)          ; LC_DATA_IN_CODE
-    (%cc-macho-data-cmd! img 672 0x1D sigoff siglen)     ; LC_CODE_SIGNATURE
+    (%cc-macho-segment! img 256 "__DATA" (+ vmbase dataoff) datasize
+      dataoff datasize 3 0)                ; read and write
+    (%cc-macho-segment! img 328 "__LINKEDIT" (+ vmbase linkedit)
+      (%cc-macho-round-up (- total linkedit) %cc-macho-segalign)
+      linkedit (- total linkedit) 1 0)
+    (%cc-macho-data-cmd! img 400 0x80000034 fixups 56)   ; LC_DYLD_CHAINED_FIXUPS
+    (%cc-macho-data-cmd! img 416 0x80000033 trie 48)     ; LC_DYLD_EXPORTS_TRIE
+    (%cc-img-u32! img 432 0x02)            ; LC_SYMTAB
+    (%cc-img-u32! img 436 24)
+    (%cc-img-u32! img 440 symoff)
+    (%cc-img-u32! img 444 2)
+    (%cc-img-u32! img 448 stroff)
+    (%cc-img-u32! img 452 32)
+    (%cc-img-u32! img 456 0x0B)            ; LC_DYSYMTAB
+    (%cc-img-u32! img 460 80)
+    (%cc-img-u32! img 476 2)               ; two defined external symbols
+    (%cc-img-u32! img 480 2)               ; no undefined ones after them
+    (%cc-img-u32! img 536 0x0E)            ; LC_LOAD_DYLINKER
+    (%cc-img-u32! img 540 32)
+    (%cc-img-u32! img 544 12)
+    (%cc-img-ascii! img 548 "/usr/lib/dyld")
+    (%cc-img-u32! img 568 0x1B)            ; LC_UUID, filled in once the code is in
+    (%cc-img-u32! img 572 24)
+    (%cc-img-u32! img 592 0x32)            ; LC_BUILD_VERSION: macOS, 12.0, no tools
+    (%cc-img-u32! img 596 24)
+    (%cc-img-u32! img 600 1)
+    (%cc-img-u32! img 604 0x000C0000)
+    (%cc-img-u32! img 608 0x000C0000)
+    (%cc-img-u32! img 616 0x2A)            ; LC_SOURCE_VERSION
+    (%cc-img-u32! img 620 16)
+    (%cc-img-u32! img 632 0x80000028)      ; LC_MAIN
+    (%cc-img-u32! img 636 24)
+    (%cc-img-u64! img 640 codeoff)
+    (%cc-img-u32! img 656 0x0C)            ; LC_LOAD_DYLIB
+    (%cc-img-u32! img 660 56)
+    (%cc-img-u32! img 664 24)
+    (%cc-img-u32! img 668 2)
+    (%cc-img-u32! img 672 0x00010000)
+    (%cc-img-u32! img 676 0x00010000)
+    (%cc-img-ascii! img 680 "/usr/lib/libSystem.B.dylib")
+    (%cc-macho-data-cmd! img 712 0x26 starts 8)          ; LC_FUNCTION_STARTS
+    (%cc-macho-data-cmd! img 728 0x29 symoff 0)          ; LC_DATA_IN_CODE
+    (%cc-macho-data-cmd! img 744 0x1D sigoff siglen)     ; LC_CODE_SIGNATURE
 
-    ; the code
-    (%cc-img-bytes! img codeoff bytes)
+    ; the code, then the data a page later
+    (%cc-img-bytes! img codeoff code)
+    (%cc-img-bytes! img dataoff data)
 
     ; chained fixups: the header, and a start table for three segments
     ; with no fixups in any of them
@@ -212,7 +234,7 @@
     (sha256-jit!)
 
     ; the UUID: sixteen bytes of a digest of the header, commands and code
-    (%cc-macho-put-hex! img 504 (sha256-hex-n (first img) (+ codeoff codelen)) 16)
+    (%cc-macho-put-hex! img 576 (sha256-hex-n (first img) (+ codeoff codelen)) 16)
 
     ; the signature
     (def cd (+ sigoff 20))
@@ -236,17 +258,19 @@
     (%cc-img-ascii! img (+ cd 88) %cc-macho-ident)
 
     ; The digest takes a prefix, not an offset.  Page zero is a prefix of the
-    ; image as it stands; a zero page between the code and the link-edit data
-    ; has a known digest; any other page is copied to a scratch buffer.
+    ; image as it stands; a page of the padding that follows the code, or the
+    ; data, has a known digest; any other page is copied to a scratch buffer.
     (def code-end (%cc-macho-round-up (+ codeoff codelen) 4096))
+    (def data-end (%cc-macho-round-up (+ dataoff datalen) 4096))
+    (def padding? (fn (_ off from to) (if (>= off from) (<= (+ off 4096) to) #f)))
     (def scratch (%cc-img-new 4096))
     (def page-hex
       (fn (_ k)
         (let ((off (* k 4096)))
           (match
             ((= k 0) (sha256-hex-n (first img) 4096))
-            ((if (>= off code-end) (<= (+ off 4096) textsize) #f)
-              (%cc-macho-zero-page-hex))
+            ((padding? off code-end dataoff) (%cc-macho-zero-page-hex))
+            ((padding? off data-end linkedit) (%cc-macho-zero-page-hex))
             (#t (let ((n (if (< (- sigoff off) 4096) (- sigoff off) 4096)))
                   (do (%cc-macho-copy! (rest scratch) (rest img) off 0 n)
                       (sha256-hex-n (first scratch) n))))))))
