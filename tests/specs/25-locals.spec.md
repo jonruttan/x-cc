@@ -104,11 +104,11 @@ Each status below is the one the same source gives when compiled with
 ---
     refused: #<err:cc cc: compile: not built yet: a local that is not an integer>
 
-### so is a call
+### so is a pointer
 
 ```cc
 (display (guard (e (do (display "refused: ") (write e) ""))
-  (cc-exe-run "int sq(int n) { return n * n; }\nint main(void) { return sq(5); }")))
+  (cc-exe-run "int main(void) { int a = 1; int *p = &a; return *p; }")))
 ```
 ---
-    refused: #<err:cc cc: compile: not built yet: functions other than main>
+    refused: #<err:cc cc: compile: not built yet: a local that is not an integer>

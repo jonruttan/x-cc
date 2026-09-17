@@ -21,15 +21,20 @@ evaluates expressions on a stack machine; an operator whose result can
 leave `int`'s 32 bits sign-extends it again from bit 31, so arithmetic
 wraps as C's `int` does.
 
-Compiled so far: `int main(void)` with integer locals, assignment,
-`++` and `--`, `if`/`else`, `while`, `do`, `for`, `break`, `continue`
-and `return`, over integer constants, `+ - * / %`, `& | ^ << >>`, the
-six comparisons, `&&`, `||`, the ternary, the comma and unary `- ~ !`.
-A local is one eight-byte slot in the frame the entry reserves;
-narrower slots for `char` and `short` wait on narrower loads and
-stores in the platform assembler.  Anything else refuses by name:
-globals, other functions, calls, pointers and aggregates, which come
-next along with the runtime library.
+Compiled so far: main and the functions beside it, with integer
+locals and parameters, assignment, `++` and `--`, `if`/`else`,
+`while`, `do`, `for`, `break`, `continue`, `return` and calls,
+recursion included, over integer constants, `+ - * / %`,
+`& | ^ << >>`, the six comparisons, `&&`, `||`, the ternary, the
+comma and unary `- ~ !`.
+
+The calling convention is the compiler's own, since nothing else links
+with what it writes: arguments in four registers, the answer in one,
+and a frame per call taken from a region below the machine stack.  A
+local is one eight-byte slot; narrower slots for `char` and `short`
+wait on narrower loads and stores in the platform assembler.  Anything
+else refuses by name: globals, pointers, aggregates and a fifth
+argument, which come next along with the runtime library.
 
     x -l cc -- run prog.c
 
