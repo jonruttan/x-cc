@@ -22,10 +22,10 @@
 ; locals and parameters, assignment, ++ and --, `if`/`else`, `while`, `do`,
 ; `for`, `break`, `continue`, `return` and calls (recursion included), over
 ; integer constants, + - * / %, & | ^ << >>, the six comparisons, &&, ||,
-; the ternary, the comma and unary - ~ !, and `putchar` and `puts` of a
-; literal unless the program defines its own.  Everything else refuses by
-; name: pointers, aggregates, more than four arguments, and the rest of the
-; runtime.
+; the ternary, the comma and unary - ~ !, and `putchar`, `puts` of a literal
+; and `printf` of a literal format with %d %c %s and %%, unless the program
+; defines its own.  Everything else refuses by name: pointers, aggregates,
+; more than four arguments, and the rest of the runtime.
 ;
 ; The convention is this compiler's own, since nothing else links with what
 ; it writes: arguments in x0, x1, x2 and x8, the answer in x0, frames off
@@ -210,7 +210,17 @@
 (def %cc-gen-loops ())      ; ((break-label . continue-label) ...), innermost first
 (def %cc-gen-funs ())       ; ((name . label) ...), every function in the program
 (def %cc-gen-epilogue ())   ; where `return` goes in the function being compiled
-(def %cc-gen-scratch 0)     ; the frame's last slot, which the runtime writes from
+(def %cc-gen-scratch 0)     ; the slot past the named ones, which the runtime writes from
+
+; A function that calls printf has an area past the scratch slot for it:
+; the count of bytes written so far, the cursor into the digits, sixteen
+; bytes the digits are built in, then one slot for each argument after the
+; format.  It is in the frame, so a printf reached from another's arguments,
+; or from a recursive call, has its own.
+(def %cc-gen-pf 0)          ; where the area starts
+(def %cc-gen-pf-count 0)
+(def %cc-gen-pf-cursor 8)
+(def %cc-gen-pf-end 32)     ; the digits end here, and the arguments start
 
 ; The data a program carries, in the segment the container maps readable and
 ; writable on the page after the code: the globals first, an eight-byte slot
@@ -475,6 +485,7 @@
       (match
         ((string=? name "putchar") (%cc-gen-putchar! args))
         ((string=? name "puts") (%cc-gen-puts! args))
+        ((string=? name "printf") (%cc-gen-printf! args))
         (#t (%cc-gen-call-fun! name args)))
       (%cc-gen-call-fun! name args))))
 
@@ -536,22 +547,195 @@
         (%cc-gen-no (string-append "a call to " name))
         hit))))
 
-; putchar, unless the program defines one of its own: the character goes to
-; the frame's scratch slot and one byte of it to standard output.  It answers
-; the character, as C's does.
-(def %cc-gen-putchar!
-  (fn (_ args)
-    (if (not (= (length args) 1))
-      (%cc-gen-no "putchar with other than one argument"))
+; the low byte of x0 to standard output, from the frame's scratch slot
+(def %cc-gen-put-byte!
+  (fn (_)
     (def off %cc-gen-scratch)
-    (do (%cc-gen-expr! (first args))
-        (%cc-gen! (lit str) x0 (mem x19 off))
+    (do (%cc-gen! (lit str) x0 (mem x19 off))
         (%cc-gen! (lit mov) x0 (imm 1))
         (%cc-gen! (lit mov) x1 x19)
         (if (= off 0) () (%cc-gen! (lit add) x1 x1 (imm off)))
         (%cc-gen! (lit mov) x2 (imm 1))
+        (%cc-gen! (lit blr) x21))))
+
+; putchar, unless the program defines one of its own.  It answers the
+; character, as C's does.
+(def %cc-gen-putchar!
+  (fn (_ args)
+    (if (not (= (length args) 1))
+      (%cc-gen-no "putchar with other than one argument"))
+    (do (%cc-gen-expr! (first args))
+        (%cc-gen-put-byte!)
+        (%cc-gen! (lit ldr) x0 (mem x19 %cc-gen-scratch)))))
+
+; --- printf ------------------------------------------------------------------
+; printf of a literal format is laid out here, at compile time: the format
+; splits into runs of text and conversions, a %s's literal and a %% join the
+; text around them, and what is left for run time is a write per run of
+; text, one per %c, and a conversion to decimal per %d.  Every argument is
+; evaluated before anything is written, as a call's are.  It answers the
+; count of bytes written, as C's does.
+
+; (PIECES . ARGS) for FORMAT and the arguments after it: each piece is
+; (text . STRING), or (d . N) or (c . N) for the Nth argument left to run time
+(def %cc-gen-printf-plan
+  (fn (_ fmt args)
+    (def n (byte-len fmt))
+    ; the text gathered so far, as a piece, unless it is empty
+    (def flush
+      (fn (_ text pieces)
+        (let ((s (string-concat (reverse text))))
+          (if (= (byte-len s) 0) pieces (pair (pair (lit text) s) pieces)))))
+    (def go
+      (fn (self i from text args pieces later)
+        (match
+          ((>= i n)
+            (do (if (not (null? args))
+                  (%cc-gen-no "printf with more arguments than conversions"))
+                (pair (reverse (flush (pair (substring fmt from n) text) pieces))
+                  (reverse later))))
+          ((not (= (byte-at fmt i) 37)) (self (+ i 1) from text args pieces later))
+          ((>= (+ i 1) n) (%cc-gen-no "printf's % at the end of its format"))
+          (#t
+            (let ((c (byte-at fmt (+ i 1)))
+                  (text (pair (substring fmt from i) text)))
+              (match
+                ((= c 37) (self (+ i 2) (+ i 2) (pair "%" text) args pieces later))
+                ((not (if (= c 115) #t (if (= c 100) #t (= c 99))))
+                  (%cc-gen-no
+                    (string-append "printf's %" (substring fmt (+ i 1) (+ i 2)))))
+                ((null? args) (%cc-gen-no "printf with fewer arguments than conversions"))
+                ((= c 115)
+                  (if (not (eq? (first (first args)) (lit str)))
+                    (%cc-gen-no "printf's %s of something other than a literal")
+                    (self (+ i 2) (+ i 2) (pair (first (rest (first args))) text)
+                      (rest args) pieces later)))
+                (#t
+                  (self (+ i 2) (+ i 2) () (rest args)
+                    (pair (pair (if (= c 100) (lit d) (lit c)) (length later))
+                      (flush text pieces))
+                    (pair (first args) later)))))))))
+    (go 0 0 () args () ())))
+
+; the most arguments a call to printf in NODE takes, the format included;
+; 0 when there is none
+(def %cc-gen-printf-width
+  (fn (self node)
+    (if (not (pair? node)) 0
+      (let ((here (if (if (eq? (first node) (lit call)) (string=? (first (rest node)) "printf") #f)
+                    (length (first (rest (rest node))))
+                    0)))
+        (def go
+          (fn (self2 xs best)
+            (if (null? xs) best
+              (self2 (rest xs) (let ((w (self (first xs)))) (if (> w best) w best))))))
+        (go node here)))))
+
+; x0 bytes were just written: they go on the count
+(def %cc-gen-printf-count!
+  (fn (_)
+    (def at (mem x19 (+ %cc-gen-pf %cc-gen-pf-count)))
+    (do (%cc-gen! (lit ldr) x1 at)
+        (%cc-gen! (lit add) x1 x1 x0)
+        (%cc-gen! (lit str) x1 at))))
+
+; A run of text: its bytes are in the data, so one write.
+(def %cc-gen-printf-text!
+  (fn (_ text)
+    (do (%cc-gen-string-at! text)
+        (%cc-gen! (lit mov) x1 x0)
+        (%cc-gen! (lit mov) x0 (imm 1))
+        (%cc-gen! (lit mov) x2 (imm (byte-len text)))
         (%cc-gen! (lit blr) x21)
-        (%cc-gen! (lit ldr) x0 (mem x19 off)))))
+        (%cc-gen-printf-count!))))
+
+; A %d: the sign first if there is one, then the digits, built from the end
+; of the buffer back.  The cursor lives in its slot rather than a register:
+; x86-64's multiply-and-subtract leaves its product where the quotient was,
+; so the quotient is copied out first and every register is spoken for.
+; The magnitude of the most negative int still fits the 64-bit register.
+(def %cc-gen-printf-int!
+  (fn (_ slot)
+    (def cursor (mem x19 (+ %cc-gen-pf %cc-gen-pf-cursor)))
+    (def end (+ %cc-gen-pf %cc-gen-pf-end))
+    (def plus (%cc-gen-label))
+    (def digit (%cc-gen-label))
+    (do (%cc-gen! (lit ldr) x0 (mem x19 slot))
+        (%cc-gen! (lit cmp) x0 (imm 0))
+        (%cc-gen! (lit b/ge) (label plus))
+        (%cc-gen! (lit sub) x0 xzr x0)
+        (%cc-gen! (lit str) x0 (mem x19 slot))
+        (%cc-gen! (lit mov) x0 (imm 45))
+        (%cc-gen-put-byte!)
+        (%cc-gen-printf-count!)
+        (%cc-gen! (lit ldr) x0 (mem x19 slot))
+        (asm-label! %cc-gen-asm plus)
+        (%cc-gen! (lit mov) x2 x19)
+        (%cc-gen! (lit add) x2 x2 (imm end))
+        (%cc-gen! (lit str) x2 cursor)
+        (%cc-gen! (lit mov) x8 (imm 10))
+        (asm-label! %cc-gen-asm digit)
+        (%cc-gen! (lit sdiv) x2 x0 x8)
+        (%cc-gen! (lit mov) x1 x2)
+        (%cc-gen! (lit msub) x0 x2 x8 x0)
+        (%cc-gen! (lit add) x0 x0 (imm 48))
+        (%cc-gen! (lit ldr) x2 cursor)
+        (%cc-gen! (lit sub) x2 x2 (imm 1))
+        (%cc-gen! (lit strb) x0 (mem x2 0))
+        (%cc-gen! (lit str) x2 cursor)
+        (%cc-gen! (lit mov) x0 x1)
+        (%cc-gen! (lit cmp) x0 (imm 0))
+        (%cc-gen! (lit b/ne) (label digit))
+        ; the digits, from the cursor to the end
+        (%cc-gen! (lit ldr) x1 cursor)
+        (%cc-gen! (lit mov) x2 x19)
+        (%cc-gen! (lit add) x2 x2 (imm end))
+        (%cc-gen! (lit sub) x2 x2 x1)
+        (%cc-gen! (lit mov) x0 (imm 1))
+        (%cc-gen! (lit blr) x21)
+        (%cc-gen-printf-count!))))
+
+(def %cc-gen-printf!
+  (fn (_ args)
+    (if (null? args) (%cc-gen-no "printf without a format"))
+    (if (not (eq? (first (first args)) (lit str)))
+      (%cc-gen-no "printf of a format that is not a literal"))
+    (def plan (%cc-gen-printf-plan (first (rest (first args))) (rest args)))
+    (def later (rest plan))
+    (def arg-at (fn (_ k) (+ %cc-gen-pf (+ %cc-gen-pf-end (* 8 k)))))
+    (def push-all
+      (fn (self as)
+        (if (null? as) ()
+          (do (%cc-gen-expr! (first as))
+              (asm-push! %cc-gen-asm x0)
+              (self (rest as))))))
+    ; the last one pushed is on top, so the slots fill from the last back
+    (def pop-all
+      (fn (self k)
+        (if (< k 0) ()
+          (do (asm-pop! %cc-gen-asm x0)
+              (%cc-gen! (lit str) x0 (mem x19 (arg-at k)))
+              (self (- k 1))))))
+    (def emit
+      (fn (self pieces)
+        (if (null? pieces) ()
+          (let ((p (first pieces)))
+            (do (match
+                  ((eq? (first p) (lit text)) (%cc-gen-printf-text! (rest p)))
+                  ((eq? (first p) (lit c))
+                    (do (%cc-gen! (lit ldr) x0 (mem x19 (arg-at (rest p))))
+                        (%cc-gen-put-byte!)
+                        (%cc-gen-printf-count!)))
+                  (#t (%cc-gen-printf-int! (arg-at (rest p)))))
+                (self (rest pieces)))))))
+    (do (push-all later)
+        (pop-all (- (length later) 1))
+        ; the count starts once the arguments are in: one of them may have
+        ; been a printf of its own, in this same frame
+        (%cc-gen! (lit mov) x0 (imm 0))
+        (%cc-gen! (lit str) x0 (mem x19 (+ %cc-gen-pf %cc-gen-pf-count)))
+        (emit (first plan))
+        (%cc-gen! (lit ldr) x0 (mem x19 (+ %cc-gen-pf %cc-gen-pf-count))))))
 
 ; --- statements --------------------------------------------------------------
 
@@ -694,9 +878,15 @@
     (let ((go (fn (self ps) (if (null? ps) () (do (%cc-gen-slot! (first ps)) (self (rest ps)))))))
       (go params))
     (%cc-gen-scan! body)
-    ; one slot past the named ones, for the runtime to write a byte from
+    ; one slot past the named ones, for the runtime to write a byte from,
+    ; then printf's area if the function calls it
     (set! %cc-gen-scratch (* 8 %cc-gen-slots))
-    (def frame (let ((m (+ (* 8 (+ %cc-gen-slots 1)) 15))) (- m (% m 16))))
+    (set! %cc-gen-pf (+ %cc-gen-scratch 8))
+    (def width
+      (if (null? (%cc-gen-fun-find "printf")) (%cc-gen-printf-width body) 0))
+    (def pf-slots (if (= width 0) 0 (+ 3 width)))
+    (def frame
+      (let ((m (+ (* 8 (+ %cc-gen-slots (+ 1 pf-slots))) 15))) (- m (% m 16))))
     (if (> frame 4080) (%cc-gen-no "a frame past four kilobytes"))
     (asm-label! %cc-gen-asm (%cc-gen-fun-label (first (rest f))))
     ; prologue: the caller's frame base is saved, this one taken off x20

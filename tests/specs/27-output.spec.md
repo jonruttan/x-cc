@@ -56,11 +56,11 @@ B
 
 ## the refusal
 
-### printf is not compiled yet
+### the rest of the runtime is not compiled yet
 
 ```cc
 (display (guard (e (do (display "refused: ") (write e) ""))
-  (cc-exe-run "#include <stdio.h>\nint main(void) { printf(\"%d\\n\", 7); return 0; }")))
+  (cc-exe-run "#include <stdlib.h>\nint main(void) { exit(3); }")))
 ```
 ---
-    refused: #<err:cc cc: compile: not built yet: a call to printf>
+    refused: #<err:cc cc: compile: not built yet: a call to exit>
