@@ -27,10 +27,13 @@ globals, locals and parameters, assignment, `++` and `--`, `if`/`else`,
 recursion included, over integer constants, `+ - * / %`,
 `& | ^ << >>`, the six comparisons, `&&`, `||`, the ternary, the
 comma and unary `- ~ !`.  A compiled program prints with `putchar`,
-and with `puts` of a literal: the entry writes out a helper that makes
+`puts` of a literal, and `printf` of a literal format with `%d`, `%c`,
+`%s` of a literal and `%%`: the entry writes out a helper that makes
 the write system call and hands compiled code its address, since
 neither the system call nor a program-counter-relative address has a
-portable mnemonic.
+portable mnemonic.  A `printf` is laid out at compile time -- runs of
+text become one write each, and only `%d` and `%c` are left for run
+time, a `%d` converted to decimal in a buffer in the frame.
 
 The executable has a data segment, mapped readable and writable on the
 page after the code -- `__DATA` in the Mach-O, a second `PT_LOAD` in the
@@ -46,8 +49,9 @@ local is one eight-byte slot; narrower slots for `char` and `short`
 wait on narrower loads and stores in the platform assembler.  Anything
 else refuses by name: pointers, aggregates, a fifth argument, a global
 that is not an integer or is initialized by something other than a
-constant, and the rest of the runtime, `printf` and a `puts` of
-anything but a literal included.
+constant, any other `printf` conversion or a format that is not a
+literal, a `puts` of anything but a literal, and the rest of the
+runtime.
 
     x -l cc -- run prog.c
 
