@@ -37,7 +37,7 @@ time, a `%d` converted to decimal in a buffer in the frame.
 
 The executable has a data segment, mapped readable and writable on the
 page after the code -- `__DATA` in the Mach-O, a second `PT_LOAD` in the
-ELF.  The globals are at the front of it, an eight-byte slot each with
+ELF.  The globals are at the front of it, each at its kind's size with
 the initializer's value already in place; the string literals follow,
 end to end and each stored once.  The entry hands compiled code the
 data's address the way it hands over the helper's.
@@ -45,13 +45,15 @@ data's address the way it hands over the helper's.
 The calling convention is the compiler's own, since nothing else links
 with what it writes: arguments in four registers, the answer in one,
 and a frame per call taken from a region below the machine stack.  A
-local is one eight-byte slot; narrower slots for `char` and `short`
-wait on narrower loads and stores in the platform assembler.  Anything
-else refuses by name: pointers, aggregates, a fifth argument, a global
-that is not an integer or is initialized by something other than a
-constant, any other `printf` conversion or a format that is not a
-literal, a `puts` of anything but a literal, and the rest of the
-runtime.
+local, a parameter and a global take the size and alignment of their
+kind, and a value loads at that width, extended by its sign; arithmetic
+happens in `int`, which is what C's promotions make of `char` and
+`short`, and a store narrows the value back.  Anything else refuses by
+name: `long` and the unsigned kinds of `int`'s width or more, whose
+arithmetic is not `int`'s, pointers, aggregates, a fifth argument, a
+global initialized by something other than a constant, any other
+`printf` conversion or a format that is not a literal, a `puts` of
+anything but a literal, and the rest of the runtime.
 
     x -l cc -- run prog.c
 
