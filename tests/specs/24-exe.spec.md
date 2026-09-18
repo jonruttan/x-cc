@@ -61,11 +61,11 @@ eight bits of what main returns.
 
 ## the refusal
 
-### a global is not compiled yet
+### a pointer is not compiled yet
 
 ```cc
 (display (guard (e (do (display "refused: ") (write e) ""))
-  (cc-exe-run "int g = 3;\nint main(void) { return g; }")))
+  (cc-exe-run "int main(void) { int n = 1; int *p = &n; return *p; }")))
 ```
 ---
-    refused: #<err:cc cc: compile: not built yet: global declarations>
+    refused: #<err:cc cc: compile: not built yet: a local that is not an integer>
