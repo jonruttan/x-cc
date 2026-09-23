@@ -90,11 +90,11 @@ and exits as it does.
 ---
     ("cc: compile: not built yet: the type long" "cc: compile: not built yet: the type unsigned int")
 
-### a parameter that is a pointer
+### a parameter that is a struct
 
 ```cc
 (display (guard (e (do (display "refused: ") (write e) ""))
-  (cc-exe-run "int first(int *p) { return 0; }\nint main(void) { return 0; }")))
+  (cc-exe-run "struct P { int x; };\nint first(struct P p) { return 0; }\nint main(void) { return 0; }")))
 ```
 ---
-    refused: #<err:cc cc: compile: not built yet: a parameter that is not an integer>
+    refused: #<err:cc cc: compile: not built yet: a struct>

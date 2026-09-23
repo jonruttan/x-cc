@@ -610,16 +610,19 @@
     (def sr (stars base toks))
     (def ts (rest sr))
     (def kind0 (first sr))
-    ; the array suffix after a name: (KIND . rest)
+    ; the array suffix after a name: (KIND . rest).  Each [N] wraps the
+    ; kind the dimensions after it make, so int m[2][3] is two arrays of
+    ; three ints.
     (def suffix
-      (fn (_ k ts2)
+      (fn (self k ts2)
         (if (%cc-p-op? ts2 "[")
           (if (%cc-p-op? (rest ts2) "]")
             ; int a[] = ...: the initializer sizes it
-            (pair (list (lit array) () k) (rest (rest ts2)))
+            (let ((inner (self k (rest (rest ts2)))))
+              (pair (list (lit array) () (first inner)) (rest inner)))
             (let ((n (first (rest (first (rest ts2))))))
-              (pair (list (lit array) n k)
-                (%cc-p-eat (rest (rest ts2)) "]"))))
+              (let ((inner (self k (%cc-p-eat (rest (rest ts2)) "]"))))
+                (pair (list (lit array) n (first inner)) (rest inner)))))
           (pair k ts2))))
     ; (NAME KIND . rest)
     (def head

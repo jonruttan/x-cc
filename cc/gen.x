@@ -20,14 +20,16 @@
 ;
 ; Compiled so far: main and the functions beside it, with globals, locals and
 ; parameters of `int`, `char`, `short` and their unsigned narrower kinds,
-; each at its kind's size, assignment, ++ and --, `if`/`else`, `while`, `do`,
-; `for`, `break`, `continue`, `return` and calls (recursion included), over
-; integer constants, + - * / %, & | ^ << >>, the six comparisons, &&, ||,
-; the ternary, the comma and unary - ~ !, and `putchar`, `puts` of a literal
-; and `printf` of a literal format with %d %c %s and %%, unless the program
-; defines its own.  Everything else refuses by name: `long` and the unsigned
-; kinds of int's width or more, pointers, aggregates, more than four
-; arguments, and the rest of the runtime.
+; pointers to anything and arrays of any of these, each at its kind's size,
+; assignment, ++ and --, `if`/`else`, `while`, `do`, `for`, `break`,
+; `continue`, `return` and calls (recursion included), over integer
+; constants and string literals, + - * / %, & | ^ << >>, the six
+; comparisons, &&, ||, the ternary, the comma, unary - ~ ! & * and
+; subscripts, and `putchar`, `puts` and `printf` of a literal format with
+; %d %c %s and %%, unless the program defines its own.  Everything else
+; refuses by name: `long` and the unsigned kinds of int's width or more,
+; structs, function pointers, more than four arguments, and the rest of the
+; runtime.
 ;
 ; The convention is this compiler's own, since nothing else links with what
 ; it writes: arguments in x0, x1, x2 and x8, the answer in x0, frames off
@@ -190,6 +192,27 @@
       ((string=? op ">>") (%cc-gen! (lit asrv) x0 x0 x1))
       (#t (%cc-gen-no (string-append "the operator " op))))))
 
+; + and - with an address among the operands, left in x0 and right in x1:
+; the count beside an address moves it by that many elements, and two
+; addresses subtract to the count of elements between them.  An address
+; is 64 bits, so nothing re-extends from bit 31.
+(def %cc-gen-addr-bin!
+  (fn (_ op ka kb)
+    (def size (fn (_ k) (%cc-kind-size (%cc-kind-elem k))))
+    (match
+      ((if (string=? op "-") (if (%cc-gen-addr-kind? ka) (%cc-gen-addr-kind? kb) #f) #f)
+        (do (%cc-gen! (lit sub) x0 x0 x1)
+            (if (= (size ka) 1) ()
+              (do (%cc-gen! (lit mov) x1 (imm (size ka)))
+                  (%cc-gen! (lit sdiv) x0 x0 x1)))))
+      ((if (string=? op "-") (%cc-gen-addr-kind? ka) #f)
+        (do (%cc-gen-scale! x1 (size ka)) (%cc-gen! (lit sub) x0 x0 x1)))
+      ((if (string=? op "+") (%cc-gen-addr-kind? ka) #f)
+        (do (%cc-gen-scale! x1 (size ka)) (%cc-gen! (lit add) x0 x0 x1)))
+      ((string=? op "+")
+        (do (%cc-gen-scale! x0 (size kb)) (%cc-gen! (lit add) x0 x0 x1)))
+      (#t (%cc-gen-no (string-append "the operator " op " on an address"))))))
+
 (def %cc-gen-branch
   (fn (_ op)
     (match
@@ -210,14 +233,29 @@
 ; A store narrows the value to its kind's width, and so does the value an
 ; assignment answers.  long and the unsigned kinds of int's width or more
 ; want arithmetic of their own, so they refuse by name.
+;
+; A pointer is an eight-byte address.  An array is its elements end to
+; end, and where it is used as a value it stands for its first element's
+; address, which is all a subscript or pointer arithmetic needs.
 
 (def %cc-gen-env ())        ; ((name offset . kind) ...)
 (def %cc-gen-frame-bytes 0) ; how much of the frame the named ones take
 (def %cc-gen-ret-kind ())   ; what the function being compiled returns
 
-; KIND, if the compiled code holds it; WHAT names the holder in a refusal
+(def %cc-gen-ptr? (fn (_ k) (if (pair? k) (eq? (first k) (lit ptr)) #f)))
+(def %cc-gen-array? (fn (_ k) (if (pair? k) (eq? (first k) (lit array)) #f)))
+(def %cc-gen-addr-kind? (fn (_ k) (if (%cc-gen-ptr? k) #t (%cc-gen-array? k))))
+
+; an array as the value it stands for: a pointer to its first element
+(def %cc-gen-decay
+  (fn (_ k) (if (%cc-gen-array? k) (list (lit ptr) (%cc-kind-elem k)) k)))
+
+; KIND, if the compiled code holds it; WHAT names the holder in a refusal.
+; A pointer may point at any kind -- what a load through it reads is
+; checked where the load is -- and an array's elements are held as a
+; value would be.
 (def %cc-gen-kind!
-  (fn (_ kind what)
+  (fn (self kind what)
     (match
       ((eq? kind (lit int)) kind)
       ((eq? kind (lit char)) kind)
@@ -227,10 +265,21 @@
       ((eq? kind (lit long)) (%cc-gen-no "the type long"))
       ((eq? kind (lit uint)) (%cc-gen-no "the type unsigned int"))
       ((eq? kind (lit ulong)) (%cc-gen-no "the type unsigned long"))
-      (#t (%cc-gen-no (string-append what " that is not an integer"))))))
+      ((%cc-gen-ptr? kind) kind)
+      ((%cc-gen-array? kind) (do (self (%cc-kind-elem kind) "an array's element") kind))
+      ((if (pair? kind) (eq? (first kind) (lit struct)) #f) (%cc-gen-no "a struct"))
+      (#t (%cc-gen-no
+            (string-append what " that is not an integer, a pointer or an array"))))))
 
 (def %cc-gen-byte? (fn (_ kind) (if (eq? kind (lit char)) #t (eq? kind (lit uchar)))))
 (def %cc-gen-half? (fn (_ kind) (if (eq? kind (lit short)) #t (eq? kind (lit ushort)))))
+
+; what is left when a value of KIND is loaded or stored: the kinds a
+; register holds, and a refusal naming any other
+(def %cc-gen-value-kind!
+  (fn (_ kind)
+    (do (%cc-gen-kind! kind "a value")
+        (if (%cc-gen-array? kind) (%cc-gen-no "an array as a value") kind))))
 
 ; the load that brings a value of KIND into a register, extended by its sign
 (def %cc-gen-load-op
@@ -240,14 +289,16 @@
       ((eq? kind (lit uchar)) (lit ldrb))
       ((eq? kind (lit short)) (lit ldrsh))
       ((eq? kind (lit ushort)) (lit ldrh))
-      (#t (lit ldrsw)))))
+      ((%cc-gen-ptr? kind) (lit ldr))
+      (#t (do (%cc-gen-value-kind! kind) (lit ldrsw))))))
 
 (def %cc-gen-store-op
   (fn (_ kind)
     (match
       ((%cc-gen-byte? kind) (lit strb))
       ((%cc-gen-half? kind) (lit strh))
-      (#t (lit strw)))))
+      ((%cc-gen-ptr? kind) (lit str))
+      (#t (do (%cc-gen-value-kind! kind) (lit strw))))))
 
 ; x0 as a value of KIND: shifted to the top of the register and back down,
 ; arithmetically for a signed kind
@@ -259,6 +310,15 @@
         (%cc-gen! (if (%cc-signed? kind) (lit asrv) (lit lsrv)) x0 x0 x2))))
 (def %cc-gen-loops ())      ; ((break-label . continue-label) ...), innermost first
 (def %cc-gen-funs ())       ; ((name . label) ...), every function in the program
+(def %cc-gen-rets ())       ; ((name . kind) ...), what each one returns
+
+(def %cc-gen-ret-find
+  (fn (_ name)
+    (def go (fn (self es)
+              (if (null? es) ()
+                (if (string=? (first (first es)) name) (rest (first es))
+                  (self (rest es))))))
+    (go %cc-gen-rets)))
 (def %cc-gen-epilogue ())   ; where `return` goes in the function being compiled
 (def %cc-gen-scratch 0)     ; the slot past the named ones, which the runtime writes from
 
@@ -315,26 +375,65 @@
                   (self (rest es))))))
     (go %cc-gen-globals)))
 
-; a global takes room of its kind, and its initializer's value goes in it --
-; the low bytes of the value, which is what narrowing it to the kind keeps
+; A global takes room of its kind, with its initializer's bytes in it.
+; The initializer is a constant, as C asks, so the bytes are worked out
+; here.  A pointer's is the null pointer or a number: an address in the
+; data would move with the executable, which the kernel loads at a place
+; of its choosing, and nothing here relocates it.
 (def %cc-gen-global!
   (fn (_ node)
     (def name (first (rest node)))
-    (def kind (first (rest (rest node))))
-    (if (pair? kind)
-      (%cc-gen-no (string-append "a global that is not an integer: " name)))
-    (%cc-gen-kind! kind "a global")
+    (def kind (%cc-gen-kind! (first (rest (rest node))) "a global"))
     (if (not (null? (%cc-gen-global-find name)))
       (%cc-gen-no (string-append "a second declaration of " name)))
     (def init (first (rest (rest (rest node)))))
-    (def v (if (null? init) 0 (%cc-gen-fold init)))
-    (def size (%cc-kind-size kind))
-    (def off
-      (%cc-gen-data!
-        (%cc-gen-take size
-          (append (%cc-gen-le32 v) (%cc-gen-le32 (if (< v 0) 0xFFFFFFFF 0))))
-        size))
+    (def off (%cc-gen-data! (%cc-gen-const-bytes kind init) (%cc-kind-align kind)))
     (set! %cc-gen-globals (pair (pair name (pair off kind)) %cc-gen-globals))))
+
+; the little-endian bytes of V at KIND's width
+(def %cc-gen-value-bytes
+  (fn (_ kind v)
+    (%cc-gen-take (%cc-kind-size kind)
+      (append (%cc-gen-le32 v) (%cc-gen-le32 (if (< v 0) 0xFFFFFFFF 0))))))
+
+; the bytes a constant initializer INIT lays down for KIND
+(def %cc-gen-const-bytes
+  (fn (self kind init)
+    (def zeros
+      (fn (zeros n acc) (if (<= n 0) acc (zeros (- n 1) (pair 0 acc)))))
+    (match
+      ((null? init) (zeros (%cc-kind-size kind) ()))
+      ((%cc-gen-array? kind)
+        (let ((n (first (rest kind))) (ek (%cc-kind-elem kind)))
+          (match
+            ((eq? (first init) (lit initlist))
+              (let ((items (first (rest init))))
+                (if (> (length items) n)
+                  (%cc-gen-no "more initializers than an array has elements"))
+                (def go
+                  (fn (go i is)
+                    (if (>= i n) ()
+                      (append (self ek (if (null? is) () (first is)))
+                        (go (+ i 1) (if (null? is) () (rest is)))))))
+                (go 0 items)))
+            ((if (eq? (first init) (lit str)) (%cc-gen-byte? ek) #f)
+              (let ((text (first (rest init))))
+                (if (> (byte-len text) n)
+                  (%cc-gen-no "a string longer than the array it initializes"))
+                (def go
+                  (fn (go i)
+                    (if (>= i n) ()
+                      (pair (if (< i (byte-len text)) (byte-at text i) 0) (go (+ i 1))))))
+                (go 0)))
+            (#t (%cc-gen-no "an array initialized by something other than a list or a string")))))
+      ((if (%cc-gen-ptr? kind)
+         (if (eq? (first init) (lit str)) #t
+           (if (eq? (first init) (lit un)) (string=? (first (rest init)) "&") #f))
+         #f)
+        (%cc-gen-no "a global pointer initialized with an address"))
+      ((eq? (first init) (lit initlist))
+        (%cc-gen-no "a braced initializer for something that is not an array"))
+      (#t (%cc-gen-value-bytes kind (%cc-gen-fold init))))))
 
 ; What a global starts out holding.  C asks for a constant here, so the
 ; value is worked out now and the program starts with it in place.
@@ -388,10 +487,35 @@
 
 ; a literal's address: where the strings start, plus its offset
 (def %cc-gen-string-at!
-  (fn (_ text)
-    (let ((off (%cc-gen-string! text)))
-      (do (%cc-gen! (lit mov) x0 x22)
-          (if (= off 0) () (%cc-gen! (lit add) x0 x0 (imm off)))))))
+  (fn (_ text) (%cc-gen-address! x22 (%cc-gen-string! text))))
+
+; x0 = BASE + OFF.  arm64's add takes twelve bits of immediate and its
+; encoder masks a wider one, so a farther offset goes through x2.
+(def %cc-gen-address!
+  (fn (_ base off)
+    (do (%cc-gen! (lit mov) x0 base)
+        (match
+          ((= off 0) ())
+          ((<= off 4095) (%cc-gen! (lit add) x0 x0 (imm off)))
+          (#t (do (asm-load-imm64! %cc-gen-asm x2 off)
+                  (%cc-gen! (lit add) x0 x0 x2)))))))
+
+; REG = REG * N, for an element's size
+(def %cc-gen-scale!
+  (fn (_ reg n)
+    (if (= n 1) ()
+      (do (if (< n 65536)
+            (%cc-gen! (lit mov) x2 (imm n))
+            (asm-load-imm64! %cc-gen-asm x2 n))
+          (%cc-gen! (lit mul) reg reg x2)))))
+
+; x0 = x0 + or - N, for a step
+(def %cc-gen-bump!
+  (fn (_ up n)
+    (if (<= n 4095)
+      (%cc-gen! (if up (lit add) (lit sub)) x0 x0 (imm n))
+      (do (asm-load-imm64! %cc-gen-asm x2 n)
+          (%cc-gen! (if up (lit add) (lit sub)) x0 x0 x2)))))
 
 ; the registers a call hands its arguments in, in order
 (def %cc-gen-args (list x0 x1 x2 x8))
@@ -413,41 +537,146 @@
                   (self (rest es))))))
     (go %cc-gen-env)))
 
-; a slot of KIND's size, at a multiple of it; answers its offset
+; a slot of KIND's size and alignment; answers its offset
 (def %cc-gen-slot!
   (fn (_ name kind)
     (if (not (null? (%cc-gen-find name)))
       (%cc-gen-no (string-append "a second declaration of " name)))
-    (def size (%cc-kind-size kind))
-    (def off (%cc-round-up %cc-gen-frame-bytes size))
-    (set! %cc-gen-frame-bytes (+ off size))
+    (def off (%cc-round-up %cc-gen-frame-bytes (%cc-kind-align kind)))
+    (set! %cc-gen-frame-bytes (+ off (%cc-kind-size kind)))
     (set! %cc-gen-env (pair (pair name (pair off kind)) %cc-gen-env))
     off))
 
-; Where a name lives, as (OPERAND . KIND) -- a frame slot, or a global's
-; room in the data -- or a refusal naming it.  A local of the same name
+; A place is (BASE OFFSET . KIND): a register and a byte offset from it.
+; A name's is a frame slot off x19 or a global's room off x22, and one
+; worked out at run time is the register holding it, at offset 0.
+(def %cc-gen-place (fn (_ base off kind) (pair base (pair off kind))))
+(def %cc-gen-place-mem (fn (_ p) (mem (first p) (first (rest p)))))
+(def %cc-gen-place-kind (fn (_ p) (rest (rest p))))
+
+; Where a name lives, or a refusal naming it.  A local of the same name
 ; wins, as C says.
 (def %cc-gen-place-of
   (fn (_ name)
     (let ((l (%cc-gen-find name)))
-      (if (not (null? l)) (pair (mem x19 (first l)) (rest l))
+      (if (not (null? l)) (%cc-gen-place x19 (first l) (rest l))
         (let ((g (%cc-gen-global-find name)))
-          (if (null? g)
-            (%cc-gen-no (string-append "the name " name))
-            (pair (mem x22 (first g)) (rest g))))))))
+          (match
+            ((null? g) (%cc-gen-no (string-append "the name " name)))
+            ; a load takes twelve bits of offset, in units of its width,
+            ; and arm64's encoder masks a wider one
+            ((if (%cc-gen-array? (rest g)) #f (> (first g) (* 4095 (%cc-kind-size (rest g)))))
+              (%cc-gen-no "more globals than a load reaches"))
+            (#t (%cc-gen-place x22 (first g) (rest g)))))))))
 
 (def %cc-gen-load!
-  (fn (_ place) (%cc-gen! (%cc-gen-load-op (rest place)) x0 (first place))))
+  (fn (_ place)
+    (%cc-gen! (%cc-gen-load-op (%cc-gen-place-kind place)) x0 (%cc-gen-place-mem place))))
 
 (def %cc-gen-put!
-  (fn (_ place) (%cc-gen! (%cc-gen-store-op (rest place)) x0 (first place))))
+  (fn (_ place)
+    (%cc-gen! (%cc-gen-store-op (%cc-gen-place-kind place)) x0 (%cc-gen-place-mem place))))
 
 ; an assignment's store: the value it answers is narrowed as the stored
-; one was, which an int already is
+; one was, which an int or a pointer already is
 (def %cc-gen-store!
   (fn (_ place)
+    (def k (%cc-gen-place-kind place))
     (do (%cc-gen-put! place)
-        (if (eq? (rest place) (lit int)) () (%cc-gen-narrow! (rest place))))))
+        (if (if (%cc-gen-byte? k) #t (%cc-gen-half? k)) (%cc-gen-narrow! k) ()))))
+
+; A value of KIND whose address is in x0, into x0: loaded, unless it is an
+; array, whose value is that address.
+(def %cc-gen-load-at!
+  (fn (_ kind)
+    (if (%cc-gen-array? kind) ()
+      (%cc-gen! (%cc-gen-load-op kind) x0 (mem x0 0)))))
+
+; The kind of what NODE computes, worked out without computing it: what a
+; pointer's arithmetic scales by and what a load through it reads.
+(def %cc-gen-kind-of ())
+(set! %cc-gen-kind-of
+  (fn (self node)
+    (let ((t (first node)))
+      (match
+        ((eq? t (lit var)) (%cc-gen-place-kind (%cc-gen-place-of (first (rest node)))))
+        ((eq? t (lit str))
+          (list (lit array) (+ (byte-len (first (rest node))) 1) (lit char)))
+        ((eq? t (lit idx))
+          (let ((ka (self (first (rest node)))))
+            (%cc-kind-elem (if (%cc-gen-addr-kind? ka) ka (self (first (rest (rest node))))))))
+        ((eq? t (lit un))
+          (let ((op (first (rest node))))
+            (match
+              ((string=? op "*") (%cc-kind-elem (self (first (rest (rest node))))))
+              ((string=? op "&") (list (lit ptr) (self (first (rest (rest node))))))
+              (#t (lit int)))))
+        ((eq? t (lit bin))
+          (%cc-gen-bin-kind (first (rest node))
+            (self (first (rest (rest node)))) (self (first (rest (rest (rest node)))))))
+        ((eq? t (lit assign)) (self (first (rest node))))
+        ((%cc-gen-step? t) (self (first (rest node))))
+        ((eq? t (lit ternary))
+          (let ((ka (self (first (rest (rest node))))))
+            (if (%cc-gen-addr-kind? ka) (%cc-gen-decay ka)
+              (let ((kb (self (first (rest (rest (rest node)))))))
+                (if (%cc-gen-addr-kind? kb) (%cc-gen-decay kb) (lit int))))))
+        ((eq? t (lit comma)) (self (first (rest (rest node)))))
+        ((eq? t (lit call))
+          (let ((r (%cc-gen-ret-find (first (rest node))))) (if (null? r) (lit int) r)))
+        (#t (lit int))))))
+
+; the kind + or - answers: an address stays one, two of them make a count
+(def %cc-gen-bin-kind
+  (fn (_ op ka kb)
+    (match
+      ((string=? op "+")
+        (match ((%cc-gen-addr-kind? ka) (%cc-gen-decay ka))
+               ((%cc-gen-addr-kind? kb) (%cc-gen-decay kb))
+               (#t (lit int))))
+      ((string=? op "-")
+        (if (if (%cc-gen-addr-kind? ka) (not (%cc-gen-addr-kind? kb)) #f)
+          (%cc-gen-decay ka)
+          (lit int)))
+      (#t (lit int)))))
+
+; The address of what NODE names, into x0, answering the kind there: a
+; name's own place, the pointee of a `*`, or an element.
+(def %cc-gen-addr! ())
+(set! %cc-gen-addr!
+  (fn (self node)
+    (let ((t (first node)))
+      (match
+        ((eq? t (lit var))
+          (let ((at (%cc-gen-place-of (first (rest node)))))
+            (do (%cc-gen-address! (first at) (first (rest at)))
+                (%cc-gen-place-kind at))))
+        ((if (eq? t (lit un)) (string=? (first (rest node)) "*") #f)
+          (let ((k (%cc-gen-kind-of (first (rest (rest node))))))
+            (if (not (%cc-gen-addr-kind? k))
+              (%cc-gen-no "the indirection of something that is not a pointer"))
+            (do (%cc-gen-expr! (first (rest (rest node))))
+                (%cc-kind-elem k))))
+        ((eq? t (lit idx)) (%cc-gen-index! (first (rest node)) (first (rest (rest node)))))
+        (#t (%cc-gen-no "the address of something that is not a name, a pointee or an element"))))))
+
+; The address of A[I]: the address A stands for, plus I elements.  C lets
+; either operand be the address, so I[A] is the same element.
+(def %cc-gen-index!
+  (fn (_ a i)
+    (def swap (not (%cc-gen-addr-kind? (%cc-gen-kind-of a))))
+    (def at (if swap i a))
+    (def k (%cc-gen-kind-of at))
+    (if (not (%cc-gen-addr-kind? k))
+      (%cc-gen-no "a subscript of something that is not a pointer or an array"))
+    (do (%cc-gen-expr! at)
+        (asm-push! %cc-gen-asm x0)
+        (%cc-gen-expr! (if swap a i))
+        (%cc-gen-scale! x0 (%cc-kind-size (%cc-kind-elem k)))
+        (%cc-gen! (lit mov) x1 x0)
+        (asm-pop! %cc-gen-asm x0)
+        (%cc-gen! (lit add) x0 x0 x1)
+        (%cc-kind-elem k))))
 
 (def %cc-gen-expr! ())
 (set! %cc-gen-expr!
@@ -455,6 +684,15 @@
     (let ((t (first node)))
       (match
         ((eq? t (lit num)) (%cc-gen-const! (first (rest node))))
+        ((eq? t (lit str)) (%cc-gen-string-at! (first (rest node))))
+        ((eq? t (lit szof))
+          (%cc-gen-const! (%cc-kind-size (%cc-gen-kind-of (first (rest node))))))
+        ((if (eq? t (lit un)) (string=? (first (rest node)) "&") #f)
+          (%cc-gen-addr! (first (rest (rest node)))))
+        ((if (eq? t (lit un)) (string=? (first (rest node)) "*") #f)
+          (%cc-gen-load-at! (%cc-gen-addr! node)))
+        ((eq? t (lit idx))
+          (%cc-gen-load-at! (%cc-gen-index! (first (rest node)) (first (rest (rest node))))))
         ((eq? t (lit un))
           (let ((op (first (rest node))))
             (do (self (first (rest (rest node))))
@@ -468,22 +706,39 @@
                   (#t (%cc-gen-no (string-append "the unary operator " op)))))))
         ((if (eq? t (lit bin)) #t (eq? t (lit cmp)))
           (let ((op (first (rest node))))
+            (def ka (if (eq? t (lit bin)) (%cc-gen-kind-of (first (rest (rest node)))) (lit int)))
+            (def kb (if (eq? t (lit bin)) (%cc-gen-kind-of (first (rest (rest (rest node))))) (lit int)))
             (do (self (first (rest (rest node))))
                 (asm-push! %cc-gen-asm x0)
                 (self (first (rest (rest (rest node)))))
                 (%cc-gen! (lit mov) x1 x0)
                 (asm-pop! %cc-gen-asm x0)
-                (if (eq? t (lit bin))
-                  (%cc-gen-bin! op)
-                  (do (%cc-gen! (lit cmp) x0 x1)
-                      (%cc-gen-flag! (%cc-gen-branch op)))))))
-        ((eq? t (lit var)) (%cc-gen-load! (%cc-gen-place-of (first (rest node)))))
+                (match
+                  ((eq? t (lit cmp))
+                    (do (%cc-gen! (lit cmp) x0 x1)
+                        (%cc-gen-flag! (%cc-gen-branch op))))
+                  ((if (%cc-gen-addr-kind? ka) #t (%cc-gen-addr-kind? kb))
+                    (%cc-gen-addr-bin! op ka kb))
+                  (#t (%cc-gen-bin! op))))))
+        ((eq? t (lit var))
+          (let ((at (%cc-gen-place-of (first (rest node)))))
+            (if (%cc-gen-array? (%cc-gen-place-kind at))
+              (%cc-gen-address! (first at) (first (rest at)))
+              (%cc-gen-load! at))))
         ((eq? t (lit assign))
           (let ((lv (first (rest node))))
-            (if (not (eq? (first lv) (lit var)))
-              (%cc-gen-no "an assignment to something other than a name"))
-            (do (self (first (rest (rest node))))
-                (%cc-gen-store! (%cc-gen-place-of (first (rest lv)))))))
+            (if (%cc-gen-array? (%cc-gen-kind-of lv))
+              (%cc-gen-no "an assignment to an array"))
+            (if (eq? (first lv) (lit var))
+              (do (self (first (rest (rest node))))
+                  (%cc-gen-store! (%cc-gen-place-of (first (rest lv)))))
+              ; any other place is an address worked out at run time: it
+              ; waits on the stack while the value is
+              (let ((k (%cc-gen-value-kind! (%cc-gen-addr! lv))))
+                (do (asm-push! %cc-gen-asm x0)
+                    (self (first (rest (rest node))))
+                    (asm-pop! %cc-gen-asm x1)
+                    (%cc-gen-store! (%cc-gen-place x1 0 k)))))))
         ((%cc-gen-step? t) (%cc-gen-step! t node))
         ((eq? t (lit ternary))
           (let ((else- (%cc-gen-label)) (done (%cc-gen-label)))
@@ -529,18 +784,24 @@
 (def %cc-gen-step!
   (fn (_ t node)
     (def lv (first (rest node)))
-    (if (not (eq? (first lv) (lit var)))
-      (%cc-gen-no "a step of something other than a name"))
-    (def at (%cc-gen-place-of (first (rest lv))))
     (def up (if (eq? t (lit preinc)) #t (eq? t (lit postinc))))
     (def after (if (eq? t (lit preinc)) #t (eq? t (lit predec))))
+    ; a name is a place of its own; any other place is an address worked
+    ; out at run time, held in x1 while the value is stepped
+    (def at
+      (if (eq? (first lv) (lit var))
+        (%cc-gen-place-of (first (rest lv)))
+        (let ((k (%cc-gen-addr! lv)))
+          (do (%cc-gen! (lit mov) x1 x0)
+              (%cc-gen-place x1 0 k)))))
+    (def k (%cc-gen-value-kind! (%cc-gen-place-kind at)))
     (do (%cc-gen-load! at)
         ; the old value waits in x8 for the postfix forms: x2 is the
         ; re-extension's shift amount
         (%cc-gen! (lit mov) x8 x0)
-        (%cc-gen! (lit mov) x1 (imm 1))
-        (%cc-gen! (if up (lit add) (lit sub)) x0 x0 x1)
-        (%cc-gen-int!)
+        (if (%cc-gen-ptr? k)
+          (%cc-gen-bump! up (%cc-kind-size (%cc-kind-elem k)))
+          (do (%cc-gen-bump! up 1) (%cc-gen-int!)))
         (%cc-gen-store! at)
         (if after () (%cc-gen! (lit mov) x0 x8)))))
 
@@ -557,24 +818,51 @@
         (#t (%cc-gen-call-fun! name args)))
       (%cc-gen-call-fun! name args))))
 
-; puts, for a literal: the text and the newline it adds, in one write.
-; Both are known here, so the newline goes into the string area on the end
-; of the text and nothing walks the string at run time.  It answers zero,
-; which is one of the answers C allows: any number that is not negative.
+; puts: the string and the newline it adds.  A literal's text is known
+; here, so the newline goes into the data on the end of it and one write
+; does both; any other string is walked to its NUL at run time.  It
+; answers zero, which is one of the answers C allows: any number that is
+; not negative.
 (def %cc-gen-puts!
   (fn (_ args)
     (if (not (= (length args) 1))
       (%cc-gen-no "puts with other than one argument"))
     (def arg (first args))
-    (if (not (eq? (first arg) (lit str)))
-      (%cc-gen-no "puts of something other than a literal"))
-    (def text (string-append (first (rest arg)) "\n"))
-    (do (%cc-gen-string-at! text)
-        (%cc-gen! (lit mov) x1 x0)
+    (if (eq? (first arg) (lit str))
+      (let ((text (string-append (first (rest arg)) "\n")))
+        (do (%cc-gen-string-at! text)
+            (%cc-gen! (lit mov) x1 x0)
+            (%cc-gen! (lit mov) x0 (imm 1))
+            (%cc-gen! (lit mov) x2 (imm (byte-len text)))
+            (%cc-gen! (lit blr) x21)
+            (%cc-gen-const! 0)))
+      (do (if (not (%cc-gen-addr-kind? (%cc-gen-kind-of arg)))
+            (%cc-gen-no "puts of something that is not a string"))
+          (%cc-gen-expr! arg)
+          (%cc-gen-put-cstr!)
+          (%cc-gen! (lit mov) x0 (imm 10))
+          (%cc-gen-put-byte!)
+          (%cc-gen-const! 0)))))
+
+; the string whose address is in x0, to standard output: a cursor walks
+; to its NUL, and the bytes before it go in one write, whose count comes
+; back in x0
+(def %cc-gen-put-cstr!
+  (fn (_)
+    (def top (%cc-gen-label))
+    (def done (%cc-gen-label))
+    (do (%cc-gen! (lit mov) x1 x0)
+        (%cc-gen! (lit mov) x2 x0)
+        (asm-label! %cc-gen-asm top)
+        (%cc-gen! (lit ldrb) x0 (mem x2 0))
+        (%cc-gen! (lit cmp) x0 (imm 0))
+        (%cc-gen! (lit b/eq) (label done))
+        (%cc-gen! (lit add) x2 x2 (imm 1))
+        (%cc-gen! (lit b) (label top))
+        (asm-label! %cc-gen-asm done)
+        (%cc-gen! (lit sub) x2 x2 x1)
         (%cc-gen! (lit mov) x0 (imm 1))
-        (%cc-gen! (lit mov) x2 (imm (byte-len text)))
-        (%cc-gen! (lit blr) x21)
-        (%cc-gen-const! 0))))
+        (%cc-gen! (lit blr) x21))))
 
 (def %cc-gen-call-fun!
   (fn (_ name args)
@@ -645,7 +933,8 @@
 ; count of bytes written, as C's does.
 
 ; (PIECES . ARGS) for FORMAT and the arguments after it: each piece is
-; (text . STRING), or (d . N) or (c . N) for the Nth argument left to run time
+; (text . STRING), or (d . N), (c . N) or (s . N) for the Nth argument left
+; to run time
 (def %cc-gen-printf-plan
   (fn (_ fmt args)
     (def n (byte-len fmt))
@@ -673,14 +962,16 @@
                   (%cc-gen-no
                     (string-append "printf's %" (substring fmt (+ i 1) (+ i 2)))))
                 ((null? args) (%cc-gen-no "printf with fewer arguments than conversions"))
-                ((= c 115)
-                  (if (not (eq? (first (first args)) (lit str)))
-                    (%cc-gen-no "printf's %s of something other than a literal")
-                    (self (+ i 2) (+ i 2) (pair (first (rest (first args))) text)
-                      (rest args) pieces later)))
+                ; a literal's text joins the text around it
+                ((if (= c 115) (eq? (first (first args)) (lit str)) #f)
+                  (self (+ i 2) (+ i 2) (pair (first (rest (first args))) text)
+                    (rest args) pieces later))
+                ((if (= c 115) (not (%cc-gen-addr-kind? (%cc-gen-kind-of (first args)))) #f)
+                  (%cc-gen-no "printf's %s of something that is not a string"))
                 (#t
                   (self (+ i 2) (+ i 2) () (rest args)
-                    (pair (pair (if (= c 100) (lit d) (lit c)) (length later))
+                    (pair (pair (match ((= c 100) (lit d)) ((= c 99) (lit c)) (#t (lit s)))
+                                (length later))
                       (flush text pieces))
                     (pair (first args) later)))))))))
     (go 0 0 () args () ())))
@@ -794,6 +1085,10 @@
                     (do (%cc-gen! (lit ldr) x0 (mem x19 (arg-at (rest p))))
                         (%cc-gen-put-byte!)
                         (%cc-gen-printf-count!)))
+                  ((eq? (first p) (lit s))
+                    (do (%cc-gen! (lit ldr) x0 (mem x19 (arg-at (rest p))))
+                        (%cc-gen-put-cstr!)
+                        (%cc-gen-printf-count!)))
                   (#t (%cc-gen-printf-int! (arg-at (rest p)))))
                 (self (rest pieces)))))))
     (do (push-all later)
@@ -806,6 +1101,62 @@
         (%cc-gen! (lit ldr) x0 (mem x19 (+ %cc-gen-pf %cc-gen-pf-count))))))
 
 ; --- statements --------------------------------------------------------------
+
+; An array in the frame, from its initializer: a braced list stores its
+; items in order, a nested list filling a nested array, and the elements
+; it does not reach are zero, as C says; a string fills a char array with
+; its bytes, then zeros.
+(def %cc-gen-init-array!
+  (fn (self at init)
+    (def base (first at))
+    (def off (first (rest at)))
+    (def k (%cc-gen-place-kind at))
+    (def n (first (rest k)))
+    (def ek (%cc-kind-elem k))
+    (def es (%cc-kind-size ek))
+    (def elem (fn (_ i) (%cc-gen-place base (+ off (* i es)) ek)))
+    (match
+      ((eq? (first init) (lit initlist))
+        (let ((items (first (rest init))))
+          (if (> (length items) n) (%cc-gen-no "more initializers than an array has elements"))
+          (def fill
+            (fn (fill i is)
+              (if (>= i n) ()
+                (do (if (null? is)
+                      (%cc-gen-zero! (elem i))
+                      (let ((item (first is)))
+                        (if (%cc-gen-array? ek)
+                          (if (if (eq? (first item) (lit initlist)) #t (eq? (first item) (lit str)))
+                            (self (elem i) item)
+                            (%cc-gen-no "an array's element initialized by something other than a list"))
+                          (do (%cc-gen-expr! item) (%cc-gen-put! (elem i))))))
+                    (fill (+ i 1) (if (null? is) () (rest is)))))))
+          (fill 0 items)))
+      ((if (eq? (first init) (lit str)) (%cc-gen-byte? ek) #f)
+        (let ((text (first (rest init))))
+          (if (> (byte-len text) n) (%cc-gen-no "a string longer than the array it initializes"))
+          (def fill
+            (fn (fill i)
+              (if (>= i n) ()
+                (do (%cc-gen-const! (if (< i (byte-len text)) (byte-at text i) 0))
+                    (%cc-gen-put! (elem i))
+                    (fill (+ i 1))))))
+          (fill 0)))
+      (#t (%cc-gen-no "an array initialized by something other than a list or a string")))))
+
+; zeros over the place AT, element by element when it is an array
+(def %cc-gen-zero!
+  (fn (self at)
+    (def k (%cc-gen-place-kind at))
+    (if (%cc-gen-array? k)
+      (let ((ek (%cc-kind-elem k)) (base (first at)) (off (first (rest at))))
+        (def go
+          (fn (go i)
+            (if (>= i (first (rest k))) ()
+              (do (self (%cc-gen-place base (+ off (* i (%cc-kind-size ek))) ek))
+                  (go (+ i 1))))))
+        (go 0))
+      (do (%cc-gen! (lit mov) x0 (imm 0)) (%cc-gen-put! at)))))
 
 ; a condition, then a branch taken when it is false
 (def %cc-gen-test!
@@ -837,8 +1188,10 @@
           ; local of the name wins over a global of it
           (let ((at (%cc-gen-place-of (first (rest node)))))
             (def init (first (rest (rest (rest node)))))
-            (do (if (null? init) (%cc-gen-const! 0) (%cc-gen-expr! init))
-                (%cc-gen-put! at))))
+            (if (%cc-gen-array? (%cc-gen-place-kind at))
+              (if (null? init) () (%cc-gen-init-array! at init))
+              (do (if (null? init) (%cc-gen-const! 0) (%cc-gen-expr! init))
+                  (%cc-gen-put! at)))))
         ((eq? t (lit expr)) (%cc-gen-expr! (first (rest node))))
         ((eq? t (lit if))
           (let ((other (%cc-gen-label)) (done (%cc-gen-label)))
@@ -1009,10 +1362,15 @@
     (set! %cc-gen-strings ())
     (set! %cc-gen-databytes 0)
     (set! %cc-gen-data ())
+    ; the ones a load reaches first, then the arrays, which are only ever
+    ; reached through their address
+    (def gdecls (filter (fn (_ it) (eq? (first it) (lit gdecl))) prog))
+    (def array-decl? (fn (_ d) (%cc-gen-array? (first (rest (rest d))))))
     (let ((go (fn (self ds)
                 (if (null? ds) ()
                   (do (%cc-gen-global! (first ds)) (self (rest ds)))))))
-      (go (filter (fn (_ it) (eq? (first it) (lit gdecl))) prog)))
+      (do (go (filter (fn (_ d) (not (array-decl? d))) gdecls))
+          (go (filter array-decl? gdecls))))
     (def a (asm-new 262144))
     (set! %cc-gen-asm a)
     (set! %cc-gen-nlabels 0)
@@ -1021,12 +1379,16 @@
     ; every function gets its label before any code, so a call can name one
     ; that has not been compiled yet
     (set! %cc-gen-funs ())
+    (set! %cc-gen-rets ())
     (let ((go (fn (self fs)
                 (if (null? fs) ()
-                  (do (set! %cc-gen-funs
-                        (pair (pair (first (rest (first fs))) (%cc-gen-label))
-                          %cc-gen-funs))
-                      (self (rest fs)))))))
+                  (let ((f (first fs)))
+                    (do (set! %cc-gen-funs
+                          (pair (pair (first (rest f)) (%cc-gen-label)) %cc-gen-funs))
+                        (set! %cc-gen-rets
+                          (pair (pair (first (rest f)) (first (rest (rest (rest (rest (rest f)))))))
+                            %cc-gen-rets))
+                        (self (rest fs))))))))
       (go funs))
     ; a refusal can raise partway through; the buffer is released first
     (guard (err (do (asm-free! a)
