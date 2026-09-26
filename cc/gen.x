@@ -28,10 +28,10 @@
 ; & | ^ << >>, the six comparisons, &&, ||, the ternary, the comma,
 ; unary - ~ ! & *, casts, subscripts, `.` and `->`, each in the kind C's
 ; usual conversions give it, `putchar`, `puts`, `printf` of a literal
-; format with %d %i %u %ld %li %lu %c %s and %%, and `exit`, unless the
-; program defines its own.  Everything else refuses by name: floating point, a
-; struct passed or returned by value, function pointers, more than four
-; arguments, and the rest of the runtime.
+; format with %d %i %u %ld %li %lu %c %s and %%, `exit`, `malloc` and
+; `free`, unless the program defines its own.  Everything else refuses by
+; name: floating point, a struct passed or returned by value, function
+; pointers, more than four arguments, and the rest of the runtime.
 ;
 ; The convention is this compiler's own, since nothing else links with what
 ; it writes: arguments in x0, x1, x2 and x8, the answer in x0, frames off
@@ -775,6 +775,10 @@
 
 (def %cc-gen-exit-at 0)     ; the entry's exit, this far before x21's helper
 
+(def %cc-gen-heap ())       ; the runtime malloc's label, once a call needs it
+(def %cc-gen-heap-bytes 0)  ; the heap the executable maps past the data
+(def %cc-gen-heap-size 67108864)   ; sixty-four megabytes of address space
+
 (def %cc-gen-find
   (fn (_ name)
     (def go (fn (self es)
@@ -1136,8 +1140,70 @@
         ((string=? name "puts") (%cc-gen-puts! args))
         ((string=? name "printf") (%cc-gen-printf! args))
         ((string=? name "exit") (%cc-gen-exit! args))
+        ((string=? name "malloc") (%cc-gen-malloc! args))
+        ((string=? name "free") (%cc-gen-free! args))
         (#t (%cc-gen-call-fun! name args)))
       (%cc-gen-call-fun! name args))))
+
+; malloc: a call to the runtime's, which is written after the program
+(def %cc-gen-malloc!
+  (fn (_ args)
+    (if (not (= (length args) 1))
+      (%cc-gen-no "malloc with other than one argument"))
+    (if (null? %cc-gen-heap) (set! %cc-gen-heap (%cc-gen-label)))
+    (do (%cc-gen-expr! (first args))
+        (%cc-gen! %cc-gen-callop (label %cc-gen-heap)))))
+
+; free: the heap is only ever taken from, so nothing goes back; the
+; argument is still worked out, for whatever else it does
+(def %cc-gen-free!
+  (fn (_ args)
+    (if (not (= (length args) 1))
+      (%cc-gen-no "free with other than one argument"))
+    (%cc-gen-expr! (first args))))
+
+; The runtime's malloc, written after the program, when the data's size is
+; final.  The heap follows the data at its next sixteen-byte boundary, and
+; the kernel maps it zero-filled; eight bytes at the data's end count what
+; is taken.  A block is the size asked for, rounded up to sixteen; a size
+; past the heap's, a negative one (a size_t past 2^63), and one the heap has
+; no room left for answer the null pointer.  x86-64 spells a three-operand
+; op as a move and a two-operand one, so no destination here is also its
+; second source.
+(def %cc-gen-heap-fn!
+  (fn (_)
+    (def taken (%cc-gen-data! (list 0 0 0 0 0 0 0 0) 8))
+    (def base (round-up %cc-gen-databytes 16))
+    (def full (%cc-gen-label))
+    (set! %cc-gen-heap-bytes %cc-gen-heap-size)
+    (asm-label! %cc-gen-asm %cc-gen-heap)
+    (%cc-gen! (lit cmp) x0 (imm 0))
+    (%cc-gen! (lit b/lt) (label full))
+    (asm-load-imm64! %cc-gen-asm x2 %cc-gen-heap-size)
+    (%cc-gen! (lit cmp) x0 x2)
+    (%cc-gen! (lit b/gt) (label full))
+    ; x0 = the size rounded up to sixteen
+    (%cc-gen! (lit add) x0 x0 (imm 15))
+    (%cc-gen! (lit mov) x2 (imm 4))
+    (%cc-gen! (lit lsrv) x0 x0 x2)
+    (%cc-gen! (lit lslv) x0 x0 x2)
+    ; x8 = where the count is, x1 = the count, x0 = the count with this block
+    (asm-load-imm64! %cc-gen-asm x8 taken)
+    (%cc-gen! (lit add) x8 x8 x22)
+    (%cc-gen! (lit ldr) x1 (mem x8 0))
+    (%cc-gen! (lit add) x0 x0 x1)
+    (asm-load-imm64! %cc-gen-asm x2 %cc-gen-heap-size)
+    (%cc-gen! (lit cmp) x0 x2)
+    (%cc-gen! (lit b/gt) (label full))
+    (%cc-gen! (lit str) x0 (mem x8 0))
+    ; the block: the heap's start, past what was taken before
+    (asm-load-imm64! %cc-gen-asm x0 base)
+    (%cc-gen! (lit add) x0 x0 x22)
+    (%cc-gen! (lit add) x0 x0 x1)
+    (%cc-gen! (lit ret))
+    (asm-label! %cc-gen-asm full)
+    (%cc-gen! (lit mov) x0 (imm 0))
+    (%cc-gen! (lit ret))))
 
 ; exit: the status into x0, then the entry's own exit, the one main's
 ; return reaches
@@ -1903,6 +1969,8 @@
     (set! %cc-gen-link (if (eq? target (lit macho-arm64)) %cc-gen-lr ()))
     (set! %cc-gen-callop (if (eq? target (lit macho-arm64)) (lit bl) (lit call)))
     (set! %cc-gen-exit-at (%cc-gen-exit-back target))
+    (set! %cc-gen-heap ())
+    (set! %cc-gen-heap-bytes 0)
     ; every function gets its label before any code, so a call can name one
     ; that has not been compiled yet
     (set! %cc-gen-funs ())
@@ -1917,12 +1985,16 @@
                             %cc-gen-rets))
                         (self (rest fs))))))))
       (go funs))
+    ; the runtime's malloc answers an address
+    (if (null? (%cc-gen-fun-find "malloc"))
+      (set! %cc-gen-rets (pair (pair "malloc" (list (lit ptr) (lit void))) %cc-gen-rets)))
     ; a refusal can raise partway through; the buffer is released first
     (guard (err (do (asm-free! a)
                     (set! %cc-gen-asm ())
                     (error err (if (Err err? err) (err msg) "cc: compile failed"))))
       (let ((go (fn (self fs) (if (null? fs) () (do (%cc-gen-fun! (first fs)) (self (rest fs)))))))
-        (go (pair main others))))
+        (do (go (pair main others))
+            (if (null? %cc-gen-heap) () (%cc-gen-heap-fn!)))))
     (def n (asm-pos a))
     (def code (%cc-gen-read (asm-finalize! a) (- n 1) ()))
     (asm-free! a)
@@ -1941,8 +2013,8 @@
     (def target (%cc-gen-target))
     (def image (cc-compile-image src target))
     (if (eq? target (lit macho-arm64))
-      (macho-write! path (first image) (rest image))
-      (elf-write! path (first image) (rest image) elf-machine-x86-64))))
+      (macho-write! path (first image) (rest image) %cc-gen-heap-bytes)
+      (elf-write! path (first image) (rest image) elf-machine-x86-64 %cc-gen-heap-bytes))))
 
 ; compile SRC, run the executable, print what it wrote, answer its status
 (def cc-exe-run

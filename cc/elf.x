@@ -9,7 +9,8 @@
 ; A static 64-bit ELF executable: the file header, two program headers, then
 ; the code and the data.  The first maps the header and the code readable and
 ; executable at a fixed address, the second maps the data readable and
-; writable on the next page.  Linux runs a static executable directly, so
+; writable on the next page, and runs on zero-filled through the heap when
+; the program has one.  Linux runs a static executable directly, so
 ; there is no loader to name, nothing to link and no signature.
 (module cc/elf)
 
@@ -32,10 +33,12 @@
         (- (- m (% m %cc-elf-pagesize)) %cc-elf-codeoff)))))
 
 ; CODE is the code, entry first; DATA the bytes of the data segment; MACHINE
-; the e_machine value.
+; the e_machine value; HEAP how many bytes the data segment runs on past the
+; data, at the data's next sixteen-byte boundary, which the kernel maps
+; zero-filled.
 ; Writes the executable to PATH and answers its size in bytes.
 (def elf-write!
-  (fn (_ path code data machine)
+  (fn (_ path code data machine heap)
     (def codelen (length code))
     (def datalen (length data))
     (def dataoff (+ %cc-elf-codeoff (elf-data-at codelen)))
@@ -73,7 +76,11 @@
     (img-u64! img 136 (+ %cc-elf-base dataoff))      ; p_vaddr
     (img-u64! img 144 (+ %cc-elf-base dataoff))      ; p_paddr
     (img-u64! img 152 datalen)          ; p_filesz
-    (img-u64! img 160 (if (= datalen 0) %cc-elf-pagesize datalen))
+    (img-u64! img 160                   ; p_memsz
+      (match
+        ((> heap 0) (+ (* (/ (+ datalen 15) 16) 16) heap))
+        ((= datalen 0) %cc-elf-pagesize)
+        (#t datalen)))
     (img-u64! img 168 %cc-elf-pagesize) ; p_align
 
     (img-bytes! img %cc-elf-codeoff code)

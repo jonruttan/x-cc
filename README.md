@@ -56,7 +56,13 @@ page after the code -- `__DATA` in the Mach-O, a second `PT_LOAD` in the
 ELF.  The globals are at the front of it, each at its kind's size with
 the initializer's value already in place; the string literals follow,
 end to end and each stored once.  The entry hands compiled code the
-data's address the way it hands over the helper's.
+data's address the way it hands over the helper's.  A program that
+calls `malloc` has a heap after the data: the segment runs on sixty-four
+megabytes past the file's bytes, and the kernel maps them zero-filled.
+The compiler writes the program's `malloc` after its last function, when
+the data's size is final; it takes sixteen-aligned blocks from the heap
+in order and answers the null pointer when there is no room, and `free`
+gives nothing back.
 
 The calling convention is the compiler's own, since nothing else links
 with what it writes: arguments in four registers, the answer in one,
