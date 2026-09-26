@@ -68,14 +68,14 @@ tick
 
 ## the refusals
 
-### a global struct
+### a global of an unsigned int
 
 ```cc
 (display (guard (e (do (display "refused: ") (write e) ""))
-  (cc-exe-run "struct P { int x; };\nstruct P g;\nint main(void) { return 0; }")))
+  (cc-exe-run "unsigned int g;\nint main(void) { return 0; }")))
 ```
 ---
-    refused: #<err:cc cc: compile: not built yet: a struct>
+    refused: #<err:cc cc: compile: not built yet: the type unsigned int>
 
 ### one initialized by something that is not a constant
 
