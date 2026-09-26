@@ -68,4 +68,4 @@ eight bits of what main returns.
   (cc-exe-run "int one(void) { return 1; }\nint main(void) { int (*f)(void) = one; return f(); }")))
 ```
 ---
-    refused: #<err:cc cc: compile: not built yet: a local that is not an integer, a pointer or an array>
+    refused: #<err:cc cc: compile: not built yet: a local that is not an integer, a pointer, an array or a struct>

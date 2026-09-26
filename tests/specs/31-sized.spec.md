@@ -97,4 +97,4 @@ and exits as it does.
   (cc-exe-run "struct P { int x; };\nint first(struct P p) { return 0; }\nint main(void) { return 0; }")))
 ```
 ---
-    refused: #<err:cc cc: compile: not built yet: a struct>
+    refused: #<err:cc cc: compile: not built yet: a struct passed by value>

@@ -22,11 +22,13 @@ leave `int`'s 32 bits sign-extends it again from bit 31, so arithmetic
 wraps as C's `int` does.
 
 Compiled so far: main and the functions beside it, with integer
-globals, locals and parameters, pointers and arrays, assignment, `++`
+globals, locals and parameters, pointers, arrays, structs and unions,
+assignment, `++`
 and `--`, `if`/`else`, `while`, `do`, `for`, `break`, `continue`,
 `return` and calls, recursion included, over integer constants and
 string literals, `+ - * / %`, `& | ^ << >>`, the six comparisons,
-`&&`, `||`, the ternary, the comma, unary `- ~ ! & *` and subscripts.
+`&&`, `||`, the ternary, the comma, unary `- ~ ! & *`, subscripts,
+and `.` and `->`.
 A compiled program prints with `putchar`, `puts`, and `printf` of a
 literal format with `%d`, `%c`, `%s` and `%%`: the entry writes out a
 helper that makes the write system call and hands compiled code its
@@ -41,7 +43,10 @@ A pointer is an eight-byte address: `&` takes one, `*` loads or stores
 through one at the width of what it points at, and `+` and `-` move one
 by whole elements.  An array is its elements end to end, and where it is
 used as a value it stands for its first element's address, so `a[i]` is
-`*(a + i)`.
+`*(a + i)`.  A struct is its fields at the offsets the parser lays out,
+and a union one whose fields all sit at 0; `s.f` and `p->f` are the
+struct's address plus the field's offset, assigning a struct copies its
+bytes, and a braced initializer fills its fields and zeroes the rest.
 
 The executable has a data segment, mapped readable and writable on the
 page after the code -- `__DATA` in the Mach-O, a second `PT_LOAD` in the
@@ -58,7 +63,8 @@ kind, and a value loads at that width, extended by its sign; arithmetic
 happens in `int`, which is what C's promotions make of `char` and
 `short`, and a store narrows the value back.  Anything else refuses by
 name: `long` and the unsigned kinds of `int`'s width or more, whose
-arithmetic is not `int`'s, structs, function pointers, a fifth
+arithmetic is not `int`'s, a struct passed or returned by value, which
+the calling convention does not carry, function pointers, a fifth
 argument, a global initialized by something other than a constant or
 a global pointer initialized with an address (the executable is loaded
 where the kernel chooses, and nothing relocates it), any other `printf`

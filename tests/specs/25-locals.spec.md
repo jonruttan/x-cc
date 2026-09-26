@@ -95,11 +95,11 @@ Each status below is the one the same source gives when compiled with
 
 ## the refusals
 
-### a struct local is not compiled yet
+### a long local is not compiled yet
 
 ```cc
 (display (guard (e (do (display "refused: ") (write e) ""))
-  (cc-exe-run "struct P { int x; };\nint main(void) { struct P p; p.x = 1; return p.x; }")))
+  (cc-exe-run "int main(void) { long n = 1; return n; }")))
 ```
 ---
-    refused: #<err:cc cc: compile: not built yet: a struct>
+    refused: #<err:cc cc: compile: not built yet: the type long>
