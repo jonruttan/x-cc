@@ -16,7 +16,8 @@
 ;
 ; Three segments carry it: __TEXT holds the header, the load commands and
 ; the code; __DATA follows on the next page, readable and writable, and
-; holds the globals and the string literals; __LINKEDIT holds the rest.
+; holds the globals and the string literals, then runs on zero-filled
+; through the heap when the program has one; __LINKEDIT holds the rest.
 ;
 ; The signature is a SuperBlob holding one CodeDirectory, big-endian, which
 ; hashes every 4096-byte page below the signature's own offset, the last one
@@ -104,10 +105,12 @@
           ())
         %cc-macho-zero-hex)))
 
-; CODE is the code, entry first; DATA the bytes of the data segment.
+; CODE is the code, entry first; DATA the bytes of the data segment; HEAP
+; how many bytes __DATA runs on past the data, at the data's next
+; sixteen-byte boundary, which the kernel maps zero-filled.
 ; Writes the executable to PATH and answers its size in bytes.
 (def macho-write!
-  (fn (_ path code data)
+  (fn (_ path code data heap)
     (def vmbase %cc-macho-vmbase)
     (def codeoff %cc-macho-codeoff)
     (def codelen (length code))
@@ -118,6 +121,11 @@
     (def textsize dataoff)
     (def datasize
       (%cc-macho-round-up (if (= datalen 0) 1 datalen) %cc-macho-segalign))
+    ; in memory the data runs on through the heap, so the link-edit data is
+    ; mapped past it, where its file offset alone would not put it
+    (def datavm
+      (if (= heap 0) datasize
+        (%cc-macho-round-up (+ (%cc-macho-round-up datalen 16) heap) %cc-macho-segalign)))
     (def linkedit (+ dataoff datasize))
     ; the link-edit data, in the order ld writes it
     (def fixups linkedit)
@@ -152,9 +160,9 @@
     (img-u32! img 224 codeoff)
     (img-u32! img 228 2)               ; aligned to 4
     (img-u32! img 240 0x80000400)      ; PURE_INSTRUCTIONS SOME_INSTRUCTIONS
-    (%cc-macho-segment! img 256 "__DATA" (+ vmbase dataoff) datasize
+    (%cc-macho-segment! img 256 "__DATA" (+ vmbase dataoff) datavm
       dataoff datasize 3 0)                ; read and write
-    (%cc-macho-segment! img 328 "__LINKEDIT" (+ vmbase linkedit)
+    (%cc-macho-segment! img 328 "__LINKEDIT" (+ vmbase (+ dataoff datavm))
       (%cc-macho-round-up (- total linkedit) %cc-macho-segalign)
       linkedit (- total linkedit) 1 0)
     (%cc-macho-data-cmd! img 400 0x80000034 fixups 56)   ; LC_DYLD_CHAINED_FIXUPS
