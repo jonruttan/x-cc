@@ -30,6 +30,10 @@
 ; `(*NAME)(params)` declarator is a pointer-wide value; a call whose callee is
 ; any expression but a bare name is (callx E ARGS)) parse.  Refused
 ; loudly: goto, floats -- each a recorded pending.
+(module cc/parse)
+
+(import cc/prims append byte-len convert length map reverse string-append
+  string=?)
 
 (def %cc-p-err
   (fn (_ msg)
@@ -135,7 +139,7 @@
 (def %cc-p-typedefs ())    ; ((name . kind) ...)
 (def %cc-p-anon 0)
 
-(def %cc-p-struct-entry
+(def struct-entry
   (fn (_ name)
     (def go (fn (self es)
               (if (null? es) ()
@@ -143,10 +147,15 @@
                   (self (rest es))))))
     (go %cc-p-structs)))
 
+; every struct the program being parsed has declared.  The table is this
+; module's, and a parse replaces it, so a reader asks for it each time
+; rather than keeping a copy.
+(def struct-table (fn (_) %cc-p-structs))
+
 ; Sizes in bytes, as the platforms this compiles for count them (LP64):
 ; char 1, short 2, int 4, long 8, and every pointer 8.  An array is its
 ; count times its element; a struct is what its layout came to.
-(def %cc-kind-size
+(def kind-size
   (fn (self kind)
     (if (not (pair? kind))
       (match
@@ -164,7 +173,7 @@
             (if (null? (rest (rest kind))) 4
               (self (first (rest (rest kind)))))))
         ((eq? (first kind) (lit struct))
-          (let ((e (%cc-p-struct-entry (first (rest kind)))))
+          (let ((e (struct-entry (first (rest kind)))))
             (if (null? e)
               (%cc-p-err (string-append "unknown struct: " (first (rest kind))))
               (first (rest e)))))
@@ -172,14 +181,14 @@
 
 ; What an address of this kind must be a multiple of: a scalar its own size,
 ; an array its element's, a struct its widest member's.
-(def %cc-kind-align
+(def kind-align
   (fn (self kind)
-    (if (not (pair? kind)) (%cc-kind-size kind)
+    (if (not (pair? kind)) (kind-size kind)
       (match
         ((eq? (first kind) (lit array))
           (if (null? (rest (rest kind))) 4 (self (first (rest (rest kind))))))
         ((eq? (first kind) (lit struct))
-          (let ((e (%cc-p-struct-entry (first (rest kind)))))
+          (let ((e (struct-entry (first (rest kind)))))
             (if (null? e) 1
               (let ((go (fn (self2 fs a)
                           (if (null? fs) a
@@ -188,7 +197,7 @@
                 (go (rest (rest e)) 1)))))
         (#t 8)))))
 
-(def %cc-round-up (fn (_ n a) (let ((m (+ n (- a 1)))) (- m (% m a)))))
+(def round-up (fn (_ n a) (let ((m (+ n (- a 1)))) (- m (% m a)))))
 
 (def %cc-p-typedef-name?
   (fn (_ toks)
@@ -466,7 +475,7 @@
                     (if (%cc-p-kw? toks (lit sizeof))
                       (if (%cc-cast? (rest toks))
                         (let ((tr (%cc-p-type (rest (rest toks)))))
-                          (pair (list (lit num) (%cc-kind-size (first tr)))
+                          (pair (list (lit num) (kind-size (first tr)))
                             (%cc-p-eat (rest tr) ")")))
                         (let ((r (self (rest toks))))
                           (pair (list (lit szof) (first r)) (rest r))))
@@ -706,7 +715,7 @@
       (fn (self ts off align fields)
         (if (%cc-p-op? ts "}")
           (do (set! %cc-p-structs
-                (pair (pair name (pair (%cc-round-up off align) (reverse fields)))
+                (pair (pair name (pair (round-up off align) (reverse fields)))
                   %cc-p-structs))
               (rest ts))
           (let ((r (%cc-p-decl-line ts)))
@@ -715,13 +724,13 @@
                 (if (null? ds) (list o a fs)
                   (let ((d (first ds)))
                     (def k (first (rest (rest d))))
-                    (def sz (%cc-kind-size k))
-                    (def ka (%cc-kind-align k))
+                    (def sz (kind-size k))
+                    (def ka (kind-align k))
                     (def a2 (if (> ka a) ka a))
                     (if union?
                       (self2 (rest ds) (if (> sz o) sz o) a2
                         (pair (list (first (rest d)) 0 k) fs))
-                      (let ((at (%cc-round-up o ka)))
+                      (let ((at (round-up o ka)))
                         (self2 (rest ds) (+ at sz) a2
                           (pair (list (first (rest d)) at k) fs))))))))
             (def l (lay (first r) off align fields))
@@ -948,3 +957,6 @@
                               (first r)))
                           acc)))))))))))))
     (go toks ())))
+
+(provide cc/parse cc-parse kind-size kind-align round-up struct-entry
+  struct-table)

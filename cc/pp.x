@@ -14,6 +14,10 @@
 ; and expanded in the lexer.  #ifdef/#ifndef/#elif/#else/#endif/#undef
 ; and the #if forms a build header needs (0, 1, defined) select lines.
 ; Any other directive refuses loudly.
+(module cc/pp)
+
+(import cc/prims byte-at byte-len filter reverse string-append string-concat
+  string=? substring)
 
 ; comments to spaces; strings and char constants pass untouched
 (def %cc-strip-comments
@@ -267,3 +271,5 @@
       (if (null? (rest ls)) (first ls)
         (string-append (first ls)
           (string-append "\n" (self (rest ls))))))))
+
+(provide cc/pp cc-preprocess)
