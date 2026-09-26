@@ -28,8 +28,8 @@ pointers, arrays, structs and unions, assignment, `++`
 and `--`, `if`/`else`, `while`, `do`, `for`, `break`, `continue`,
 `return` and calls, recursion included, over integer constants and
 string literals, `+ - * / %`, `& | ^ << >>`, the six comparisons,
-`&&`, `||`, the ternary, the comma, unary `- ~ ! & *`, subscripts,
-and `.` and `->`.
+`&&`, `||`, the ternary, the comma, unary `- ~ ! & *`, casts,
+subscripts, and `.` and `->`.
 A compiled program prints with `putchar`, `puts`, and `printf` of a
 literal format with `%d`, `%i`, `%u`, `%ld`, `%li`, `%lu`, `%c`, `%s`
 and `%%`: the entry writes out a helper that makes the write system
@@ -92,13 +92,14 @@ so &local works, the stack grows down and the heap up.
 
 Working: int/char/void/pointer/array declarations (specifier soup
 accepted, erased); all C89 operators with C precedence, short-circuit
-&& || and the ternary; truncating division; if/else, while, do, for,
-break, continue, return; functions with recursion and prototypes;
-globals; string literals (interned); character constants; `#include`
-(dropped -- the runtime provides putchar, puts, printf %d %c %s %x,
-malloc, free, exit), object-like `#define` spliced token-wise; // and
-/* */ comments.  By-value struct functions stay interpreted under
-`build`; a scalar function they call still lowers.
+&& || and the ternary; casts, each converting its operand to its type
+and giving the expression that type; truncating division; if/else,
+while, do, for, break, continue, return; functions with recursion and
+prototypes; globals; string literals (interned); character constants;
+`#include` (dropped -- the runtime provides putchar, puts, printf %d
+%c %s %x, malloc, free, exit), object-like `#define` spliced
+token-wise; // and /* */ comments.  By-value struct functions stay
+interpreted under `build`; a scalar function they call still lowers.
 
 Structs, too: `struct S { ... };`, `typedef struct { ... } T;`,
 fields by `.` and `->`, nested structs, arrays of structs, pointers to
