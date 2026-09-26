@@ -99,16 +99,6 @@ source prints through /usr/bin/cc, and exits as it does.
 
 ## the refusals
 
-### a struct passed or returned by value
-
-```cc
-(write (list
-  (guard (e (e msg)) (cc-exe-run "struct P { int x; };\nint f(struct P p) { return p.x; }\nint main(void) { return 0; }"))
-  (guard (e (e msg)) (cc-exe-run "struct P { int x; };\nstruct P f(void) { struct P p = {1}; return p; }\nint main(void) { return 0; }"))))
-```
----
-    ("cc: compile: not built yet: a struct passed by value" "cc: compile: not built yet: a struct returned by value")
-
 ### an operator on a struct
 
 ```cc
