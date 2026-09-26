@@ -65,22 +65,22 @@ in order and answers the null pointer when there is no room, and `free`
 gives nothing back.
 
 The calling convention is the compiler's own, since nothing else links
-with what it writes: arguments in four registers, the answer in one,
-and a frame per call taken from a region below the machine stack.  A
-local, a parameter and a global take the size and alignment of their
-kind, and a value loads at that width, extended by its sign.  An
-operator works in the kind C's usual conversions give its operands --
-`int` for `char` and `short`, then `unsigned int`, `long` and
-`unsigned long` -- and a store converts the value to its place's kind.
-An integer constant has the type its suffixes and its value give it.
-Anything else refuses by name: floating point, a struct passed or
-returned by value, which the calling convention does not carry,
-function pointers, a fifth
-argument, a global initialized by something other than a constant or
-a global pointer initialized with an address (the executable is loaded
-where the kernel chooses, and nothing relocates it), any other `printf`
-conversion or a format that is not a literal, and the rest of the
-runtime.
+with what it writes: the first four arguments in registers and the
+rest stored where the callee's frame will have its top, the answer in
+one register, and a frame per call taken from a region below the
+machine stack.  A local, a parameter and a global take the size and
+alignment of their kind, and a value loads at that width, extended by
+its sign.  An operator works in the kind C's usual conversions give
+its operands -- `int` for `char` and `short`, then `unsigned int`,
+`long` and `unsigned long` -- and a store converts the value to its
+place's kind.  An integer constant has the type its suffixes and its
+value give it.  Anything else refuses by name: floating point, a
+struct passed or returned by value, which the calling convention does
+not carry, function pointers, a global initialized by something other
+than a constant or a global pointer initialized with an address (the
+executable is loaded where the kernel chooses, and nothing relocates
+it), any other `printf` conversion or a format that is not a literal,
+and the rest of the runtime.
 
     x -l cc -- run prog.c
 
