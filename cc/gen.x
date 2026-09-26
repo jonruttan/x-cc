@@ -31,12 +31,13 @@
 ; format with %d %i %u %ld %li %lu %c %s and %%, `exit`, `malloc` and
 ; `free`, unless the program defines its own.  Everything else refuses by
 ; name: floating point, a struct passed or returned by value, function
-; pointers, more than four arguments, and the rest of the runtime.
+; pointers, and the rest of the runtime.
 ;
 ; The convention is this compiler's own, since nothing else links with what
-; it writes: arguments in x0, x1, x2 and x8, the answer in x0, frames off
-; x20 in a region below the machine stack, x19 the frame's base, x21 the
-; runtime helper and x22 the data.
+; it writes: the first four arguments in x0, x1, x2 and x8 and the rest at
+; the top of the callee's frame, the answer in x0, frames off x20 in a
+; region below the machine stack, x19 the frame's base, x21 the runtime
+; helper and x22 the data.
 (module cc/gen)
 
 (import x/tool/asm)
@@ -797,6 +798,17 @@
     (set! %cc-gen-env (pair (pair name (pair off kind)) %cc-gen-env))
     off))
 
+; The Kth parameter, past the fourth: the caller stored it K - 3 words
+; below the top of this frame (%cc-gen-call-fun!).  The top is known once
+; the frame is laid out, so the offset counts back from it, negative, and
+; a place adds the frame's size.
+(def %cc-gen-frame-top 0)   ; the size of the frame being compiled
+(def %cc-gen-slot-above!
+  (fn (_ name kind k)
+    (if (not (null? (%cc-gen-find name)))
+      (%cc-gen-no (string-append "a second declaration of " name)))
+    (set! %cc-gen-env (pair (pair name (pair (- 0 (* 8 (- k 3))) kind)) %cc-gen-env))))
+
 ; A place is (BASE OFFSET . KIND): a register and a byte offset from it.
 ; A name's is a frame slot off x19 or a global's room off x22, and one
 ; worked out at run time is the register holding it, at offset 0.
@@ -809,7 +821,10 @@
 (def %cc-gen-place-of
   (fn (_ name)
     (let ((l (%cc-gen-find name)))
-      (if (not (null? l)) (%cc-gen-place x19 (first l) (rest l))
+      (if (not (null? l))
+        (%cc-gen-place x19
+          (if (< (first l) 0) (+ %cc-gen-frame-top (first l)) (first l))
+          (rest l))
         (let ((g (%cc-gen-global-find name)))
           (match
             ((null? g) (%cc-gen-no (string-append "the name " name)))
@@ -1264,11 +1279,15 @@
         (%cc-gen! (lit mov) x0 (imm 1))
         (%cc-gen! (lit blr) x21))))
 
+; A call: every argument is worked out and waits on the stack, then the
+; first four go into x0, x1, x2 and x8 and the rest into memory: the Kth
+; (counting from 0) at K - 3 words below this frame's base, x20, which is
+; the top of the frame the callee takes off x20 next (%cc-gen-fun!).
 (def %cc-gen-call-fun!
   (fn (_ name args)
     (def to (%cc-gen-fun-label name))
-    (if (> (length args) (length %cc-gen-args))
-      (%cc-gen-no (string-append "a call with more than four arguments: " name)))
+    (def n (length args))
+    (def nregs (length %cc-gen-args))
     (if (not (null? (filter (fn (_ a) (%cc-gen-struct? (%cc-gen-kind-of a))) args)))
       (%cc-gen-no "a struct passed by value"))
     (def push-all
@@ -1277,12 +1296,23 @@
           (do (%cc-gen-expr! (first as))
               (asm-push! %cc-gen-asm x0)
               (self (rest as))))))
+    ; the last argument is on top; x86-64 subtracts an immediate in place,
+    ; so x20 is copied first
+    (def store-above
+      (fn (self k)
+        (if (< k nregs) ()
+          (do (asm-pop! %cc-gen-asm x0)
+              (%cc-gen! (lit mov) x1 x20)
+              (%cc-gen! (lit sub) x1 x1 (imm (* 8 (- k 3))))
+              (%cc-gen! (lit str) x0 (mem x1 0))
+              (self (- k 1))))))
     (def pop-into
       (fn (self regs)
         (if (null? regs) ()
           (do (self (rest regs)) (asm-pop! %cc-gen-asm (first regs))))))
     (do (push-all args)
-        (pop-into (%cc-gen-take (length args) %cc-gen-args))
+        (store-above (- n 1))
+        (pop-into (%cc-gen-take (if (< n nregs) n nregs) %cc-gen-args))
         (%cc-gen! %cc-gen-callop (label to)))))
 
 ; the first N of a list
@@ -1881,8 +1911,7 @@
     (def body (first (rest (rest (rest f)))))
     (def kinds (first (rest (rest (rest (rest f))))))
     (def ret (first (rest (rest (rest (rest (rest f)))))))
-    (if (> (length params) (length %cc-gen-args))
-      (%cc-gen-no (string-append "more than four parameters: " (first (rest f)))))
+    (def nregs (length %cc-gen-args))
     (set! %cc-gen-ret-kind
       (match
         ((eq? ret (lit void)) ret)
@@ -1892,15 +1921,21 @@
     (set! %cc-gen-frame-bytes 0)
     (set! %cc-gen-loops ())
     (set! %cc-gen-epilogue (%cc-gen-label))
-    ; the parameters take the first slots, then the body's declarations
+    ; the parameters in registers take the first slots, then the body's
+    ; declarations; the ones past the fourth are at the frame's top already
     (def places
-      (let ((go (fn (self ps ks)
+      (let ((go (fn (self ps ks i)
                   (if (null? ps) ()
                     (let ((k (%cc-gen-kind! (first ks) "a parameter")))
                       (if (%cc-gen-struct? k) (%cc-gen-no "a struct passed by value"))
-                      (pair (pair (mem x19 (%cc-gen-slot! (first ps) k)) k)
-                        (self (rest ps) (rest ks))))))))
-        (go params kinds)))
+                      (if (< i nregs)
+                        (pair (pair (mem x19 (%cc-gen-slot! (first ps) k)) k)
+                          (self (rest ps) (rest ks) (+ i 1)))
+                        (do (%cc-gen-slot-above! (first ps) k i)
+                            (self (rest ps) (rest ks) (+ i 1)))))))))
+        (go params kinds 0)))
+    (def above
+      (if (> (length params) nregs) (round-up (* 8 (- (length params) nregs)) 16) 0))
     (%cc-gen-scan! body)
     ; the slot past the named ones, for the runtime to write a byte from,
     ; then printf's area if the function calls it
@@ -1910,8 +1945,9 @@
       (if (null? (%cc-gen-fun-find "printf")) (%cc-gen-printf-width body) 0))
     ; the area to the digits' end, then a slot per argument after the format
     (def pf-slots (if (= width 0) 0 (+ (/ %cc-gen-pf-end 8) (- width 1))))
-    (def frame (round-up (+ %cc-gen-pf (* 8 pf-slots)) 16))
+    (def frame (+ (round-up (+ %cc-gen-pf (* 8 pf-slots)) 16) above))
     (if (> frame 4080) (%cc-gen-no "a frame past four kilobytes"))
+    (set! %cc-gen-frame-top frame)
     (asm-label! %cc-gen-asm (%cc-gen-fun-label (first (rest f))))
     ; prologue: the caller's frame base is saved, this one taken off x20
     (if (null? %cc-gen-link) () (asm-push! %cc-gen-asm %cc-gen-link))

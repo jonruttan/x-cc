@@ -2,8 +2,9 @@
 # @timeout-scale 3
 
 Compiled calls.  A program is main and the functions beside it, each
-with its own frame off x20 and its answer in x0; arguments travel in
-four registers, and a function that calls another saves what it needs
+with its own frame off x20 and its answer in x0; the first four
+arguments travel in registers and the rest in memory at the top of the
+callee's frame, and a function that calls another saves what it needs
 to get back.  Each status below is the one the same source gives when
 compiled with /usr/bin/cc and run.
 
@@ -69,16 +70,7 @@ compiled with /usr/bin/cc and run.
 
 ## the refusals
 
-### a fifth argument is not compiled yet
-
-```cc
-(display (guard (e (do (display "refused: ") (write e) ""))
-  (cc-exe-run "int five(int a, int b, int c, int d, int e) { return a + e; }\nint main(void) { return five(1, 2, 3, 4, 5); }")))
-```
----
-    refused: #<err:cc cc: compile: not built yet: a call with more than four arguments: five>
-
-### nor is a call to a function that is not there
+### a call to a function that is not there
 
 ```cc
 (display (guard (e (do (display "refused: ") (write e) ""))
