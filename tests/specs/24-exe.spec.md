@@ -61,11 +61,11 @@ eight bits of what main returns.
 
 ## the refusal
 
-### a pointer is not compiled yet
+### a function pointer is not compiled yet
 
 ```cc
 (display (guard (e (do (display "refused: ") (write e) ""))
-  (cc-exe-run "int main(void) { int n = 1; int *p = &n; return *p; }")))
+  (cc-exe-run "int one(void) { return 1; }\nint main(void) { int (*f)(void) = one; return f(); }")))
 ```
 ---
-    refused: #<err:cc cc: compile: not built yet: a local that is not an integer>
+    refused: #<err:cc cc: compile: not built yet: a local that is not an integer, a pointer or an array>

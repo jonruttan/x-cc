@@ -68,14 +68,14 @@ tick
 
 ## the refusals
 
-### a global that is not an integer
+### a global struct
 
 ```cc
 (display (guard (e (do (display "refused: ") (write e) ""))
-  (cc-exe-run "int v[3];\nint main(void) { return 0; }")))
+  (cc-exe-run "struct P { int x; };\nstruct P g;\nint main(void) { return 0; }")))
 ```
 ---
-    refused: #<err:cc cc: compile: not built yet: a global that is not an integer: v>
+    refused: #<err:cc cc: compile: not built yet: a struct>
 
 ### one initialized by something that is not a constant
 

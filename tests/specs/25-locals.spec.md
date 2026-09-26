@@ -95,20 +95,11 @@ Each status below is the one the same source gives when compiled with
 
 ## the refusals
 
-### a local that is not an integer is not compiled yet
+### a struct local is not compiled yet
 
 ```cc
 (display (guard (e (do (display "refused: ") (write e) ""))
-  (cc-exe-run "int main(void) { int a[4]; a[0] = 1; return a[0]; }")))
+  (cc-exe-run "struct P { int x; };\nint main(void) { struct P p; p.x = 1; return p.x; }")))
 ```
 ---
-    refused: #<err:cc cc: compile: not built yet: a local that is not an integer>
-
-### so is a pointer
-
-```cc
-(display (guard (e (do (display "refused: ") (write e) ""))
-  (cc-exe-run "int main(void) { int a = 1; int *p = &a; return *p; }")))
-```
----
-    refused: #<err:cc cc: compile: not built yet: a local that is not an integer>
+    refused: #<err:cc cc: compile: not built yet: a struct>

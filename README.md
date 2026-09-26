@@ -22,18 +22,26 @@ leave `int`'s 32 bits sign-extends it again from bit 31, so arithmetic
 wraps as C's `int` does.
 
 Compiled so far: main and the functions beside it, with integer
-globals, locals and parameters, assignment, `++` and `--`, `if`/`else`,
-`while`, `do`, `for`, `break`, `continue`, `return` and calls,
-recursion included, over integer constants, `+ - * / %`,
-`& | ^ << >>`, the six comparisons, `&&`, `||`, the ternary, the
-comma and unary `- ~ !`.  A compiled program prints with `putchar`,
-`puts` of a literal, and `printf` of a literal format with `%d`, `%c`,
-`%s` of a literal and `%%`: the entry writes out a helper that makes
-the write system call and hands compiled code its address, since
-neither the system call nor a program-counter-relative address has a
-portable mnemonic.  A `printf` is laid out at compile time -- runs of
-text become one write each, and only `%d` and `%c` are left for run
-time, a `%d` converted to decimal in a buffer in the frame.
+globals, locals and parameters, pointers and arrays, assignment, `++`
+and `--`, `if`/`else`, `while`, `do`, `for`, `break`, `continue`,
+`return` and calls, recursion included, over integer constants and
+string literals, `+ - * / %`, `& | ^ << >>`, the six comparisons,
+`&&`, `||`, the ternary, the comma, unary `- ~ ! & *` and subscripts.
+A compiled program prints with `putchar`, `puts`, and `printf` of a
+literal format with `%d`, `%c`, `%s` and `%%`: the entry writes out a
+helper that makes the write system call and hands compiled code its
+address, since neither the system call nor a program-counter-relative
+address has a portable mnemonic.  A `printf` is laid out at compile
+time -- runs of text, a `%s` of a literal among them, become one write
+each -- and what is left for run time is a `%c`, a `%d` converted to
+decimal in a buffer in the frame, and a `%s` of any other string,
+walked to its NUL.
+
+A pointer is an eight-byte address: `&` takes one, `*` loads or stores
+through one at the width of what it points at, and `+` and `-` move one
+by whole elements.  An array is its elements end to end, and where it is
+used as a value it stands for its first element's address, so `a[i]` is
+`*(a + i)`.
 
 The executable has a data segment, mapped readable and writable on the
 page after the code -- `__DATA` in the Mach-O, a second `PT_LOAD` in the
@@ -50,10 +58,12 @@ kind, and a value loads at that width, extended by its sign; arithmetic
 happens in `int`, which is what C's promotions make of `char` and
 `short`, and a store narrows the value back.  Anything else refuses by
 name: `long` and the unsigned kinds of `int`'s width or more, whose
-arithmetic is not `int`'s, pointers, aggregates, a fifth argument, a
-global initialized by something other than a constant, any other
-`printf` conversion or a format that is not a literal, a `puts` of
-anything but a literal, and the rest of the runtime.
+arithmetic is not `int`'s, structs, function pointers, a fifth
+argument, a global initialized by something other than a constant or
+a global pointer initialized with an address (the executable is loaded
+where the kernel chooses, and nothing relocates it), any other `printf`
+conversion or a format that is not a literal, and the rest of the
+runtime.
 
     x -l cc -- run prog.c
 
