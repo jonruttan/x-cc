@@ -22,8 +22,8 @@
 ; parameters of `char`, `short`, `int` and `long`, signed and unsigned,
 ; pointers to anything, and arrays, structs and unions of any of these, each
 ; at its kind's size,
-; assignment, ++ and --, `if`/`else`, `while`, `do`, `for`, `break`,
-; `continue`, `return` and calls (recursion included), over integer
+; assignment, ++ and --, `if`/`else`, `while`, `do`, `for`, `switch`,
+; `break`, `continue`, `return` and calls (recursion included), over integer
 ; constants typed by their suffixes and string literals, + - * / %,
 ; & | ^ << >>, the six comparisons, &&, ||, the ternary, the comma,
 ; unary - ~ ! & *, casts, subscripts, `.` and `->`, each in the kind C's
@@ -1603,13 +1603,24 @@
         (%cc-gen! (lit cmp) x0 (imm 0))
         (%cc-gen! (lit b/eq) (label to)))))
 
+; where a break or a continue goes: the innermost loop's, but a switch's
+; for a break, and a continue in a switch goes to the loop around it
 (def %cc-gen-loop-label
   (fn (_ which)
-    (if (null? %cc-gen-loops)
-      (%cc-gen-no (string-append which " outside a loop"))
-      (if (string=? which "break")
-        (first (first %cc-gen-loops))
-        (rest (first %cc-gen-loops))))))
+    (def to
+      (match
+        ((null? %cc-gen-loops) ())
+        ((string=? which "break") (first (first %cc-gen-loops)))
+        (#t (rest (first %cc-gen-loops)))))
+    (if (null? to) (%cc-gen-no (string-append which " outside a loop")) to)))
+
+; a case label's value, in KIND: a constant, worked out now as a global's
+; initializer is
+(def %cc-gen-case-value
+  (fn (_ node kind)
+    (%cc-gen-form
+      (guard (e (%cc-gen-no "a case label that is not a constant")) (%cc-gen-fold node))
+      kind)))
 
 (def %cc-gen-stmt! ())
 (set! %cc-gen-stmt!
@@ -1690,6 +1701,51 @@
           (%cc-gen! (lit b) (label (%cc-gen-loop-label "break"))))
         ((eq? t (lit continue))
           (%cc-gen! (lit b) (label (%cc-gen-loop-label "continue"))))
+        ((eq? t (lit switch))
+          ; the value is compared with each case label in turn: the first
+          ; to match, else the default, else nothing, is where the body is
+          ; entered, and the clauses after it run on until a break.  C
+          ; promotes the value, and each label converts to its kind.
+          (let ((out (%cc-gen-label)))
+            (def e (first (rest node)))
+            (def k (%cc-gen-promote (%cc-gen-kind-of e)))
+            ; ((LABEL VALUE stmt ...) ...), a label for each clause
+            (def clauses
+              (let ((go (fn (go cs)
+                          (if (null? cs) ()
+                            (pair (pair (%cc-gen-label) (first cs)) (go (rest cs)))))))
+                (go (first (rest (rest node))))))
+            (def default-
+              (let ((go (fn (go cs)
+                          (match
+                            ((null? cs) out)
+                            ((null? (first (rest (first cs)))) (first (first cs)))
+                            (#t (go (rest cs)))))))
+                (go clauses)))
+            (def tests
+              (fn (tests cs)
+                (if (null? cs) ()
+                  (do (if (null? (first (rest (first cs)))) ()
+                        (do (asm-load-imm64! %cc-gen-asm x1
+                              (%cc-gen-case-value (first (rest (first cs))) k))
+                            (%cc-gen! (lit cmp) x0 x1)
+                            (%cc-gen! (lit b/eq) (label (first (first cs))))))
+                      (tests (rest cs))))))
+            (def bodies
+              (fn (bodies cs)
+                (if (null? cs) ()
+                  (do (asm-label! %cc-gen-asm (first (first cs)))
+                      (self (list (lit block) (rest (rest (first cs)))))
+                      (bodies (rest cs))))))
+            (%cc-gen-expr! e)
+            (tests clauses)
+            (%cc-gen! (lit b) (label default-))
+            (set! %cc-gen-loops
+              (pair (pair out (if (null? %cc-gen-loops) () (rest (first %cc-gen-loops))))
+                %cc-gen-loops))
+            (bodies clauses)
+            (set! %cc-gen-loops (rest %cc-gen-loops))
+            (asm-label! %cc-gen-asm out)))
         (#t (%cc-gen-no (string-append "the statement " (convert t %string))))))))
 
 ; the bytes at P from offset 0 through I, as a list
@@ -1723,6 +1779,12 @@
           ((eq? t (lit for))
             (do (let ((i (first (rest node)))) (if (null? i) () (self i)))
                 (self (first (rest (rest (rest (rest node))))))))
+          ((eq? t (lit switch))
+            (let ((go (fn (self2 cs)
+                        (if (null? cs) ()
+                          (do (self (list (lit block) (rest (first cs))))
+                              (self2 (rest cs)))))))
+              (go (first (rest (rest node))))))
           (#t ()))))))
 
 (def %cc-gen-fun!
