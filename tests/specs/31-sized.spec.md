@@ -6,10 +6,9 @@ global each take the size and alignment of their kind, and a value loads
 at that width, extended by its sign.  Arithmetic happens in int, which is
 what C's promotions make of `char` and `short`; a store narrows the value
 back to its kind, and so does the value an assignment answers and the
-value a `char` or `short` function returns.  `long` and the unsigned kinds
-of int's width or more want arithmetic of their own, and refuse by name.
-Each case below prints what the same source prints through /usr/bin/cc,
-and exits as it does.
+value a `char` or `short` function returns.  The kinds of int's width or
+more have specs of their own.  Each case below prints what the same
+source prints through /usr/bin/cc, and exits as it does.
 
 ## locals
 
@@ -79,16 +78,6 @@ and exits as it does.
     (43 4)
 
 ## the refusals
-
-### a long and an unsigned int
-
-```cc
-(write (list
-  (guard (e (e msg)) (cc-exe-run "int main(void) { long l = 1; return l; }"))
-  (guard (e (e msg)) (cc-exe-run "unsigned int u;\nint main(void) { return 0; }"))))
-```
----
-    ("cc: compile: not built yet: the type long" "cc: compile: not built yet: the type unsigned int")
 
 ### a parameter that is a struct
 

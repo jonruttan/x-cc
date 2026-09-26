@@ -95,11 +95,10 @@ Each status below is the one the same source gives when compiled with
 
 ## the refusals
 
-### a long local is not compiled yet
+### a floating-point local is not compiled yet
 
 ```cc
-(display (guard (e (do (display "refused: ") (write e) ""))
-  (cc-exe-run "int main(void) { long n = 1; return n; }")))
+(write (guard (e (e msg)) (cc-exe-run "int main(void) { double d = 1.5; return 0; }")))
 ```
 ---
-    refused: #<err:cc cc: compile: not built yet: the type long>
+    "cc: parse: not built yet: double"

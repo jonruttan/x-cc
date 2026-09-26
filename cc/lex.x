@@ -68,7 +68,8 @@
       ((= b 118) (pair 11 (+ i 1)))                       ; v
       (#t (pair (+ 0 b) (+ i 1))))))                      ; \\ \' \" ...
 
-; number: decimal, 0x hex, 0 octal; suffixes uUlL skipped
+; number: decimal, 0x hex, 0 octal, as (VALUE KIND . NEXT); the suffixes
+; u U l L, with the base and the value, give the literal its type
 (def %cc-lex-num
   (fn (_ src end i)
     (def hexp
@@ -91,15 +92,36 @@
               #f)
           (dec (+ i 1) 0 8)
           (dec i 0 10))))
-    ; integer suffixes: u U l L, in any pile
-    (def skip-suf
-      (fn (self j)
-        (if (>= j end) j
+    ; integer suffixes: u U l L, in any pile, read as (U? . L?)
+    (def suf
+      (fn (self j u l)
+        (if (>= j end) (pair (pair u l) j)
           (let ((b (byte-at src j)))
-            (if (if (= b 117) #t (if (= b 85) #t (if (= b 108) #t (= b 76))))
-              (self (+ j 1))
-              j)))))
-    (pair (first r) (skip-suf (rest r)))))
+            (match
+              ((if (= b 117) #t (= b 85)) (self (+ j 1) #t l))
+              ((if (= b 108) #t (= b 76)) (self (+ j 1) u #t))
+              (#t (pair (pair u l) j)))))))
+    (def s (suf (rest r) #f #f))
+    (pair (first r)
+      (pair (%cc-lit-kind (first r) (not (if hexp #t (= (byte-at src i) 48)))
+              (first (first s)) (rest (first s)))
+        (rest s)))))
+
+; The type of an integer literal, as C gives it (6.4.4.1, long long being
+; long): the first of a list that holds the value, the list set by the
+; suffix and by whether the literal is decimal.  A value past a long's reach
+; wrapped negative as it was read, and only an unsigned long holds it.
+(def %cc-lit-kind
+  (fn (_ v decimal? u? l?)
+    (def int? (if (>= v 0) (<= v 2147483647) #f))
+    (def uint? (if (>= v 0) (<= v 4294967295) #f))
+    (def long? (>= v 0))
+    (match
+      ((if u? l? #f) (lit ulong))
+      (u? (if uint? (lit uint) (lit ulong)))
+      (l? (if long? (lit long) (lit ulong)))
+      (decimal? (match (int? (lit int)) (long? (lit long)) (#t (lit ulong))))
+      (#t (match (int? (lit int)) (uint? (lit uint)) (long? (lit long)) (#t (lit ulong)))))))
 
 (def %cc-lex-str
   (fn (_ src end i)
@@ -282,9 +304,13 @@
         (if (if (= b 32) #t (if (= b 9) #t (if (= b 10) #t (= b 13))))
           (self src end (+ i 1) macros expanding acc)
           (if (%cc-digit? b)
+            ; (num VALUE), or (num VALUE KIND) when the literal is not an int
             (let ((r (%cc-lex-num src end i)))
-              (self src end (rest r) macros expanding
-                (pair (list (lit num) (first r)) acc)))
+              (self src end (rest (rest r)) macros expanding
+                (pair (if (eq? (first (rest r)) (lit int))
+                        (list (lit num) (first r))
+                        (list (lit num) (first r) (first (rest r))))
+                  acc)))
             (if (= b 34)                                   ; "
               (let ((r (%cc-lex-str src end (+ i 1))))
                 (self src end (rest r) macros expanding
