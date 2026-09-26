@@ -35,9 +35,18 @@
 ; it writes: arguments in x0, x1, x2 and x8, the answer in x0, frames off
 ; x20 in a region below the machine stack, x19 the frame's base, x21 the
 ; runtime helper and x22 the data.
+(module cc/gen)
 
 (import x/tool/asm)
 (import x/platform/syscall)
+(import cc/prims append byte-at byte-len convert filter length mem-ref-byte
+  proc-capture reverse sha256-hex-n string-append string-concat string=?
+  substring)
+(import cc/lex cc-lex)
+(import cc/parse cc-parse kind-size kind-align round-up)
+(import cc/eval kind-elem signed?)
+(import cc/macho macho-write! macho-data-at)
+(import cc/elf elf-write! elf-data-at elf-machine-x86-64)
 
 (def %cc-gen-no
   (fn (_ what)
@@ -130,8 +139,8 @@
 (def %cc-gen-data-at
   (fn (_ target codelen)
     (if (eq? target (lit macho-arm64))
-      (%cc-macho-data-at codelen)
-      (%cc-elf-data-at codelen))))
+      (macho-data-at codelen)
+      (elf-data-at codelen))))
 
 ; --- expressions -------------------------------------------------------------
 
@@ -198,7 +207,7 @@
 ; is 64 bits, so nothing re-extends from bit 31.
 (def %cc-gen-addr-bin!
   (fn (_ op ka kb)
-    (def size (fn (_ k) (%cc-kind-size (%cc-kind-elem k))))
+    (def size (fn (_ k) (kind-size (kind-elem k))))
     (match
       ((if (string=? op "-") (if (%cc-gen-addr-kind? ka) (%cc-gen-addr-kind? kb) #f) #f)
         (do (%cc-gen! (lit sub) x0 x0 x1)
@@ -248,7 +257,7 @@
 
 ; an array as the value it stands for: a pointer to its first element
 (def %cc-gen-decay
-  (fn (_ k) (if (%cc-gen-array? k) (list (lit ptr) (%cc-kind-elem k)) k)))
+  (fn (_ k) (if (%cc-gen-array? k) (list (lit ptr) (kind-elem k)) k)))
 
 ; KIND, if the compiled code holds it; WHAT names the holder in a refusal.
 ; A pointer may point at any kind -- what a load through it reads is
@@ -266,7 +275,7 @@
       ((eq? kind (lit uint)) (%cc-gen-no "the type unsigned int"))
       ((eq? kind (lit ulong)) (%cc-gen-no "the type unsigned long"))
       ((%cc-gen-ptr? kind) kind)
-      ((%cc-gen-array? kind) (do (self (%cc-kind-elem kind) "an array's element") kind))
+      ((%cc-gen-array? kind) (do (self (kind-elem kind) "an array's element") kind))
       ((if (pair? kind) (eq? (first kind) (lit struct)) #f) (%cc-gen-no "a struct"))
       (#t (%cc-gen-no
             (string-append what " that is not an integer, a pointer or an array"))))))
@@ -307,7 +316,7 @@
     (def bits (match ((%cc-gen-byte? kind) 56) ((%cc-gen-half? kind) 48) (#t 32)))
     (do (%cc-gen! (lit mov) x2 (imm bits))
         (%cc-gen! (lit lslv) x0 x0 x2)
-        (%cc-gen! (if (%cc-signed? kind) (lit asrv) (lit lsrv)) x0 x0 x2))))
+        (%cc-gen! (if (signed? kind) (lit asrv) (lit lsrv)) x0 x0 x2))))
 (def %cc-gen-loops ())      ; ((break-label . continue-label) ...), innermost first
 (def %cc-gen-funs ())       ; ((name . label) ...), every function in the program
 (def %cc-gen-rets ())       ; ((name . kind) ...), what each one returns
@@ -347,7 +356,7 @@
 ; room for BYTES in the data, at a multiple of ALIGN; answers where
 (def %cc-gen-data!
   (fn (_ bytes align)
-    (let ((off (%cc-round-up %cc-gen-databytes align)))
+    (let ((off (round-up %cc-gen-databytes align)))
       (do (set! %cc-gen-data (pair (pair off bytes) %cc-gen-data))
           (set! %cc-gen-databytes (+ off (length bytes)))
           off))))
@@ -387,13 +396,13 @@
     (if (not (null? (%cc-gen-global-find name)))
       (%cc-gen-no (string-append "a second declaration of " name)))
     (def init (first (rest (rest (rest node)))))
-    (def off (%cc-gen-data! (%cc-gen-const-bytes kind init) (%cc-kind-align kind)))
+    (def off (%cc-gen-data! (%cc-gen-const-bytes kind init) (kind-align kind)))
     (set! %cc-gen-globals (pair (pair name (pair off kind)) %cc-gen-globals))))
 
 ; the little-endian bytes of V at KIND's width
 (def %cc-gen-value-bytes
   (fn (_ kind v)
-    (%cc-gen-take (%cc-kind-size kind)
+    (%cc-gen-take (kind-size kind)
       (append (%cc-gen-le32 v) (%cc-gen-le32 (if (< v 0) 0xFFFFFFFF 0))))))
 
 ; the bytes a constant initializer INIT lays down for KIND
@@ -402,9 +411,9 @@
     (def zeros
       (fn (zeros n acc) (if (<= n 0) acc (zeros (- n 1) (pair 0 acc)))))
     (match
-      ((null? init) (zeros (%cc-kind-size kind) ()))
+      ((null? init) (zeros (kind-size kind) ()))
       ((%cc-gen-array? kind)
-        (let ((n (first (rest kind))) (ek (%cc-kind-elem kind)))
+        (let ((n (first (rest kind))) (ek (kind-elem kind)))
           (match
             ((eq? (first init) (lit initlist))
               (let ((items (first (rest init))))
@@ -542,8 +551,8 @@
   (fn (_ name kind)
     (if (not (null? (%cc-gen-find name)))
       (%cc-gen-no (string-append "a second declaration of " name)))
-    (def off (%cc-round-up %cc-gen-frame-bytes (%cc-kind-align kind)))
-    (set! %cc-gen-frame-bytes (+ off (%cc-kind-size kind)))
+    (def off (round-up %cc-gen-frame-bytes (kind-align kind)))
+    (set! %cc-gen-frame-bytes (+ off (kind-size kind)))
     (set! %cc-gen-env (pair (pair name (pair off kind)) %cc-gen-env))
     off))
 
@@ -565,7 +574,7 @@
             ((null? g) (%cc-gen-no (string-append "the name " name)))
             ; a load takes twelve bits of offset, in units of its width,
             ; and arm64's encoder masks a wider one
-            ((if (%cc-gen-array? (rest g)) #f (> (first g) (* 4095 (%cc-kind-size (rest g)))))
+            ((if (%cc-gen-array? (rest g)) #f (> (first g) (* 4095 (kind-size (rest g)))))
               (%cc-gen-no "more globals than a load reaches"))
             (#t (%cc-gen-place x22 (first g) (rest g)))))))))
 
@@ -604,11 +613,11 @@
           (list (lit array) (+ (byte-len (first (rest node))) 1) (lit char)))
         ((eq? t (lit idx))
           (let ((ka (self (first (rest node)))))
-            (%cc-kind-elem (if (%cc-gen-addr-kind? ka) ka (self (first (rest (rest node))))))))
+            (kind-elem (if (%cc-gen-addr-kind? ka) ka (self (first (rest (rest node))))))))
         ((eq? t (lit un))
           (let ((op (first (rest node))))
             (match
-              ((string=? op "*") (%cc-kind-elem (self (first (rest (rest node))))))
+              ((string=? op "*") (kind-elem (self (first (rest (rest node))))))
               ((string=? op "&") (list (lit ptr) (self (first (rest (rest node))))))
               (#t (lit int)))))
         ((eq? t (lit bin))
@@ -656,7 +665,7 @@
             (if (not (%cc-gen-addr-kind? k))
               (%cc-gen-no "the indirection of something that is not a pointer"))
             (do (%cc-gen-expr! (first (rest (rest node))))
-                (%cc-kind-elem k))))
+                (kind-elem k))))
         ((eq? t (lit idx)) (%cc-gen-index! (first (rest node)) (first (rest (rest node)))))
         (#t (%cc-gen-no "the address of something that is not a name, a pointee or an element"))))))
 
@@ -672,11 +681,11 @@
     (do (%cc-gen-expr! at)
         (asm-push! %cc-gen-asm x0)
         (%cc-gen-expr! (if swap a i))
-        (%cc-gen-scale! x0 (%cc-kind-size (%cc-kind-elem k)))
+        (%cc-gen-scale! x0 (kind-size (kind-elem k)))
         (%cc-gen! (lit mov) x1 x0)
         (asm-pop! %cc-gen-asm x0)
         (%cc-gen! (lit add) x0 x0 x1)
-        (%cc-kind-elem k))))
+        (kind-elem k))))
 
 (def %cc-gen-expr! ())
 (set! %cc-gen-expr!
@@ -686,7 +695,7 @@
         ((eq? t (lit num)) (%cc-gen-const! (first (rest node))))
         ((eq? t (lit str)) (%cc-gen-string-at! (first (rest node))))
         ((eq? t (lit szof))
-          (%cc-gen-const! (%cc-kind-size (%cc-gen-kind-of (first (rest node))))))
+          (%cc-gen-const! (kind-size (%cc-gen-kind-of (first (rest node))))))
         ((if (eq? t (lit un)) (string=? (first (rest node)) "&") #f)
           (%cc-gen-addr! (first (rest (rest node)))))
         ((if (eq? t (lit un)) (string=? (first (rest node)) "*") #f)
@@ -800,7 +809,7 @@
         ; re-extension's shift amount
         (%cc-gen! (lit mov) x8 x0)
         (if (%cc-gen-ptr? k)
-          (%cc-gen-bump! up (%cc-kind-size (%cc-kind-elem k)))
+          (%cc-gen-bump! up (kind-size (kind-elem k)))
           (do (%cc-gen-bump! up 1) (%cc-gen-int!)))
         (%cc-gen-store! at)
         (if after () (%cc-gen! (lit mov) x0 x8)))))
@@ -1112,8 +1121,8 @@
     (def off (first (rest at)))
     (def k (%cc-gen-place-kind at))
     (def n (first (rest k)))
-    (def ek (%cc-kind-elem k))
-    (def es (%cc-kind-size ek))
+    (def ek (kind-elem k))
+    (def es (kind-size ek))
     (def elem (fn (_ i) (%cc-gen-place base (+ off (* i es)) ek)))
     (match
       ((eq? (first init) (lit initlist))
@@ -1149,11 +1158,11 @@
   (fn (self at)
     (def k (%cc-gen-place-kind at))
     (if (%cc-gen-array? k)
-      (let ((ek (%cc-kind-elem k)) (base (first at)) (off (first (rest at))))
+      (let ((ek (kind-elem k)) (base (first at)) (off (first (rest at))))
         (def go
           (fn (go i)
             (if (>= i (first (rest k))) ()
-              (do (self (%cc-gen-place base (+ off (* i (%cc-kind-size ek))) ek))
+              (do (self (%cc-gen-place base (+ off (* i (kind-size ek))) ek))
                   (go (+ i 1))))))
         (go 0))
       (do (%cc-gen! (lit mov) x0 (imm 0)) (%cc-gen-put! at)))))
@@ -1313,12 +1322,12 @@
     (%cc-gen-scan! body)
     ; the slot past the named ones, for the runtime to write a byte from,
     ; then printf's area if the function calls it
-    (set! %cc-gen-scratch (%cc-round-up %cc-gen-frame-bytes 8))
+    (set! %cc-gen-scratch (round-up %cc-gen-frame-bytes 8))
     (set! %cc-gen-pf (+ %cc-gen-scratch 8))
     (def width
       (if (null? (%cc-gen-fun-find "printf")) (%cc-gen-printf-width body) 0))
     (def pf-slots (if (= width 0) 0 (+ 3 width)))
-    (def frame (%cc-round-up (+ %cc-gen-pf (* 8 pf-slots)) 16))
+    (def frame (round-up (+ %cc-gen-pf (* 8 pf-slots)) 16))
     (if (> frame 4080) (%cc-gen-no "a frame past four kilobytes"))
     (asm-label! %cc-gen-asm (%cc-gen-fun-label (first (rest f))))
     ; prologue: the caller's frame base is saved, this one taken off x20
@@ -1414,8 +1423,8 @@
     (def target (%cc-gen-target))
     (def image (cc-compile-image src target))
     (if (eq? target (lit macho-arm64))
-      (%cc-macho-write! path (first image) (rest image))
-      (%cc-elf-write! path (first image) (rest image) %cc-elf-machine-x86-64))))
+      (macho-write! path (first image) (rest image))
+      (elf-write! path (first image) (rest image) elf-machine-x86-64))))
 
 ; compile SRC, run the executable, print what it wrote, answer its status
 (def cc-exe-run
@@ -1426,3 +1435,5 @@
     (cc-compile src path)
     (let ((r (proc-capture (list path))))
       (do (display (rest r)) (first r)))))
+
+(provide cc/gen cc-compile cc-compile-image cc-exe-run)

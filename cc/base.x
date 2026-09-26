@@ -5,14 +5,19 @@
 ; @author [Jon Ruttan](jonruttan@gmail.com)
 ; @copyright 2026 Jon Ruttan
 ; @license MIT No Attribution (MIT-0)
-
-(import cc/prims)
+;
+; Not scoped: this file is the lang's seam.  It rebinds `write` so token
+; lists print bare, and defines the REPL printer run.x installs, and both
+; have to be the root's.
 
 (provide cc/base cc-version cc-preprocess cc-lex cc-parse cc-run
   cc-compile cc-compile-image cc-exe-run cc-argv cc-main
   %cc-repl-print)
 
 (def cc-version "0.1.0")
+
+; before the rebind below, so the write cc/prims keeps is x's own
+(import cc/prims)
 
 ; token lists render bare
 (def %cc-write ())
@@ -37,12 +42,12 @@
     (unless (null? result) (%cc-write result))
     (newline)))
 
-(include-once "./pp.x")
-(include-once "./lex.x")
-(include-once "./parse.x")
-(include-once "./eval.x")
-(include-once "./image.x")
-(include-once "./macho.x")
-(include-once "./elf.x")
-(include-once "./gen.x")
-(include-once "./cli.x")
+; Each part is a scoped module that imports what it uses from the others;
+; these imports bind the lang's public names in the root, where run.x and
+; the spec harness reach them.
+(import cc/pp cc-preprocess)
+(import cc/lex cc-lex)
+(import cc/parse cc-parse)
+(import cc/eval cc-run)
+(import cc/gen cc-compile cc-compile-image cc-exe-run)
+(import cc/cli cc-argv cc-main)

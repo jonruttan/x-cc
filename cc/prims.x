@@ -8,22 +8,15 @@
 ;
 ; Performance rules throughout: byte doors per character, Vector for the
 ; O(1) memory the pointer model needs, no defs at depth in anything hot.
+;
+; A scoped module: these names are the bundle's, and a file that uses one
+; imports it, so none of them is bound in the root beside another lang's.
+(module cc/prims)
 
 (import x/sys/file)
 (import x/sys/proc)
 (import x/type/vector)
 (import x/codec/sha256)
-
-(provide cc/prims
-  char->integer integer->char byte-at byte-len
-  string-length substring string-append string-concat string=?
-  list->string convert length reverse append map filter set-first!
-  vec-make vec-ref vec-set!
-  mem-make mem-ptr ptr-int word-ref word-set! mem-set-byte! mem-ref-byte
-  mem-ref-at mem-set-at!
-  file-read-all file-exists? file-write file-write-exec!
-  sha256-hex-n sha256-jit! proc-capture
-  sys-exit sys-getenv)
 
 (def char->integer (prim-ref (lit char) (lit ->int)))
 (def integer->char (prim-ref (lit int) (lit ->char)))
@@ -98,3 +91,19 @@
       (do (File write fd buf n) (File close fd)))))
 (def sys-exit (fn (_ n) (Sys exit n)))
 (def sys-getenv (fn (_ n) (Sys getenv n)))
+
+; x's own write.  cc/base rebinds the root's to print token lists bare, and
+; loads this module first so the one kept here is the original, which is
+; what an error or a value outside the C program is printed with.
+(def x-write write)
+
+(provide cc/prims
+  char->integer integer->char byte-at byte-len
+  string-length substring string-append string-concat string=?
+  list->string convert length reverse append map filter set-first!
+  vec-make vec-ref vec-set!
+  mem-make mem-ptr ptr-int word-ref word-set! mem-set-byte! mem-ref-byte
+  mem-ref-at mem-set-at!
+  file-read-all file-exists? file-write file-write-exec!
+  sha256-hex-n sha256-jit! proc-capture
+  sys-exit sys-getenv x-write)

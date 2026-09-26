@@ -11,6 +11,12 @@
 ;
 ; `run` interprets the program and exits with its status.  `build` compiles
 ; it to an executable at OUT, a.out when no -o is given.
+(module cc/cli)
+
+(import cc/prims file-exists? file-read-all file-write filter string-append
+  string=? sys-exit x-write)
+(import cc/eval cc-run)
+(import cc/gen cc-compile)
 
 (def %cc-cli-engine-flag?
   (fn (_ s)
@@ -50,7 +56,7 @@
                           #f)
                       (first (rest opts))
                       "a.out"))
-                  (guard (e (do (display "cc: build failed: ") (%cc-x-write e)
+                  (guard (e (do (display "cc: build failed: ") (x-write e)
                                 (newline) 1))
                     (do (cc-compile (file-read-all path) out) 0)))
                 (cc-run (file-read-all path))))
@@ -58,3 +64,5 @@
                   (string-append "cc: no such file: "
                     (string-append path "\n")))
                 (sys-exit 2))))))))
+
+(provide cc/cli cc-argv cc-main)

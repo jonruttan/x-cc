@@ -12,6 +12,11 @@
 ; never misreads them as identifiers).  Object-like macros splice here,
 ; token-wise: an id in the macro table lexes its body and continues --
 ; one level, self-reference guarded by the in-expansion name list.
+(module cc/lex)
+
+(import cc/prims byte-at byte-len convert integer->char length list->string
+  map reverse string-append string-concat string=? substring)
+(import cc/pp cc-preprocess)
 
 (def %cc-keywords
   (list "auto" "break" "case" "char" "const" "continue" "default" "do"
@@ -348,3 +353,5 @@
   (fn (_ src)
     (def pp (cc-preprocess src))
     (cc-tokenize (first pp) (rest pp))))
+
+(provide cc/lex cc-lex)
