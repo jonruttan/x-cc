@@ -68,14 +68,14 @@ tick
 
 ## the refusals
 
-### a global of an unsigned int
+### a global function pointer
 
 ```cc
 (display (guard (e (do (display "refused: ") (write e) ""))
-  (cc-exe-run "unsigned int g;\nint main(void) { return 0; }")))
+  (cc-exe-run "int (*fp)(void);\nint main(void) { return 0; }")))
 ```
 ---
-    refused: #<err:cc cc: compile: not built yet: the type unsigned int>
+    refused: #<err:cc cc: compile: not built yet: a global that is not an integer, a pointer, an array or a struct>
 
 ### one initialized by something that is not a constant
 

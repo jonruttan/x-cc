@@ -474,8 +474,9 @@
                       (pair (list (lit predec) (first r)) (rest r)))
                     (if (%cc-p-kw? toks (lit sizeof))
                       (if (%cc-cast? (rest toks))
+                        ; a size_t, which is an unsigned long here
                         (let ((tr (%cc-p-type (rest (rest toks)))))
-                          (pair (list (lit num) (kind-size (first tr)))
+                          (pair (list (lit num) (kind-size (first tr)) (lit ulong))
                             (%cc-p-eat (rest tr) ")")))
                         (let ((r (self (rest toks))))
                           (pair (list (lit szof) (first r)) (rest r))))

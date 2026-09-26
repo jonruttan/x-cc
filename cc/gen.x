@@ -14,21 +14,22 @@
 ;
 ; Expressions evaluate on a stack machine.  Each leaves its value in x0; a
 ; binary operator evaluates its left operand and pushes it, evaluates the
-; right, moves it to x1 and pops the left back into x0.  C's `int` is 32
-; bits: an operator whose result can leave that range sign-extends it again
-; from bit 31, so arithmetic wraps as C's does.
+; right, moves it to x1 and pops the left back into x0.  Every value is held
+; in the form of its kind (the integer kinds, below), and an operator whose
+; result can leave that form puts it back, so arithmetic wraps as C's does.
 ;
 ; Compiled so far: main and the functions beside it, with globals, locals and
-; parameters of `int`, `char`, `short` and their unsigned narrower kinds,
+; parameters of `char`, `short`, `int` and `long`, signed and unsigned,
 ; pointers to anything, and arrays, structs and unions of any of these, each
 ; at its kind's size,
 ; assignment, ++ and --, `if`/`else`, `while`, `do`, `for`, `break`,
 ; `continue`, `return` and calls (recursion included), over integer
-; constants and string literals, + - * / %, & | ^ << >>, the six
-; comparisons, &&, ||, the ternary, the comma, unary - ~ ! & *, subscripts,
-; `.` and `->`, and `putchar`, `puts` and `printf` of a literal format with
-; %d %c %s and %%, unless the program defines its own.  Everything else
-; refuses by name: `long` and the unsigned kinds of int's width or more, a
+; constants typed by their suffixes and string literals, + - * / %,
+; & | ^ << >>, the six comparisons, &&, ||, the ternary, the comma,
+; unary - ~ ! & *, subscripts, `.` and `->`, each in the kind C's usual
+; conversions give it, and `putchar`, `puts` and `printf` of a literal
+; format with %d %i %u %ld %li %lu %c %s and %%, unless the program
+; defines its own.  Everything else refuses by name: floating point, a
 ; struct passed or returned by value, function pointers, more than four
 ; arguments, and the rest of the runtime.
 ;
@@ -162,15 +163,78 @@
         (%cc-gen! (lit lslv) x0 x0 x2)
         (%cc-gen! (lit asrv) x0 x0 x2))))
 
+; x0 = its low 32 bits, zero-extended: an unsigned int's form
+(def %cc-gen-uint!
+  (fn (_)
+    (do (%cc-gen! (lit mov) x2 (imm 32))
+        (%cc-gen! (lit lslv) x0 x0 x2)
+        (%cc-gen! (lit lsrv) x0 x0 x2))))
+
+; --- integer kinds -----------------------------------------------------------
+; A value is held in a whole register in the form its kind reads it: an int,
+; and anything narrower, which C promotes to int, sign-extended from bit 31;
+; an unsigned int zero-extended; a long or an unsigned long as all 64 bits.
+; An operator works in the kind C's usual conversions give its operands and
+; leaves its result in that kind's form.  Between the 64-bit kinds and from
+; either 32-bit one to them, the form already is the conversion: an int's
+; sign-extension is the long, and the unsigned long, it converts to.
+
+(def %cc-gen-promote
+  (fn (_ k)
+    (match
+      ((eq? k (lit uint)) k)
+      ((eq? k (lit long)) k)
+      ((eq? k (lit ulong)) k)
+      (#t (lit int)))))
+
+(def %cc-gen-unsigned? (fn (_ k) (if (eq? k (lit uint)) #t (eq? k (lit ulong)))))
+
+; the kind two operands meet in, on LP64: an unsigned long if either is one,
+; else a long, which holds every unsigned int, else an unsigned int, else int
+(def %cc-gen-arith-kind
+  (fn (_ ka kb)
+    (def a (%cc-gen-promote ka))
+    (def b (%cc-gen-promote kb))
+    (match
+      ((if (eq? a (lit ulong)) #t (eq? b (lit ulong))) (lit ulong))
+      ((if (eq? a (lit long)) #t (eq? b (lit long))) (lit long))
+      ((if (eq? a (lit uint)) #t (eq? b (lit uint))) (lit uint))
+      (#t (lit int)))))
+
+; x0 into the form KIND holds a value in, after an operation that can leave it
+(def %cc-gen-normalize!
+  (fn (_ kind)
+    (match
+      ((eq? kind (lit int)) (%cc-gen-int!))
+      ((eq? kind (lit uint)) (%cc-gen-uint!))
+      (#t ()))))
+
 ; V as the int its low 32 bits make
 (def %cc-gen-int-of
   (fn (_ v)
     (let ((u (& v 4294967295)))
       (if (>= u 2147483648) (- u 4294967296) u))))
 
-; a constant into x0
+; a constant into x0, as an int
 (def %cc-gen-const!
   (fn (_ v) (asm-load-imm64! %cc-gen-asm x0 (%cc-gen-int-of v))))
+
+; V in the form a value of KIND is held in: an int's low 32 bits
+; sign-extended, an unsigned int's zero-extended, a 64-bit kind's as it is
+(def %cc-gen-form
+  (fn (_ v kind)
+    (match
+      ((eq? kind (lit int)) (%cc-gen-int-of v))
+      ((eq? kind (lit uint)) (& v 4294967295))
+      (#t v))))
+
+; a constant of KIND into x0, in that kind's form
+(def %cc-gen-const-kind!
+  (fn (_ v kind) (asm-load-imm64! %cc-gen-asm x0 (%cc-gen-form v kind))))
+
+; the kind of a literal: the one the lexer read, an int when it read none
+(def %cc-gen-num-kind
+  (fn (_ node) (if (null? (rest (rest node))) (lit int) (first (rest (rest node))))))
 
 ; x0 = 1 if the flags satisfy BRANCH, else 0
 (def %cc-gen-flag!
@@ -184,23 +248,94 @@
         (%cc-gen! (lit mov) x0 (imm 1))
         (asm-label! %cc-gen-asm done))))
 
-; the left operand in x0, the right in x1, the result to x0
+; The left operand in x0, the right in x1, both in KIND's form, the result
+; to x0 in it.  An unsigned int is zero-extended, so signed division and a
+; right shift that brings in zeros are the unsigned ones on it.
 (def %cc-gen-bin!
-  (fn (_ op)
+  (fn (_ op kind)
     (match
-      ((string=? op "+") (do (%cc-gen! (lit add) x0 x0 x1) (%cc-gen-int!)))
-      ((string=? op "-") (do (%cc-gen! (lit sub) x0 x0 x1) (%cc-gen-int!)))
-      ((string=? op "*") (do (%cc-gen! (lit mul) x0 x0 x1) (%cc-gen-int!)))
-      ((string=? op "/") (do (%cc-gen! (lit sdiv) x0 x0 x1) (%cc-gen-int!)))
+      ((string=? op "+") (do (%cc-gen! (lit add) x0 x0 x1) (%cc-gen-normalize! kind)))
+      ((string=? op "-") (do (%cc-gen! (lit sub) x0 x0 x1) (%cc-gen-normalize! kind)))
+      ((string=? op "*") (do (%cc-gen! (lit mul) x0 x0 x1) (%cc-gen-normalize! kind)))
+      ((string=? op "/")
+        (if (eq? kind (lit ulong)) (%cc-gen-udiv64! #f)
+          (do (%cc-gen! (lit sdiv) x0 x0 x1) (%cc-gen-normalize! kind))))
       ((string=? op "%")
-        (do (%cc-gen! (lit sdiv) x2 x0 x1)
-            (%cc-gen! (lit msub) x0 x2 x1 x0)))
+        (if (eq? kind (lit ulong)) (%cc-gen-udiv64! #t)
+          (do (%cc-gen! (lit sdiv) x2 x0 x1)
+              (%cc-gen! (lit msub) x0 x2 x1 x0))))
       ((string=? op "&") (%cc-gen! (lit and) x0 x0 x1))
       ((string=? op "|") (%cc-gen! (lit orr) x0 x0 x1))
       ((string=? op "^") (%cc-gen! (lit eor) x0 x0 x1))
-      ((string=? op "<<") (do (%cc-gen! (lit lslv) x0 x0 x1) (%cc-gen-int!)))
-      ((string=? op ">>") (%cc-gen! (lit asrv) x0 x0 x1))
+      ((string=? op "<<") (do (%cc-gen! (lit lslv) x0 x0 x1) (%cc-gen-normalize! kind)))
+      ((string=? op ">>")
+        (%cc-gen! (if (%cc-gen-unsigned? kind) (lit lsrv) (lit asrv)) x0 x0 x1))
       (#t (%cc-gen-no (string-append "the operator " op))))))
+
+; x0 / x1, or x0 % x1, as unsigned 64-bit numbers, from signed division
+; (Hacker's Delight 9-3).  A divisor below 2^63 divides the dividend halved,
+; which is non-negative, doubles the quotient and adds one more when what is
+; left is a divisor or more; that is unsigned r >= d, which for a divisor
+; below 2^63 is r negative or signed r >= d.  A divisor of 2^63 or more goes
+; in once or not at all, and when it does both have the top bit set, so a
+; signed compare orders them.  The dividend waits on the stack.
+(def %cc-gen-udiv64!
+  (fn (_ rem?)
+    (def big (%cc-gen-label))
+    (def more (%cc-gen-label))
+    (def done (%cc-gen-label))
+    (do (asm-push! %cc-gen-asm x0)
+        (%cc-gen! (lit cmp) x1 (imm 0))
+        (%cc-gen! (lit b/lt) (label big))
+        (%cc-gen! (lit mov) x2 (imm 1))
+        (%cc-gen! (lit lsrv) x0 x0 x2)
+        (%cc-gen! (lit sdiv) x0 x0 x1)
+        (%cc-gen! (lit lslv) x0 x0 x2)
+        (asm-pop! %cc-gen-asm x2)
+        (asm-push! %cc-gen-asm x2)
+        (%cc-gen! (lit mul) x8 x0 x1)
+        (%cc-gen! (lit sub) x2 x2 x8)
+        (%cc-gen! (lit cmp) x2 (imm 0))
+        (%cc-gen! (lit b/lt) (label more))
+        (%cc-gen! (lit cmp) x2 x1)
+        (%cc-gen! (lit b/lt) (label done))
+        (asm-label! %cc-gen-asm more)
+        (%cc-gen! (lit add) x0 x0 (imm 1))
+        (%cc-gen! (lit sub) x2 x2 x1)
+        (%cc-gen! (lit b) (label done))
+        (asm-label! %cc-gen-asm big)
+        (asm-pop! %cc-gen-asm x2)
+        (asm-push! %cc-gen-asm x2)
+        (%cc-gen! (lit mov) x0 (imm 0))
+        (%cc-gen! (lit cmp) x2 (imm 0))
+        (%cc-gen! (lit b/ge) (label done))
+        (%cc-gen! (lit cmp) x2 x1)
+        (%cc-gen! (lit b/lt) (label done))
+        (%cc-gen! (lit mov) x0 (imm 1))
+        (%cc-gen! (lit sub) x2 x2 x1)
+        (asm-label! %cc-gen-asm done)
+        (asm-pop! %cc-gen-asm x8)
+        (if rem? (%cc-gen! (lit mov) x0 x2) ()))))
+
+; x0 and x1, both in KIND's form, compared: an unsigned int's form is a
+; non-negative 64-bit number, so a signed compare orders them; an unsigned
+; long's top bits are flipped first, which makes the signed order the
+; unsigned one
+(def %cc-gen-compare!
+  (fn (_ kind)
+    (do (if (eq? kind (lit ulong))
+          (do (asm-load-imm64! %cc-gen-asm x2 (<< 1 63))
+              (%cc-gen! (lit eor) x0 x0 x2)
+              (%cc-gen! (lit eor) x1 x1 x2))
+          ())
+        (%cc-gen! (lit cmp) x0 x1))))
+
+; x1 into an unsigned int's form: a signed operand converted to one
+(def %cc-gen-uint-x1!
+  (fn (_)
+    (do (%cc-gen! (lit mov) x2 (imm 32))
+        (%cc-gen! (lit lslv) x1 x1 x2)
+        (%cc-gen! (lit lsrv) x1 x1 x2))))
 
 ; + and - with an address among the operands, left in x0 and right in x1:
 ; the count beside an address moves it by that many elements, and two
@@ -238,11 +373,9 @@
 ; Every local and parameter has the size and alignment of its kind, at a
 ; fixed offset from x19, which the prologue points at the frame it took off
 ; x20.  A value loads at its width, extended by its sign -- a char
-; sign-extends, an unsigned char zero-extends -- and arithmetic happens in
-; int, which is what C's promotions make of every kind narrower than int.
-; A store narrows the value to its kind's width, and so does the value an
-; assignment answers.  long and the unsigned kinds of int's width or more
-; want arithmetic of their own, so they refuse by name.
+; sign-extends, an unsigned char zero-extends -- into the form its kind
+; is held in (the integer kinds, above).  A store converts the value to its
+; place's kind, and so does the value an assignment answers.
 ;
 ; A pointer is an eight-byte address.  An array is its elements end to
 ; end, and where it is used as a value it stands for its first element's
@@ -293,9 +426,9 @@
       ((eq? kind (lit uchar)) kind)
       ((eq? kind (lit short)) kind)
       ((eq? kind (lit ushort)) kind)
-      ((eq? kind (lit long)) (%cc-gen-no "the type long"))
-      ((eq? kind (lit uint)) (%cc-gen-no "the type unsigned int"))
-      ((eq? kind (lit ulong)) (%cc-gen-no "the type unsigned long"))
+      ((eq? kind (lit long)) kind)
+      ((eq? kind (lit uint)) kind)
+      ((eq? kind (lit ulong)) kind)
       ((%cc-gen-ptr? kind) kind)
       ((%cc-gen-array? kind) (do (self (kind-elem kind) "an array's element") kind))
       ((%cc-gen-struct? kind)
@@ -330,7 +463,8 @@
       ((eq? kind (lit uchar)) (lit ldrb))
       ((eq? kind (lit short)) (lit ldrsh))
       ((eq? kind (lit ushort)) (lit ldrh))
-      ((%cc-gen-ptr? kind) (lit ldr))
+      ((eq? kind (lit uint)) (lit ldrw))
+      ((%cc-gen-wide? kind) (lit ldr))
       (#t (do (%cc-gen-value-kind! kind) (lit ldrsw))))))
 
 (def %cc-gen-store-op
@@ -338,8 +472,13 @@
     (match
       ((%cc-gen-byte? kind) (lit strb))
       ((%cc-gen-half? kind) (lit strh))
-      ((%cc-gen-ptr? kind) (lit str))
+      ((%cc-gen-wide? kind) (lit str))
       (#t (do (%cc-gen-value-kind! kind) (lit strw))))))
+
+; the kinds held in all 64 bits: an address, a long, an unsigned long
+(def %cc-gen-wide?
+  (fn (_ k)
+    (match ((%cc-gen-ptr? k) #t) ((eq? k (lit long)) #t) ((eq? k (lit ulong)) #t) (#t #f))))
 
 ; x0 as a value of KIND: shifted to the top of the register and back down,
 ; arithmetically for a signed kind
@@ -364,14 +503,14 @@
 (def %cc-gen-scratch 0)     ; the slot past the named ones, which the runtime writes from
 
 ; A function that calls printf has an area past the scratch slot for it:
-; the count of bytes written so far, the cursor into the digits, sixteen
-; bytes the digits are built in, then one slot for each argument after the
-; format.  It is in the frame, so a printf reached from another's arguments,
-; or from a recursive call, has its own.
+; the count of bytes written so far, the cursor into the digits, twenty-four
+; bytes the digits are built in -- an unsigned long has twenty -- then one
+; slot for each argument after the format.  It is in the frame, so a printf
+; reached from another's arguments, or from a recursive call, has its own.
 (def %cc-gen-pf 0)          ; where the area starts
 (def %cc-gen-pf-count 0)
 (def %cc-gen-pf-cursor 8)
-(def %cc-gen-pf-end 32)     ; the digits end here, and the arguments start
+(def %cc-gen-pf-end 40)     ; the digits end here, and the arguments start
 
 ; The data a program carries, in the segment the container maps readable and
 ; writable on the page after the code: the globals first, each at the size
@@ -435,7 +574,7 @@
 (def %cc-gen-value-bytes
   (fn (_ kind v)
     (%cc-gen-take (kind-size kind)
-      (append (%cc-gen-le32 v) (%cc-gen-le32 (if (< v 0) 0xFFFFFFFF 0))))))
+      (append (%cc-gen-le32 v) (%cc-gen-le32 (>> v 32))))))
 
 ; the bytes a constant initializer INIT lays down for KIND
 (def %cc-gen-const-bytes
@@ -496,41 +635,70 @@
       (#t (%cc-gen-value-bytes kind (%cc-gen-fold init))))))
 
 ; What a global starts out holding.  C asks for a constant here, so the
-; value is worked out now and the program starts with it in place.
+; value is worked out now: each operation in the kind C's conversions give
+; it, its result in that kind's form, as the code for it would leave it.
+; The program starts with the value's low bytes, as many as the global's
+; kind has, in place.
 (def %cc-gen-fold
   (fn (self node)
     (let ((t (first node)))
       (match
-        ((eq? t (lit num)) (%cc-gen-int-of (first (rest node))))
+        ((eq? t (lit num)) (%cc-gen-form (first (rest node)) (%cc-gen-num-kind node)))
         ((eq? t (lit un))
           (let ((op (first (rest node))) (v (self (first (rest (rest node))))))
-            (%cc-gen-int-of
+            (%cc-gen-form
               (match
                 ((string=? op "-") (- 0 v))
                 ((string=? op "~") (- (- 0 v) 1))
                 ((string=? op "!") (if (= v 0) 1 0))
-                (#t (%cc-gen-no (string-append "a global initialized with " op)))))))
+                (#t (%cc-gen-no (string-append "a global initialized with " op))))
+              (%cc-gen-kind-of node))))
         ((eq? t (lit bin))
-          (%cc-gen-int-of
-            (%cc-gen-fold-bin (first (rest node))
-              (self (first (rest (rest node))))
-              (self (first (rest (rest (rest node))))))))
+          (let ((a (self (first (rest (rest node)))))
+                (b (self (first (rest (rest (rest node)))))))
+            (%cc-gen-fold-bin (first (rest node)) a b (%cc-gen-kind-of node))))
         (#t (%cc-gen-no "a global initialized by something other than a constant"))))))
 
+; OP on the constants A and B, in KIND: each operand converted to it first,
+; but a shift's count, which keeps its own
 (def %cc-gen-fold-bin
-  (fn (_ op a b)
-    (match
-      ((string=? op "+") (+ a b))
-      ((string=? op "-") (- a b))
-      ((string=? op "*") (* a b))
-      ((string=? op "/") (/ a b))
-      ((string=? op "%") (% a b))
-      ((string=? op "&") (& a b))
-      ((string=? op "|") (| a b))
-      ((string=? op "^") (^ a b))
-      ((string=? op "<<") (<< a b))
-      ((string=? op ">>") (>> a b))
-      (#t (%cc-gen-no (string-append "a global initialized with " op))))))
+  (fn (_ op a b kind)
+    (def shift? (if (string=? op "<<") #t (string=? op ">>")))
+    (def x (%cc-gen-form a kind))
+    (def y (if shift? b (%cc-gen-form b kind)))
+    (def wide? (eq? kind (lit ulong)))
+    (%cc-gen-form
+      (match
+        ((string=? op "+") (+ x y))
+        ((string=? op "-") (- x y))
+        ((string=? op "*") (* x y))
+        ((string=? op "/") (if wide? (%cc-gen-fold-udiv x y #f) (/ x y)))
+        ((string=? op "%") (if wide? (%cc-gen-fold-udiv x y #t) (% x y)))
+        ((string=? op "&") (& x y))
+        ((string=? op "|") (| x y))
+        ((string=? op "^") (^ x y))
+        ((string=? op "<<") (<< x y))
+        ; an unsigned long past 2^63 shifts in zeros
+        ((string=? op ">>")
+          (if (if wide? (if (< x 0) (> y 0) #f) #f)
+            (& (>> x y) (- (<< 1 (- 64 y)) 1))
+            (>> x y)))
+        (#t (%cc-gen-no (string-append "a global initialized with " op))))
+      kind)))
+
+; N / D, or N % D when REM?, both read as unsigned 64-bit values: the
+; division the code does at run time (%cc-gen-udiv64!), on constants
+(def %cc-gen-fold-udiv
+  (fn (_ n d rem?)
+    (def top (<< 1 63))
+    ; unsigned order is signed order with the top bit flipped
+    (def at-least? (fn (_ a b) (>= (^ a top) (^ b top))))
+    (def q
+      (if (< d 0)
+        (if (at-least? n d) 1 0)
+        (let ((q0 (<< (/ (& (>> n 1) (- top 1)) d) 1)))
+          (if (at-least? (- n (* q0 d)) d) (+ q0 1) q0))))
+    (if rem? (- n (* q d)) q)))
 
 ; the bytes of the data: every piece at its offset, zeros between.  The
 ; pieces are listed last-laid first, so the bytes build from the end back.
@@ -638,13 +806,24 @@
   (fn (_ place)
     (%cc-gen! (%cc-gen-store-op (%cc-gen-place-kind place)) x0 (%cc-gen-place-mem place))))
 
-; an assignment's store: the value it answers is narrowed as the stored
-; one was, which an int or a pointer already is
+; x0, a value of kind FROM, converted to KIND: narrowed to a char or short,
+; and into an int's or an unsigned int's form from any other kind.  The
+; 64-bit kinds need nothing: every value's form is already its conversion
+; to them.
+(def %cc-gen-convert!
+  (fn (_ kind from)
+    (match
+      ((if (%cc-gen-byte? kind) #t (%cc-gen-half? kind)) (%cc-gen-narrow! kind))
+      ((eq? kind (lit int)) (if (eq? (%cc-gen-promote from) (lit int)) () (%cc-gen-int!)))
+      ((eq? kind (lit uint)) (if (eq? from (lit uint)) () (%cc-gen-uint!)))
+      (#t ()))))
+
+; an assignment's store, of a value of kind FROM: the value it answers is
+; converted as the stored one was
 (def %cc-gen-store!
-  (fn (_ place)
-    (def k (%cc-gen-place-kind place))
+  (fn (_ place from)
     (do (%cc-gen-put! place)
-        (if (if (%cc-gen-byte? k) #t (%cc-gen-half? k)) (%cc-gen-narrow! k) ()))))
+        (%cc-gen-convert! (%cc-gen-place-kind place) from))))
 
 ; A value of KIND whose address is in x0, into x0: loaded, unless it is an
 ; array, whose value is that address.
@@ -661,6 +840,8 @@
     (let ((t (first node)))
       (match
         ((eq? t (lit var)) (%cc-gen-place-kind (%cc-gen-place-of (first (rest node)))))
+        ((eq? t (lit num)) (%cc-gen-num-kind node))
+        ((eq? t (lit szof)) (lit ulong))
         ((eq? t (lit str))
           (list (lit array) (+ (byte-len (first (rest node))) 1) (lit char)))
         ((eq? t (lit idx))
@@ -671,7 +852,8 @@
             (match
               ((string=? op "*") (kind-elem (self (first (rest (rest node))))))
               ((string=? op "&") (list (lit ptr) (self (first (rest (rest node))))))
-              (#t (lit int)))))
+              ((string=? op "!") (lit int))
+              (#t (%cc-gen-promote (self (first (rest (rest node)))))))))
         ((eq? t (lit bin))
           (%cc-gen-bin-kind (first (rest node))
             (self (first (rest (rest node)))) (self (first (rest (rest (rest node)))))))
@@ -681,7 +863,8 @@
           (let ((ka (self (first (rest (rest node))))))
             (if (%cc-gen-addr-kind? ka) (%cc-gen-decay ka)
               (let ((kb (self (first (rest (rest (rest node)))))))
-                (if (%cc-gen-addr-kind? kb) (%cc-gen-decay kb) (lit int))))))
+                (if (%cc-gen-addr-kind? kb) (%cc-gen-decay kb)
+                  (%cc-gen-arith-kind ka kb))))))
         ((eq? t (lit comma)) (self (first (rest (rest node)))))
         ((eq? t (lit dot))
           (rest (%cc-gen-field (self (first (rest node))) (first (rest (rest node))))))
@@ -692,19 +875,19 @@
           (let ((r (%cc-gen-ret-find (first (rest node))))) (if (null? r) (lit int) r)))
         (#t (lit int))))))
 
-; the kind + or - answers: an address stays one, two of them make a count
+; The kind a binary operator answers: + and - keep an address one and make
+; two of them a count (a long, as ptrdiff_t is); a shift answers its left
+; operand's kind; anything else, the kind its operands meet in.
 (def %cc-gen-bin-kind
   (fn (_ op ka kb)
     (match
-      ((string=? op "+")
-        (match ((%cc-gen-addr-kind? ka) (%cc-gen-decay ka))
-               ((%cc-gen-addr-kind? kb) (%cc-gen-decay kb))
-               (#t (lit int))))
-      ((string=? op "-")
-        (if (if (%cc-gen-addr-kind? ka) (not (%cc-gen-addr-kind? kb)) #f)
-          (%cc-gen-decay ka)
-          (lit int)))
-      (#t (lit int)))))
+      ((if (string=? op "+") #t (string=? op "-"))
+        (match ((if (%cc-gen-addr-kind? ka) (%cc-gen-addr-kind? kb) #f) (lit long))
+               ((%cc-gen-addr-kind? ka) (%cc-gen-decay ka))
+               ((if (string=? op "+") (%cc-gen-addr-kind? kb) #f) (%cc-gen-decay kb))
+               (#t (%cc-gen-arith-kind ka kb))))
+      ((if (string=? op "<<") #t (string=? op ">>")) (%cc-gen-promote ka))
+      (#t (%cc-gen-arith-kind ka kb)))))
 
 ; The address of what NODE names, into x0, answering the kind there: a
 ; name's own place, the pointee of a `*`, or an element.
@@ -764,10 +947,10 @@
   (fn (self node)
     (let ((t (first node)))
       (match
-        ((eq? t (lit num)) (%cc-gen-const! (first (rest node))))
+        ((eq? t (lit num)) (%cc-gen-const-kind! (first (rest node)) (%cc-gen-num-kind node)))
         ((eq? t (lit str)) (%cc-gen-string-at! (first (rest node))))
         ((eq? t (lit szof))
-          (%cc-gen-const! (kind-size (%cc-gen-kind-of (first (rest node))))))
+          (%cc-gen-const-kind! (kind-size (%cc-gen-kind-of (first (rest node)))) (lit ulong)))
         ((if (eq? t (lit un)) (string=? (first (rest node)) "&") #f)
           (%cc-gen-addr! (first (rest (rest node)))))
         ((if (eq? t (lit un)) (string=? (first (rest node)) "*") #f)
@@ -776,11 +959,14 @@
           (%cc-gen-load-at! (%cc-gen-index! (first (rest node)) (first (rest (rest node))))))
         ((eq? t (lit un))
           (let ((op (first (rest node))))
+            (def k (%cc-gen-promote (%cc-gen-kind-of (first (rest (rest node))))))
             (do (self (first (rest (rest node))))
                 (match
                   ((string=? op "-")
-                    (do (%cc-gen! (lit sub) x0 xzr x0) (%cc-gen-int!)))
-                  ((string=? op "~") (%cc-gen! (lit orn) x0 xzr x0))
+                    (do (%cc-gen! (lit sub) x0 xzr x0) (%cc-gen-normalize! k)))
+                  ((string=? op "~")
+                    (do (%cc-gen! (lit orn) x0 xzr x0)
+                        (if (eq? k (lit uint)) (%cc-gen-uint!) ())))
                   ((string=? op "!")
                     (do (%cc-gen! (lit cmp) x0 (imm 0))
                         (%cc-gen-flag! (lit b/eq))))
@@ -791,18 +977,27 @@
             (def kb (%cc-gen-kind-of (first (rest (rest (rest node))))))
             (if (if (%cc-gen-struct? ka) #t (%cc-gen-struct? kb))
               (%cc-gen-no (string-append "the operator " op " on a struct")))
+            (def addr? (if (%cc-gen-addr-kind? ka) #t (%cc-gen-addr-kind? kb)))
+            ; a shift works in its left operand's kind, anything else in the
+            ; kind its two operands meet in
+            (def k (if (if (string=? op "<<") #t (string=? op ">>"))
+                     (%cc-gen-promote ka)
+                     (%cc-gen-arith-kind ka kb)))
             (do (self (first (rest (rest node))))
                 (asm-push! %cc-gen-asm x0)
                 (self (first (rest (rest (rest node)))))
                 (%cc-gen! (lit mov) x1 x0)
                 (asm-pop! %cc-gen-asm x0)
+                ; an int converted to an unsigned int takes that kind's form
+                (if (if (eq? k (lit uint)) (not addr?) #f)
+                  (do (%cc-gen-uint!) (%cc-gen-uint-x1!))
+                  ())
                 (match
                   ((eq? t (lit cmp))
-                    (do (%cc-gen! (lit cmp) x0 x1)
+                    (do (if addr? (%cc-gen! (lit cmp) x0 x1) (%cc-gen-compare! k))
                         (%cc-gen-flag! (%cc-gen-branch op))))
-                  ((if (%cc-gen-addr-kind? ka) #t (%cc-gen-addr-kind? kb))
-                    (%cc-gen-addr-bin! op ka kb))
-                  (#t (%cc-gen-bin! op))))))
+                  (addr? (%cc-gen-addr-bin! op ka kb))
+                  (#t (%cc-gen-bin! op k))))))
         ((eq? t (lit var))
           (let ((at (%cc-gen-place-of (first (rest node)))))
             (if (%cc-gen-aggregate? (%cc-gen-place-kind at))
@@ -813,13 +1008,14 @@
         ((eq? t (lit assign))
           (let ((lv (first (rest node))))
             (def k (%cc-gen-kind-of lv))
+            (def from (%cc-gen-kind-of (first (rest (rest node)))))
             (if (%cc-gen-array? k)
               (%cc-gen-no "an assignment to an array"))
             (match
               ((%cc-gen-struct? k) (%cc-gen-struct-assign! lv (first (rest (rest node)))))
               ((eq? (first lv) (lit var))
                 (do (self (first (rest (rest node))))
-                    (%cc-gen-store! (%cc-gen-place-of (first (rest lv))))))
+                    (%cc-gen-store! (%cc-gen-place-of (first (rest lv))) from)))
               ; any other place is an address worked out at run time: it
               ; waits on the stack while the value is
               (#t
@@ -827,17 +1023,21 @@
                   (do (asm-push! %cc-gen-asm x0)
                       (self (first (rest (rest node))))
                       (asm-pop! %cc-gen-asm x1)
-                      (%cc-gen-store! (%cc-gen-place x1 0 k))))))))
+                      (%cc-gen-store! (%cc-gen-place x1 0 k) from)))))))
         ((%cc-gen-step? t) (%cc-gen-step! t node))
         ((eq? t (lit ternary))
           (let ((else- (%cc-gen-label)) (done (%cc-gen-label)))
+            ; each arm converts to the kind the two meet in
+            (def k (%cc-gen-kind-of node))
+            (def arm
+              (fn (_ n) (do (self n) (%cc-gen-convert! k (%cc-gen-kind-of n)))))
             (do (self (first (rest node)))
                 (%cc-gen! (lit cmp) x0 (imm 0))
                 (%cc-gen! (lit b/eq) (label else-))
-                (self (first (rest (rest node))))
+                (arm (first (rest (rest node))))
                 (%cc-gen! (lit b) (label done))
                 (asm-label! %cc-gen-asm else-)
-                (self (first (rest (rest (rest node)))))
+                (arm (first (rest (rest (rest node)))))
                 (asm-label! %cc-gen-asm done))))
         ((if (eq? t (lit and)) #t (eq? t (lit or)))
           ; the right operand runs only when the left did not settle it
@@ -890,8 +1090,8 @@
         (%cc-gen! (lit mov) x8 x0)
         (if (%cc-gen-ptr? k)
           (%cc-gen-bump! up (kind-size (kind-elem k)))
-          (do (%cc-gen-bump! up 1) (%cc-gen-int!)))
-        (%cc-gen-store! at)
+          (do (%cc-gen-bump! up 1) (%cc-gen-normalize! (%cc-gen-promote k))))
+        (%cc-gen-store! at k)
         (if after () (%cc-gen! (lit mov) x0 x8)))))
 
 ; A call evaluates its arguments left to right, each onto the stack, then
@@ -1019,13 +1219,14 @@
 ; printf of a literal format is laid out here, at compile time: the format
 ; splits into runs of text and conversions, a %s's literal and a %% join the
 ; text around them, and what is left for run time is a write per run of
-; text, one per %c, and a conversion to decimal per %d.  Every argument is
-; evaluated before anything is written, as a call's are.  It answers the
-; count of bytes written, as C's does.
+; text, one per %c, and a conversion to decimal per %d, %u, %ld or %lu (%i
+; and %li are %d and %ld).  Every argument is evaluated before anything is
+; written, as a call's are.  It answers the count of bytes written, as C's
+; does.
 
 ; (PIECES . ARGS) for FORMAT and the arguments after it: each piece is
-; (text . STRING), or (d . N), (c . N) or (s . N) for the Nth argument left
-; to run time
+; (text . STRING), or (CONV . N) for the Nth argument left to run time,
+; CONV one of d u ld lu c s
 (def %cc-gen-printf-plan
   (fn (_ fmt args)
     (def n (byte-len fmt))
@@ -1045,25 +1246,32 @@
           ((not (= (byte-at fmt i) 37)) (self (+ i 1) from text args pieces later))
           ((>= (+ i 1) n) (%cc-gen-no "printf's % at the end of its format"))
           (#t
-            (let ((c (byte-at fmt (+ i 1)))
-                  (text (pair (substring fmt from i) text)))
+            (let ((text (pair (substring fmt from i) text)))
+              ; a conversion: an l for a long, then its letter
+              (def l? (if (< (+ i 2) n) (= (byte-at fmt (+ i 1)) 108) #f))
+              (def at (if l? (+ i 2) (+ i 1)))
+              (def c (byte-at fmt at))
+              (def next (+ at 1))
+              (def conv
+                (match
+                  ((if l? #f (= c 37)) (lit pct))
+                  ((if (= c 100) #t (= c 105)) (if l? (lit ld) (lit d)))
+                  ((= c 117) (if l? (lit lu) (lit u)))
+                  ((if l? #f (= c 99)) (lit c))
+                  ((if l? #f (= c 115)) (lit s))
+                  (#t (%cc-gen-no (string-append "printf's %" (substring fmt (+ i 1) next))))))
               (match
-                ((= c 37) (self (+ i 2) (+ i 2) (pair "%" text) args pieces later))
-                ((not (if (= c 115) #t (if (= c 100) #t (= c 99))))
-                  (%cc-gen-no
-                    (string-append "printf's %" (substring fmt (+ i 1) (+ i 2)))))
+                ((eq? conv (lit pct)) (self next next (pair "%" text) args pieces later))
                 ((null? args) (%cc-gen-no "printf with fewer arguments than conversions"))
                 ; a literal's text joins the text around it
-                ((if (= c 115) (eq? (first (first args)) (lit str)) #f)
-                  (self (+ i 2) (+ i 2) (pair (first (rest (first args))) text)
+                ((if (eq? conv (lit s)) (eq? (first (first args)) (lit str)) #f)
+                  (self next next (pair (first (rest (first args))) text)
                     (rest args) pieces later))
-                ((if (= c 115) (not (%cc-gen-addr-kind? (%cc-gen-kind-of (first args)))) #f)
+                ((if (eq? conv (lit s)) (not (%cc-gen-addr-kind? (%cc-gen-kind-of (first args)))) #f)
                   (%cc-gen-no "printf's %s of something that is not a string"))
                 (#t
-                  (self (+ i 2) (+ i 2) () (rest args)
-                    (pair (pair (match ((= c 100) (lit d)) ((= c 99) (lit c)) (#t (lit s)))
-                                (length later))
-                      (flush text pieces))
+                  (self next next () (rest args)
+                    (pair (pair conv (length later)) (flush text pieces))
                     (pair (first args) later)))))))))
     (go 0 0 () args () ())))
 
@@ -1099,42 +1307,58 @@
         (%cc-gen! (lit blr) x21)
         (%cc-gen-printf-count!))))
 
-; A %d: the sign first if there is one, then the digits, built from the end
-; of the buffer back.  The cursor lives in its slot rather than a register:
-; x86-64's multiply-and-subtract leaves its product where the quotient was,
-; so the quotient is copied out first and every register is spoken for.
-; The magnitude of the most negative int still fits the 64-bit register.
+; A number, as CONV reads it -- d and ld signed, u and lu unsigned, the l
+; forms all 64 bits: the sign first if there is one, then the digits, built
+; from the end of the buffer back.  The number and the cursor live in their
+; slots rather than registers, which the division and the multiply take.
 (def %cc-gen-printf-int!
-  (fn (_ slot)
+  (fn (_ slot conv)
     (def cursor (mem x19 (+ %cc-gen-pf %cc-gen-pf-cursor)))
     (def end (+ %cc-gen-pf %cc-gen-pf-end))
     (def plus (%cc-gen-label))
     (def digit (%cc-gen-label))
+    (def signed? (if (eq? conv (lit d)) #t (eq? conv (lit ld))))
     (do (%cc-gen! (lit ldr) x0 (mem x19 slot))
-        (%cc-gen! (lit cmp) x0 (imm 0))
-        (%cc-gen! (lit b/ge) (label plus))
-        (%cc-gen! (lit sub) x0 xzr x0)
-        (%cc-gen! (lit str) x0 (mem x19 slot))
-        (%cc-gen! (lit mov) x0 (imm 45))
-        (%cc-gen-put-byte!)
-        (%cc-gen-printf-count!)
-        (%cc-gen! (lit ldr) x0 (mem x19 slot))
-        (asm-label! %cc-gen-asm plus)
+        ; %d and %u read an int and an unsigned int: the argument's low 32
+        ; bits, in that kind's form
+        (match
+          ((eq? conv (lit d)) (do (%cc-gen-int!) (%cc-gen! (lit str) x0 (mem x19 slot))))
+          ((eq? conv (lit u)) (do (%cc-gen-uint!) (%cc-gen! (lit str) x0 (mem x19 slot))))
+          (#t ()))
+        (if signed?
+          (do (%cc-gen! (lit cmp) x0 (imm 0))
+              (%cc-gen! (lit b/ge) (label plus))
+              (%cc-gen! (lit sub) x0 xzr x0)
+              (%cc-gen! (lit str) x0 (mem x19 slot))
+              (%cc-gen! (lit mov) x0 (imm 45))
+              (%cc-gen-put-byte!)
+              (%cc-gen-printf-count!)
+              (asm-label! %cc-gen-asm plus))
+          ())
         (%cc-gen! (lit mov) x2 x19)
         (%cc-gen! (lit add) x2 x2 (imm end))
         (%cc-gen! (lit str) x2 cursor)
-        (%cc-gen! (lit mov) x8 (imm 10))
+        ; A digit a turn, the number read as unsigned: halved, it is not
+        ; negative, so a signed division by five is the unsigned one by ten.
+        ; That also carries the most negative long, whose negation is itself.
         (asm-label! %cc-gen-asm digit)
-        (%cc-gen! (lit sdiv) x2 x0 x8)
-        (%cc-gen! (lit mov) x1 x2)
-        (%cc-gen! (lit msub) x0 x2 x8 x0)
+        (%cc-gen! (lit ldr) x0 (mem x19 slot))
+        (%cc-gen! (lit mov) x2 (imm 1))
+        (%cc-gen! (lit lsrv) x0 x0 x2)
+        (%cc-gen! (lit mov) x1 (imm 5))
+        (%cc-gen! (lit sdiv) x0 x0 x1)
+        (%cc-gen! (lit mov) x8 x0)
+        (%cc-gen! (lit mov) x1 (imm 10))
+        (%cc-gen! (lit mul) x2 x8 x1)
+        (%cc-gen! (lit ldr) x0 (mem x19 slot))
+        (%cc-gen! (lit sub) x0 x0 x2)
         (%cc-gen! (lit add) x0 x0 (imm 48))
         (%cc-gen! (lit ldr) x2 cursor)
         (%cc-gen! (lit sub) x2 x2 (imm 1))
         (%cc-gen! (lit strb) x0 (mem x2 0))
         (%cc-gen! (lit str) x2 cursor)
-        (%cc-gen! (lit mov) x0 x1)
-        (%cc-gen! (lit cmp) x0 (imm 0))
+        (%cc-gen! (lit str) x8 (mem x19 slot))
+        (%cc-gen! (lit cmp) x8 (imm 0))
         (%cc-gen! (lit b/ne) (label digit))
         ; the digits, from the cursor to the end
         (%cc-gen! (lit ldr) x1 cursor)
@@ -1180,7 +1404,7 @@
                     (do (%cc-gen! (lit ldr) x0 (mem x19 (arg-at (rest p))))
                         (%cc-gen-put-cstr!)
                         (%cc-gen-printf-count!)))
-                  (#t (%cc-gen-printf-int! (arg-at (rest p)))))
+                  (#t (%cc-gen-printf-int! (arg-at (rest p)) (first p))))
                 (self (rest pieces)))))))
     (do (push-all later)
         (pop-all (- (length later) 1))
@@ -1436,9 +1660,8 @@
                 (%cc-gen-const! 0)
                 (%cc-gen-expr! (first (rest node))))
               ; the value converts to what the function returns
-              (if (if (%cc-gen-byte? %cc-gen-ret-kind) #t (%cc-gen-half? %cc-gen-ret-kind))
-                (%cc-gen-narrow! %cc-gen-ret-kind)
-                ())
+              (%cc-gen-convert! %cc-gen-ret-kind
+                (if (null? (first (rest node))) (lit int) (%cc-gen-kind-of (first (rest node)))))
               (%cc-gen! (lit b) (label %cc-gen-epilogue))))
         ((eq? t (lit break))
           (%cc-gen! (lit b) (label (%cc-gen-loop-label "break"))))
@@ -1512,7 +1735,8 @@
     (set! %cc-gen-pf (+ %cc-gen-scratch 8))
     (def width
       (if (null? (%cc-gen-fun-find "printf")) (%cc-gen-printf-width body) 0))
-    (def pf-slots (if (= width 0) 0 (+ 3 width)))
+    ; the area to the digits' end, then a slot per argument after the format
+    (def pf-slots (if (= width 0) 0 (+ (/ %cc-gen-pf-end 8) (- width 1))))
     (def frame (round-up (+ %cc-gen-pf (* 8 pf-slots)) 16))
     (if (> frame 4080) (%cc-gen-no "a frame past four kilobytes"))
     (asm-label! %cc-gen-asm (%cc-gen-fun-label (first (rest f))))

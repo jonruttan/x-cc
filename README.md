@@ -17,27 +17,28 @@ the Mach-O's ad-hoc code signature is hashed in x.
 The Mach-O is dynamic, naming dyld and libSystem as the macOS kernel
 requires of every executable; the ELF is static.  Both make system calls
 directly rather than calling into a C library.  The code generator
-evaluates expressions on a stack machine; an operator whose result can
-leave `int`'s 32 bits sign-extends it again from bit 31, so arithmetic
-wraps as C's `int` does.
+evaluates expressions on a stack machine, and keeps every value in a
+whole register in its kind's form -- an `int` sign-extended from bit
+31, an `unsigned int` zero-extended, a `long` or an `unsigned long` as
+all 64 bits -- so arithmetic wraps as C's does in each kind.
 
 Compiled so far: main and the functions beside it, with integer
-globals, locals and parameters, pointers, arrays, structs and unions,
-assignment, `++`
+globals, locals and parameters of every width, signed and unsigned,
+pointers, arrays, structs and unions, assignment, `++`
 and `--`, `if`/`else`, `while`, `do`, `for`, `break`, `continue`,
 `return` and calls, recursion included, over integer constants and
 string literals, `+ - * / %`, `& | ^ << >>`, the six comparisons,
 `&&`, `||`, the ternary, the comma, unary `- ~ ! & *`, subscripts,
 and `.` and `->`.
 A compiled program prints with `putchar`, `puts`, and `printf` of a
-literal format with `%d`, `%c`, `%s` and `%%`: the entry writes out a
-helper that makes the write system call and hands compiled code its
-address, since neither the system call nor a program-counter-relative
-address has a portable mnemonic.  A `printf` is laid out at compile
-time -- runs of text, a `%s` of a literal among them, become one write
-each -- and what is left for run time is a `%c`, a `%d` converted to
-decimal in a buffer in the frame, and a `%s` of any other string,
-walked to its NUL.
+literal format with `%d`, `%i`, `%u`, `%ld`, `%li`, `%lu`, `%c`, `%s`
+and `%%`: the entry writes out a helper that makes the write system
+call and hands compiled code its address, since neither the system
+call nor a program-counter-relative address has a portable mnemonic.
+A `printf` is laid out at compile time -- runs of text, a `%s` of a
+literal among them, become one write each -- and what is left for run
+time is a `%c`, an integer converted to decimal in a buffer in the
+frame, and a `%s` of any other string, walked to its NUL.
 
 A pointer is an eight-byte address: `&` takes one, `*` loads or stores
 through one at the width of what it points at, and `+` and `-` move one
@@ -59,12 +60,14 @@ The calling convention is the compiler's own, since nothing else links
 with what it writes: arguments in four registers, the answer in one,
 and a frame per call taken from a region below the machine stack.  A
 local, a parameter and a global take the size and alignment of their
-kind, and a value loads at that width, extended by its sign; arithmetic
-happens in `int`, which is what C's promotions make of `char` and
-`short`, and a store narrows the value back.  Anything else refuses by
-name: `long` and the unsigned kinds of `int`'s width or more, whose
-arithmetic is not `int`'s, a struct passed or returned by value, which
-the calling convention does not carry, function pointers, a fifth
+kind, and a value loads at that width, extended by its sign.  An
+operator works in the kind C's usual conversions give its operands --
+`int` for `char` and `short`, then `unsigned int`, `long` and
+`unsigned long` -- and a store converts the value to its place's kind.
+An integer constant has the type its suffixes and its value give it.
+Anything else refuses by name: floating point, a struct passed or
+returned by value, which the calling convention does not carry,
+function pointers, a fifth
 argument, a global initialized by something other than a constant or
 a global pointer initialized with an address (the executable is loaded
 where the kernel chooses, and nothing relocates it), any other `printf`
