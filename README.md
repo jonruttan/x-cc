@@ -38,7 +38,9 @@ call nor a program-counter-relative address has a portable mnemonic.
 A `printf` is laid out at compile time -- runs of text, a `%s` of a
 literal among them, become one write each -- and what is left for run
 time is a `%c`, an integer converted to decimal in a buffer in the
-frame, and a `%s` of any other string, walked to its NUL.
+frame, and a `%s` of any other string, walked to its NUL.  `exit`
+leaves through the entry's own exit, the one main's return reaches,
+which sits a fixed distance before the helper.
 
 A pointer is an eight-byte address: `&` takes one, `*` loads or stores
 through one at the width of what it points at, and `+` and `-` move one
