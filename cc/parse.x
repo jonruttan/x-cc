@@ -289,7 +289,7 @@
     (go toks 0)))
 
 ; a balanced ( ... ), skipped: the parameter list of a function-pointer
-; declarator (a cast's type is erased); answers the rest
+; declarator; answers the rest
 (def %cc-p-skip-parens
   (fn (_ toks)
     (def go
@@ -352,10 +352,6 @@
           (if (%cc-p-op? ts2 "*") (self (%cc-p-pointer-to k) (rest ts2))
             (pair k ts2)))))
     (stars (first based) (rest based))))
-
-; swallow a type; answers the rest (casts, and callers that erase)
-(def %cc-p-skip-type
-  (fn (_ toks) (rest (%cc-p-type toks))))
 
 ; --- the expression ladder ---------------------------------------------------
 
@@ -440,7 +436,7 @@
                     (pair ast ts)))))))))
     (go (first r) (rest r))))
 
-; a parenthesized type-name means a cast (the type is erased)
+; a parenthesized type-name means a cast: (cast KIND E)
 (def %cc-cast?
   (fn (_ toks)
     (if (%cc-p-op? toks "(")
@@ -481,8 +477,12 @@
                         (let ((r (self (rest toks))))
                           (pair (list (lit szof) (first r)) (rest r))))
                       (if (%cc-cast? toks)
-                        (let ((ts (%cc-p-skip-type (rest toks))))
-                          (self (%cc-p-eat ts ")")))
+                        (let ((tr (%cc-p-type (rest toks))))
+                          ; a parenthesized declarator, (*)(void) or (*)[3]
+                          (if (%cc-p-op? (rest tr) "(")
+                            (%cc-p-err "not built yet: a cast to a pointer to a function or an array"))
+                          (let ((r (self (%cc-p-eat (rest tr) ")"))))
+                            (pair (list (lit cast) (first tr) (first r)) (rest r))))
                         (%cc-e-postfix toks)))))))))))))
 
 ; one flat driver for the left-associative binary levels: OPS is the

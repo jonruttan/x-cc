@@ -154,6 +154,19 @@
     (if (<= addr 0) (%cc-oops "null or negative address write")
       (%cc-raw-set! addr v (%cc-width kind)))))
 
+; V converted to KIND, as a cast does: cut to the kind's width and read
+; back with its sign.  An address and the 64-bit kinds keep every bit, and
+; void keeps nothing.
+(def %cc-convert
+  (fn (_ v kind)
+    (match
+      ((eq? kind (lit void)) 0)
+      ((%cc-kind-decays? kind) (%cc-oops "a cast to an array or a struct"))
+      (#t (let ((w (%cc-width kind)))
+            (if (>= w 8) v
+              (let ((low (& v (- (<< 1 (* 8 w)) 1))))
+                (if (signed? kind) (%cc-sext low w) low))))))))
+
 ; stack bytes, zero-filled, eight-aligned; answers the base address
 (def %cc-alloca
   (fn (_ n)
@@ -361,7 +374,7 @@
             (if (if (pair? ka) (eq? (first ka) (lit array)) #f)
               (list (lit ptr) (kind-elem ka))
               (lit int))))
-        (lit int)))))))))))
+        (if (eq? t (lit cast)) (first (rest node)) (lit int))))))))))))
 
 ; What `+ 1` moves an expression by: a pointer or an array steps by its
 ; element's size, and everything else by one.  Only an address scales.
@@ -607,7 +620,9 @@
           (%cc-call (%cc-fun-name (%cc-eval (strip (first (rest node))) env))
             (map (fn (_ a) (%cc-eval a env))
               (first (rest (rest node))))))
-        (%cc-oops "unknown expression"))))))))))))))))))))))))
+        (if (eq? t (lit cast))
+          (%cc-convert (%cc-eval (first (rest (rest node))) env) (first (rest node)))
+          (%cc-oops "unknown expression")))))))))))))))))))))))))
 
 ; --- calls and builtins ------------------------------------------------------
 

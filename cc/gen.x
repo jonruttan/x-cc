@@ -26,8 +26,8 @@
 ; `continue`, `return` and calls (recursion included), over integer
 ; constants typed by their suffixes and string literals, + - * / %,
 ; & | ^ << >>, the six comparisons, &&, ||, the ternary, the comma,
-; unary - ~ ! & *, subscripts, `.` and `->`, each in the kind C's usual
-; conversions give it, and `putchar`, `puts` and `printf` of a literal
+; unary - ~ ! & *, casts, subscripts, `.` and `->`, each in the kind C's
+; usual conversions give it, and `putchar`, `puts` and `printf` of a literal
 ; format with %d %i %u %ld %li %lu %c %s and %%, unless the program
 ; defines its own.  Everything else refuses by name: floating point, a
 ; struct passed or returned by value, function pointers, more than four
@@ -219,14 +219,16 @@
 (def %cc-gen-const!
   (fn (_ v) (asm-load-imm64! %cc-gen-asm x0 (%cc-gen-int-of v))))
 
-; V in the form a value of KIND is held in: an int's low 32 bits
-; sign-extended, an unsigned int's zero-extended, a 64-bit kind's as it is
+; V in the form a value of KIND is held in: cut to the kind's width and
+; extended by its sign -- an int's from bit 31, an unsigned int's with
+; zeros -- and an eight-byte kind's as it is
 (def %cc-gen-form
   (fn (_ v kind)
-    (match
-      ((eq? kind (lit int)) (%cc-gen-int-of v))
-      ((eq? kind (lit uint)) (& v 4294967295))
-      (#t v))))
+    (def size (kind-size kind))
+    (if (>= size 8) v
+      (let ((top (<< 1 (- (* 8 size) 1))))
+        (def low (& v (- (* 2 top) 1)))
+        (if (if (signed? kind) (>= low top) #f) (- low (* 2 top)) low)))))
 
 ; a constant of KIND into x0, in that kind's form
 (def %cc-gen-const-kind!
@@ -657,12 +659,19 @@
           (let ((a (self (first (rest (rest node)))))
                 (b (self (first (rest (rest (rest node)))))))
             (%cc-gen-fold-bin (first (rest node)) a b (%cc-gen-kind-of node))))
+        ((eq? t (lit cast))
+          (let ((k (first (rest node))))
+            (if (if (eq? k (lit void)) #t (%cc-gen-aggregate? k))
+              (%cc-gen-no "a global initialized by something other than a constant"))
+            (%cc-gen-form (self (first (rest (rest node)))) k)))
         (#t (%cc-gen-no "a global initialized by something other than a constant"))))))
 
 ; OP on the constants A and B, in KIND: each operand converted to it first,
 ; but a shift's count, which keeps its own
 (def %cc-gen-fold-bin
   (fn (_ op a b kind)
+    (if (%cc-gen-addr-kind? kind)
+      (%cc-gen-no "a global initialized by arithmetic on an address"))
     (def shift? (if (string=? op "<<") #t (string=? op ">>")))
     (def x (%cc-gen-form a kind))
     (def y (if shift? b (%cc-gen-form b kind)))
@@ -806,15 +815,22 @@
   (fn (_ place)
     (%cc-gen! (%cc-gen-store-op (%cc-gen-place-kind place)) x0 (%cc-gen-place-mem place))))
 
+; a kind whose values are held in an int's form: int, and the kinds C
+; promotes to it
+(def %cc-gen-int-form?
+  (fn (_ k)
+    (if (pair? k) #f
+      (if (eq? k (lit fnptr)) #f (eq? (%cc-gen-promote k) (lit int))))))
+
 ; x0, a value of kind FROM, converted to KIND: narrowed to a char or short,
-; and into an int's or an unsigned int's form from any other kind.  The
-; 64-bit kinds need nothing: every value's form is already its conversion
-; to them.
+; and into an int's or an unsigned int's form from any other kind, an
+; address included.  The eight-byte kinds need nothing: every value's form
+; is already its conversion to them.
 (def %cc-gen-convert!
   (fn (_ kind from)
     (match
       ((if (%cc-gen-byte? kind) #t (%cc-gen-half? kind)) (%cc-gen-narrow! kind))
-      ((eq? kind (lit int)) (if (eq? (%cc-gen-promote from) (lit int)) () (%cc-gen-int!)))
+      ((eq? kind (lit int)) (if (%cc-gen-int-form? from) () (%cc-gen-int!)))
       ((eq? kind (lit uint)) (if (eq? from (lit uint)) () (%cc-gen-uint!)))
       (#t ()))))
 
@@ -873,6 +889,7 @@
                   (first (rest (rest node))))))
         ((eq? t (lit call))
           (let ((r (%cc-gen-ret-find (first (rest node))))) (if (null? r) (lit int) r)))
+        ((eq? t (lit cast)) (first (rest node)))
         (#t (lit int))))))
 
 ; The kind a binary operator answers: + and - keep an address one and make
@@ -1058,6 +1075,12 @@
         ((eq? t (lit comma))
           (do (self (first (rest node))) (self (first (rest (rest node))))))
         ((eq? t (lit call)) (%cc-gen-call! (first (rest node)) (first (rest (rest node)))))
+        ((eq? t (lit cast))
+          (let ((k (first (rest node))) (e (first (rest (rest node)))))
+            (def from (%cc-gen-kind-of e))
+            (if (%cc-gen-aggregate? k) (%cc-gen-no "a cast to an array or a struct"))
+            (if (%cc-gen-struct? from) (%cc-gen-no "a cast of a struct"))
+            (do (self e) (%cc-gen-convert! k from))))
         (#t (%cc-gen-no (string-append "the expression " (convert t %string))))))))
 
 ; ++ and -- over a name, before or after
