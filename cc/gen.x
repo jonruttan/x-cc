@@ -27,9 +27,9 @@
 ; constants typed by their suffixes and string literals, + - * / %,
 ; & | ^ << >>, the six comparisons, &&, ||, the ternary, the comma,
 ; unary - ~ ! & *, casts, subscripts, `.` and `->`, each in the kind C's
-; usual conversions give it, and `putchar`, `puts` and `printf` of a literal
-; format with %d %i %u %ld %li %lu %c %s and %%, unless the program
-; defines its own.  Everything else refuses by name: floating point, a
+; usual conversions give it, `putchar`, `puts`, `printf` of a literal
+; format with %d %i %u %ld %li %lu %c %s and %%, and `exit`, unless the
+; program defines its own.  Everything else refuses by name: floating point, a
 ; struct passed or returned by value, function pointers, more than four
 ; arguments, and the rest of the runtime.
 ;
@@ -136,6 +136,12 @@
 ; how long the entry is; the container lays the code out from here
 (def %cc-gen-entry-len
   (fn (_ target) (if (eq? target (lit macho-arm64)) 40 47)))
+
+; how far before the write helper the entry's exit starts: the instructions
+; after the call to main, which exit with the status in x0.  exit() branches
+; there from anywhere, since nothing is left to unwind.
+(def %cc-gen-exit-back
+  (fn (_ target) (if (eq? target (lit macho-arm64)) 8 10)))
 
 ; where the container puts the data, as a distance from the entry's start
 (def %cc-gen-data-at
@@ -767,6 +773,8 @@
 ; they share `b` for the plain branch.
 (def %cc-gen-callop ())
 
+(def %cc-gen-exit-at 0)     ; the entry's exit, this far before x21's helper
+
 (def %cc-gen-find
   (fn (_ name)
     (def go (fn (self es)
@@ -1127,8 +1135,22 @@
         ((string=? name "putchar") (%cc-gen-putchar! args))
         ((string=? name "puts") (%cc-gen-puts! args))
         ((string=? name "printf") (%cc-gen-printf! args))
+        ((string=? name "exit") (%cc-gen-exit! args))
         (#t (%cc-gen-call-fun! name args)))
       (%cc-gen-call-fun! name args))))
+
+; exit: the status into x0, then the entry's own exit, the one main's
+; return reaches
+(def %cc-gen-exit!
+  (fn (_ args)
+    (if (not (= (length args) 1))
+      (%cc-gen-no "exit with other than one argument"))
+    ; x86-64 subtracts an immediate in place, from its destination alone,
+    ; so the helper's address is copied before the distance comes off it
+    (do (%cc-gen-expr! (first args))
+        (%cc-gen! (lit mov) x1 x21)
+        (%cc-gen! (lit sub) x1 x1 (imm %cc-gen-exit-at))
+        (%cc-gen! (lit blr) x1))))
 
 ; puts: the string and the newline it adds.  A literal's text is known
 ; here, so the newline goes into the data on the end of it and one write
@@ -1880,6 +1902,7 @@
     (set! %cc-gen-nlabels 0)
     (set! %cc-gen-link (if (eq? target (lit macho-arm64)) %cc-gen-lr ()))
     (set! %cc-gen-callop (if (eq? target (lit macho-arm64)) (lit bl) (lit call)))
+    (set! %cc-gen-exit-at (%cc-gen-exit-back target))
     ; every function gets its label before any code, so a call can name one
     ; that has not been compiled yet
     (set! %cc-gen-funs ())
