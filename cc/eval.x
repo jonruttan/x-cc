@@ -44,7 +44,41 @@
 (def %cc-fun-base 1048576)
 (def %cc-fun-ids ())    ; ((name . id) ...)
 (def %cc-builtins (list "putchar" "puts" "printf" "malloc" "free" "exit"
-                    "strlen" "strcmp" "strcpy" "memcpy" "memset"))
+                    "strlen" "strcmp" "strcpy" "memcpy" "memset"
+                    "isdigit" "isalpha" "isalnum" "isspace" "isupper" "islower"
+                    "toupper" "tolower" "abs"))
+
+; <ctype.h>'s classifications in the C locale, each the ranges of codes it
+; takes in: (NAME (LOW . HIGH) ...).  run reads them here and the compiled
+; runtime is written from them.
+(def ctype-ranges
+  (list (list "isdigit" (pair 48 57))
+        (list "isalpha" (pair 65 90) (pair 97 122))
+        (list "isalnum" (pair 48 57) (pair 65 90) (pair 97 122))
+        (list "isspace" (pair 9 13) (pair 32 32))
+        (list "isupper" (pair 65 90))
+        (list "islower" (pair 97 122))))
+
+; the ranges of the classification NAME, or nil
+(def %cc-ctype-find
+  (fn (_ name)
+    (def go (fn (self es)
+              (match
+                ((null? es) ())
+                ((string=? (first (first es)) name) (rest (first es)))
+                (#t (self (rest es))))))
+    (go ctype-ranges)))
+
+; 1 when C lies in one of RANGES, else 0
+(def %cc-in-ranges
+  (fn (_ c ranges)
+    (def go
+      (fn (self rs)
+        (match
+          ((null? rs) 0)
+          ((if (>= c (first (first rs))) (<= c (rest (first rs))) #f) 1)
+          (#t (self (rest rs))))))
+    (go ranges)))
 
 ; is the string S one of the strings in L
 (def %cc-member-str?
@@ -746,6 +780,12 @@
         ((string=? name "memset")
           (do (%cc-fill-bytes! (first args) (& (first (rest args)) 255) (first (rest (rest args))))
               (first args)))
+        ((not (null? (%cc-ctype-find name))) (%cc-in-ranges (first args) (%cc-ctype-find name)))
+        ((string=? name "toupper")
+          (let ((c (first args))) (if (if (>= c 97) (<= c 122) #f) (- c 32) c)))
+        ((string=? name "tolower")
+          (let ((c (first args))) (if (if (>= c 65) (<= c 90) #f) (+ c 32) c)))
+        ((string=? name "abs") (let ((v (first args))) (if (< v 0) (- 0 v) v)))
         ((string=? name "exit")
           (do (set! %cc-exit-code (first args))
               (Err raise (lit cc-exit) "exit" ())))
@@ -926,4 +966,4 @@
 
 (def cc-run (fn (_ src) (%cc-run-core src)))
 
-(provide cc/eval cc-run kind-elem signed?)
+(provide cc/eval cc-run ctype-ranges kind-elem signed?)
