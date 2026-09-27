@@ -382,36 +382,51 @@
 
 (set! %cc-kind-of
   (fn (self node env)
-    (let ((t (first node)))
-      (if (eq? t (lit var))
+    (def t (first node))
+    (def address?
+      (fn (_ k) (if (pair? k) (if (eq? (first k) (lit ptr)) #t (eq? (first k) (lit array))) #f)))
+    (match
+      ((eq? t (lit var))
         (let ((e (%cc-find (first (rest node)) env)))
-          (if (null? e) (lit int) (rest (rest e))))
-      (if (eq? t (lit dot))
+          (if (null? e) (lit int) (rest (rest e)))))
+      ((eq? t (lit str)) (list (lit array) (+ (byte-len (first (rest node))) 1) (lit char)))
+      ((eq? t (lit dot))
         (let ((f (%cc-field (%cc-struct-name (self (first (rest node)) env)
                               (first (rest (rest node))))
                    (first (rest (rest node))))))
-          (if (null? f) (%cc-oops (string-append "no field: " (first (rest (rest node))))) (rest f)))
-      (if (eq? t (lit arrow))
+          (if (null? f) (%cc-oops (string-append "no field: " (first (rest (rest node))))) (rest f))))
+      ((eq? t (lit arrow))
         (let ((f (%cc-field (%cc-struct-name (kind-elem (self (first (rest node)) env))
                               (first (rest (rest node))))
                    (first (rest (rest node))))))
-          (if (null? f) (%cc-oops (string-append "no field: " (first (rest (rest node))))) (rest f)))
-      (if (eq? t (lit idx)) (kind-elem (self (first (rest node)) env))
-      (if (if (eq? t (lit un)) (string=? (first (rest node)) "*") #f)
-        (kind-elem (self (first (rest (rest node))) env))
-      (if (eq? t (lit call))
-        ; a named call's kind is the function's declared return kind
+          (if (null? f) (%cc-oops (string-append "no field: " (first (rest (rest node))))) (rest f))))
+      ; A[I] is what A + I points at
+      ((eq? t (lit idx))
+        (kind-elem (self (list (lit bin) "+" (first (rest node)) (first (rest (rest node)))) env)))
+      ((if (eq? t (lit un)) (string=? (first (rest node)) "*") #f)
+        (kind-elem (self (first (rest (rest node))) env)))
+      ((if (eq? t (lit un)) (string=? (first (rest node)) "&") #f)
+        (list (lit ptr) (self (first (rest (rest node))) env)))
+      ((eq? t (lit call))
+        ; a named call's C type is the one its function declares it returns
         (let ((f (if (null? (%cc-find (first (rest node)) env)) (%cc-fun (first (rest node))) ())))
           (if (null? f) (lit int)
-            (let ((r (rest (rest (rest f))))) (if (null? r) (lit int) (first r)))))
-      (if (if (eq? t (lit bin)) (if (string=? (first (rest node)) "+") #t (string=? (first (rest node)) "-")) #f)
-        ; pointer arithmetic keeps the pointer's kind
-        (let ((ka (self (first (rest (rest node))) env)))
-          (if (if (pair? ka) (eq? (first ka) (lit ptr)) #f) ka
-            (if (if (pair? ka) (eq? (first ka) (lit array)) #f)
-              (list (lit ptr) (kind-elem ka))
-              (lit int))))
-        (if (eq? t (lit cast)) (first (rest node)) (lit int))))))))))))
+            (let ((r (rest (rest (rest f))))) (if (null? r) (lit int) (first r))))))
+      ; + and - with an address on either side of + or the left of -
+      ; answer a pointer to what it points at; two addresses subtract to
+      ; the count between them, a long
+      ((if (eq? t (lit bin)) (if (string=? (first (rest node)) "+") #t (string=? (first (rest node)) "-")) #f)
+        (let ((ka (self (first (rest (rest node))) env))
+              (kb (self (first (rest (rest (rest node)))) env)))
+          (def minus? (string=? (first (rest node)) "-"))
+          (def pointer (fn (_ k) (if (eq? (first k) (lit ptr)) k (list (lit ptr) (kind-elem k)))))
+          (match
+            ((if minus? (if (address? ka) (address? kb) #f) #f) (lit long))
+            ((address? ka) (pointer ka))
+            ((if minus? #f (address? kb)) (pointer kb))
+            (#t (lit int)))))
+      ((eq? t (lit cast)) (first (rest node)))
+      (#t (lit int)))))
 
 ; What `+ 1` moves an expression by: a pointer or an array steps by its
 ; element's size, and everything else by one.  Only an address scales.
@@ -561,10 +576,9 @@
           (if (null? e)
             (%cc-oops (string-append "undefined: " (first (rest node))))
             (first (rest e))))
+        ; A[I] is at A + I, and C lets either be the address
         (if (eq? t (lit idx))
-          (+ (%cc-eval (first (rest node)) env)
-            (* (%cc-step-of (first (rest node)) env)
-              (%cc-eval (first (rest (rest node))) env)))
+          (%cc-eval (list (lit bin) "+" (first (rest node)) (first (rest (rest node)))) env)
           (if (eq? t (lit dot))
             (let ((f (%cc-field (%cc-struct-name (%cc-kind-of (first (rest node)) env)
                                   (first (rest (rest node))))

@@ -621,39 +621,60 @@
     (go %cc-gen-pending)
     (set! %cc-gen-pending ())))
 
-; where in the data the address INIT names lies: a string literal's, a
-; global array's, or what & takes of a global, an element of one at a
-; constant index, or a field of one
-(def %cc-gen-address-constant
-  (fn (self init)
-    (def place
-      (fn (place node)
-        (def t (first node))
-        (match
-          ((eq? t (lit var))
-            (let ((g (%cc-gen-global-find (first (rest node)))))
-              (if (null? g)
-                (%cc-gen-no "a global pointer initialized with the address of something not global")
-                g)))
-          ((eq? t (lit idx))
-            (let ((a (place (first (rest node)))))
-              (if (not (%cc-gen-array? (rest a)))
-                (%cc-gen-no "a global pointer initialized with an address worked out at run time"))
-              (pair (+ (first a)
-                      (* (%cc-gen-fold (first (rest (rest node)))) (kind-size (kind-elem (rest a)))))
-                (kind-elem (rest a)))))
-          ((eq? t (lit dot))
-            (let ((s (place (first (rest node)))))
-              (let ((f (%cc-gen-field (rest s) (first (rest (rest node))))))
-                (pair (+ (first s) (first f)) (rest f)))))
-          (#t (%cc-gen-no "a global pointer initialized with an address worked out at run time")))))
+; (OFFSET . C-TYPE) for the address NODE stands for: where in the data it
+; lies, and the C type of what is there.  A string literal or an array
+; stands for its first element's; & takes a global's, an element's at a
+; constant index, a field's or a pointee's.  A constant added or taken
+; away moves the address by that many of what it points at, and a cast
+; to a pointer changes what that is.
+(def %cc-gen-address-target
+  (fn (self node)
+    (def t (first node))
+    (def field
+      (fn (_ s fname)
+        (let ((f (%cc-gen-field (rest s) fname)))
+          (pair (+ (first s) (first f)) (rest f)))))
     (match
-      ((eq? (first init) (lit str)) (%cc-gen-string! (first (rest init))))
-      ((eq? (first init) (lit var))
-        (let ((g (place init)))
-          (if (%cc-gen-array? (rest g)) (first g)
-            (%cc-gen-no "a global pointer initialized with a value that is not an address"))))
-      (#t (first (place (first (rest (rest init)))))))))
+      ((eq? t (lit str)) (pair (%cc-gen-string! (first (rest node))) (lit char)))
+      ((eq? t (lit bin))
+        (let ((op (first (rest node)))
+              (a (first (rest (rest node))))
+              (b (first (rest (rest (rest node))))))
+          (def left? (%cc-gen-address-form? a))
+          (if (not (if (string=? op "+") #t (if (string=? op "-") left? #f)))
+            (%cc-gen-no (string-append "the operator " op " on an address")))
+          (let ((p (self (if left? a b))) (n (%cc-gen-fold (if left? b a))))
+            (pair (+ (first p) (* (if (string=? op "-") (- 0 n) n) (kind-size (rest p))))
+              (rest p)))))
+      ((eq? t (lit cast))
+        (pair (first (self (first (rest (rest node))))) (kind-elem (first (rest node)))))
+      ((if (eq? t (lit un)) (string=? (first (rest node)) "&") #f)
+        (let ((x (first (rest (rest node)))))
+          (def xt (first x))
+          (match
+            ((eq? xt (lit var))
+              (let ((g (%cc-gen-global-find (first (rest x)))))
+                (if (null? g)
+                  (%cc-gen-no "a global pointer initialized with the address of something not global")
+                  g)))
+            ((eq? xt (lit idx))
+              (self (list (lit bin) "+" (first (rest x)) (first (rest (rest x))))))
+            ((eq? xt (lit dot))
+              (field (self (list (lit un) "&" (first (rest x)))) (first (rest (rest x)))))
+            ((eq? xt (lit arrow))
+              (field (self (first (rest x))) (first (rest (rest x)))))
+            ((if (eq? xt (lit un)) (string=? (first (rest x)) "*") #f)
+              (self (first (rest (rest x)))))
+            (#t (%cc-gen-no "a global pointer initialized with an address worked out at run time")))))
+      ; anything else names an object, which is an address only as an array
+      (#t
+        (let ((p (self (list (lit un) "&" node))))
+          (if (%cc-gen-array? (rest p)) (pair (first p) (kind-elem (rest p)))
+            (%cc-gen-no "a global pointer initialized with a value that is not an address")))))))
+
+; where in the data the address INIT names lies
+(def %cc-gen-address-constant
+  (fn (_ init) (first (%cc-gen-address-target init))))
 
 ; The addresses the pointers in the data start at, written by main before
 ; its body runs: x22 is the data's address only at run time
@@ -729,13 +750,23 @@
 (def %cc-gen-pending ())
 
 ; does NODE name an address a global pointer can start at: a string
-; literal, an array's name, or &
+; literal, an array, what & takes, one of these moved by a constant, or
+; one cast to another pointer (%cc-gen-address-target)
 (def %cc-gen-address-form?
-  (fn (_ node)
+  (fn (self node)
+    (def t (first node))
     (match
-      ((eq? (first node) (lit str)) #t)
-      ((eq? (first node) (lit var)) #t)
-      ((eq? (first node) (lit un)) (string=? (first (rest node)) "&"))
+      ((eq? t (lit str)) #t)
+      ((eq? t (lit var)) #t)
+      ((eq? t (lit idx)) #t)
+      ((eq? t (lit dot)) #t)
+      ((eq? t (lit arrow)) #t)
+      ((eq? t (lit un))
+        (if (string=? (first (rest node)) "&") #t (string=? (first (rest node)) "*")))
+      ((eq? t (lit bin))
+        (if (self (first (rest (rest node)))) #t (self (first (rest (rest (rest node)))))))
+      ((eq? t (lit cast))
+        (if (%cc-gen-ptr? (first (rest node))) (self (first (rest (rest node)))) #f))
       (#t #f))))
 
 (def %cc-gen-const-bytes
@@ -790,14 +821,6 @@
       ((if (%cc-gen-ptr? kind) (%cc-gen-address-form? init) #f)
         (do (set! %cc-gen-pending (pair (pair at init) %cc-gen-pending))
             (zeros 8 ())))
-      ; C lets an address and a constant add up here too; not built yet
-      ((if (%cc-gen-ptr? kind)
-         (if (eq? (first init) (lit bin))
-           (if (%cc-gen-address-form? (first (rest (rest init)))) #t
-             (%cc-gen-address-form? (first (rest (rest (rest init))))))
-           #f)
-         #f)
-        (%cc-gen-no "a global pointer initialized by arithmetic on an address"))
       ((eq? (first init) (lit initlist))
         (%cc-gen-no "a braced initializer for something that is not an array or a struct"))
       (#t (%cc-gen-value-bytes kind (%cc-gen-fold init))))))
@@ -892,16 +915,12 @@
 (def %cc-gen-string-at!
   (fn (_ text) (%cc-gen-address! x22 (%cc-gen-string! text))))
 
-; x0 = BASE + OFF.  arm64's add takes twelve bits of immediate and its
-; encoder masks a wider one, so a farther offset goes through x2.
+; x0 = BASE + OFF, where OFF may be below zero: a pointer into the data
+; can start before its first byte
 (def %cc-gen-address!
   (fn (_ base off)
     (do (%cc-gen! (lit mov) x0 base)
-        (match
-          ((= off 0) ())
-          ((<= off 4095) (%cc-gen! (lit add) x0 x0 (imm off)))
-          (#t (do (asm-load-imm64! %cc-gen-asm x2 off)
-                  (%cc-gen! (lit add) x0 x0 x2)))))))
+        (%cc-gen-bump! (>= off 0) (if (< off 0) (- 0 off) off)))))
 
 ; REG = REG * N, for an element's size
 (def %cc-gen-scale!
@@ -912,7 +931,8 @@
             (asm-load-imm64! %cc-gen-asm x2 n))
           (%cc-gen! (lit mul) reg reg x2)))))
 
-; x0 = x0 + or - N, for a step
+; x0 = x0 + or - N.  arm64's add takes twelve bits of immediate and its
+; encoder masks a wider one, so a farther N goes through x2.
 (def %cc-gen-bump!
   (fn (_ up n)
     (match

@@ -60,8 +60,8 @@ end to end and each stored once.  The entry hands compiled code the
 data's address the way it hands over the helper's.  The executable is
 loaded where the kernel chooses and nothing relocates it, so a global
 pointer that starts at an address -- a string literal, an array, what
-`&` takes of a global -- starts as zeros, and main writes the address
-before its body runs.  A program that
+`&` takes of a global, any of these moved by a constant -- starts as
+zeros, and main writes the address before its body runs.  A program that
 calls `malloc` has a heap after the data: the segment runs on sixty-four
 megabytes past the file's bytes, and the kernel maps them zero-filled.
 The compiler writes the program's `malloc` after its last function, when
@@ -90,7 +90,7 @@ conversions give its operands -- `int` for `char` and `short`, then
 value to its place's kind.  An integer constant has the type its
 suffixes and its value give it.  Anything else refuses by name:
 floating point, function pointers, a global initialized by something
-other than a constant or an address, or by arithmetic on an address,
+other than a constant or an address,
 any other `printf` conversion or a format that is not a literal, and
 the rest of the runtime.
 
