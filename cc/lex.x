@@ -18,6 +18,10 @@
   map reverse string-append string-concat string=? substring)
 (import cc/pp cc-preprocess)
 
+; The type handle this file asks convert for, fetched by name through the
+; platform's public door and private to this module.
+(def %symbol (Type named SYMBOL))
+
 (def %cc-keywords
   (list "auto" "break" "case" "char" "const" "continue" "default" "do"
         "double" "else" "enum" "extern" "float" "for" "goto" "if" "int"

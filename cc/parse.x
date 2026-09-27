@@ -35,6 +35,10 @@
 (import cc/prims append byte-len convert length map reverse string-append
   string=?)
 
+; The type handle this file asks convert for, fetched by name through the
+; platform's public door and private to this module.
+(def %string (Type named STRING))
+
 (def %cc-p-err
   (fn (_ msg)
     (Err raise (lit cc) (string-append "cc: parse: " msg) ())))
