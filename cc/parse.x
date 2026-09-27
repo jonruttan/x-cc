@@ -690,6 +690,15 @@
         (if (null? (rest (rest kind))) (list (lit array) n) (list (lit array) n (first (rest (rest kind))))))
       kind)))
 
+; do the specifiers at the front of TOKS say static?  A local that is
+; static is kept once for the program, not made again per call, so its decl
+; nodes carry `static` as a fifth element.
+(def %cc-p-static?
+  (fn (self toks)
+    (if (%cc-p-type-kw? toks)
+      (if (%cc-p-kw? toks (lit static)) #t (self (rest toks)))
+      #f)))
+
 ; TYPE declarator (, declarator)* ; -- a list of decl nodes
 (def %cc-p-decl-line
   (fn (_ toks)
@@ -827,7 +836,11 @@
                           (pair (list (lit block) ()) (%cc-p-typedef (rest toks)))
                         (if (%cc-p-type-start? toks)
                           (let ((r (%cc-p-decl-line toks)))
-                            (pair (pair (lit decls) (first r)) (rest r)))
+                            (pair (pair (lit decls)
+                                    (if (%cc-p-static? toks)
+                                      (map (fn (_ d) (append d (list (lit static)))) (first r))
+                                      (first r)))
+                              (rest r)))
                           (let ((r (%cc-e-comma toks)))
                             (pair (list (lit expr) (first r))
                               (%cc-p-eat (rest r) ";"))))))))))))))))))

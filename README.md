@@ -23,7 +23,8 @@ whole register in its kind's form -- an `int` sign-extended from bit
 all 64 bits -- so arithmetic wraps as C's does in each kind.
 
 Compiled so far: main and the functions beside it, with integer
-globals, locals and parameters of every width, signed and unsigned,
+globals, locals (a static one kept once, in the data) and parameters of
+every width, signed and unsigned,
 pointers, arrays, structs and unions, assignment, `++` and `--`,
 `if`/`else`, `while`, `do`, `for`, `switch`, `break`, `continue`,
 `return` and calls, recursion included, over integer constants and
@@ -107,11 +108,12 @@ struct's padding are what /usr/bin/cc counts.  Locals live in memory
 so &local works, the stack grows down and the heap up.
 
 Working: int/char/void/pointer/array declarations (specifier soup
-accepted, erased); all C89 operators with C precedence, short-circuit
-&& || and the ternary; casts, each converting its operand to its type
-and giving the expression that type; truncating division; if/else,
-while, do, for, break, continue, return; functions with recursion and
-prototypes; globals; string literals (interned, and joined when side by
+accepted, erased, but for `static` on a local); all C89 operators with
+C precedence, short-circuit && || and the ternary; casts, each
+converting its operand to its type and giving the expression that type;
+truncating division; if/else, while, do, for, break, continue, return;
+functions with recursion and prototypes; globals; static locals, made
+once on first reach; string literals (interned, and joined when side by
 side); character constants; C's escapes, octal and hex among them;
 `#include` (dropped -- the runtime provides the functions compiled
 programs have: putchar, puts, printf, exit, malloc, free, strlen,

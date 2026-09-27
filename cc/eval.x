@@ -935,6 +935,24 @@
         (%cc-oops "unknown statement"))))))))))))))
 
 ; a block: declarations extend the env as they pass
+; A static local's storage, made the first time its declaration is reached
+; and kept for the rest of the run: taken from the heap, initialized once.
+; (NODE . ADDRESS), the declaration's node found again by identity.
+(def %cc-statics ())
+(def %cc-static-address
+  (fn (_ node c-type init)
+    (def go (fn (self es)
+              (match
+                ((null? es) ())
+                ((same? (first (first es)) node) (rest (first es)))
+                (#t (self (rest es))))))
+    (def found (go %cc-statics))
+    (if (not (null? found)) found
+      (let ((a (%cc-heap (kind-size c-type))))
+        (do (if (null? init) () (%cc-init-into! a c-type init ()))
+            (set! %cc-statics (pair (pair node a) %cc-statics))
+            a)))))
+
 (set! %cc-exec-block
   (fn (_ blk env0)
     (def go
@@ -945,9 +963,10 @@
               (let ((name (first (rest item))))
                 (def kind (first (rest (rest item))))
                 (def init (first (rest (rest (rest item)))))
-                (def size (kind-size kind))
-                (def a (%cc-alloca size))
-                (do (if (null? init) ()
+                (def static? (not (null? (rest (rest (rest (rest item)))))))
+                (def a (if static? (%cc-static-address item kind init)
+                         (%cc-alloca (kind-size kind))))
+                (do (if (if static? #t (null? init)) ()
                       (%cc-init-into! a kind init env))
                     (self (rest items)
                       (pair (pair name (pair a kind)) env))))
@@ -983,6 +1002,7 @@
     (set! %cc-genv ())
     (set! %cc-funs ())
     (set! %cc-strtab ())
+    (set! %cc-statics ())
     (set! %cc-fun-ids ())
     (set! %cc-exit-code ())
     (def prog (cc-parse (cc-lex src)))
