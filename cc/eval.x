@@ -43,7 +43,8 @@
 ; runtime's builtins take ids too.
 (def %cc-fun-base 1048576)
 (def %cc-fun-ids ())    ; ((name . id) ...)
-(def %cc-builtins (list "putchar" "puts" "printf" "malloc" "free" "exit"))
+(def %cc-builtins (list "putchar" "puts" "printf" "malloc" "free" "exit"
+                    "strlen" "strcmp" "strcpy" "memcpy" "memset"))
 
 ; is the string S one of the strings in L
 (def %cc-member-str?
@@ -433,6 +434,33 @@
                     (self (+ i 1))))))
     (go 0)))
 
+; N bytes at ADDR, each B
+(def %cc-fill-bytes!
+  (fn (_ addr b n)
+    (def go (fn (self i)
+              (if (>= i n) ()
+                (do (%cc-raw-set! (+ addr i) b 1) (self (+ i 1))))))
+    (go 0)))
+
+; the bytes before the NUL at ADDR
+(def %cc-strlen
+  (fn (_ addr)
+    (def go (fn (self i) (if (= (%cc-raw-ref (+ addr i) 1) 0) i (self (+ i 1)))))
+    (go 0)))
+
+; the first difference between the strings at A and B, each byte read as
+; an unsigned char; 0 when they are the same
+(def %cc-strcmp
+  (fn (_ a b)
+    (def go
+      (fn (self i)
+        (let ((x (%cc-raw-ref (+ a i) 1)) (y (%cc-raw-ref (+ b i) 1)))
+          (match
+            ((not (= x y)) (- x y))
+            ((= x 0) 0)
+            (#t (self (+ i 1)))))))
+    (go 0)))
+
 ; bytes out as a list, and back in: a returned struct is read before its
 ; frame pops -- the caller's fresh slot can be the very bytes the callee's
 ; first parameter held, and alloca zero-fills them (the bug: `return a;` of
@@ -706,6 +734,18 @@
         ((string=? name "printf") (%cc-printf args))
         ((string=? name "malloc") (%cc-heap (first args)))
         ((string=? name "free") 0)
+        ((string=? name "strlen") (%cc-strlen (first args)))
+        ((string=? name "strcmp") (%cc-strcmp (first args) (first (rest args))))
+        ((string=? name "strcpy")
+          (do (%cc-copy-bytes! (first args) (first (rest args))
+                (+ (%cc-strlen (first (rest args))) 1))
+              (first args)))
+        ((string=? name "memcpy")
+          (do (%cc-copy-bytes! (first args) (first (rest args)) (first (rest (rest args))))
+              (first args)))
+        ((string=? name "memset")
+          (do (%cc-fill-bytes! (first args) (& (first (rest args)) 255) (first (rest (rest args))))
+              (first args)))
         ((string=? name "exit")
           (do (set! %cc-exit-code (first args))
               (Err raise (lit cc-exit) "exit" ())))
