@@ -18,6 +18,10 @@
 (import x/type/vector)
 (import x/codec/sha256)
 
+; The type handle this file asks convert for, fetched by name through the
+; platform's public door and private to this module.
+(def %string (Type named STRING))
+
 (def char->integer (prim-ref (lit char) (lit ->int)))
 (def integer->char (prim-ref (lit int) (lit ->char)))
 (def byte-at (prim-ref (lit str) (lit byte-ref)))

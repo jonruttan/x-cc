@@ -23,22 +23,27 @@ whole register in its kind's form -- an `int` sign-extended from bit
 all 64 bits -- so arithmetic wraps as C's does in each kind.
 
 Compiled so far: main and the functions beside it, with integer
-globals, locals and parameters of every width, signed and unsigned,
-pointers, arrays, structs and unions, assignment, `++` and `--`,
+globals, locals (a static one kept once, in the data) and parameters of
+every width, signed and unsigned,
+pointers, arrays, pointers to arrays, structs and unions, typedefs of
+any of them, assignment, `++` and `--`,
 `if`/`else`, `while`, `do`, `for`, `switch`, `break`, `continue`,
 `return` and calls, recursion included, over integer constants and
 string literals, `+ - * / %`, `& | ^ << >>`, the six comparisons,
 `&&`, `||`, the ternary, the comma, unary `- ~ ! & *`, casts,
 subscripts, and `.` and `->`.
 A compiled program prints with `putchar`, `puts`, and `printf` of a
-literal format with `%d`, `%i`, `%u`, `%ld`, `%li`, `%lu`, `%c`, `%s`
-and `%%`: the entry writes out a helper that makes the write system
+literal format with `%d`, `%i`, `%u`, `%x`, `%ld`, `%li`, `%lu`, `%lx`,
+`%c`, `%s` and `%%`, each with the flags `-` and `0`, a field width and
+a precision: the entry writes out a helper that makes the write system
 call and hands compiled code its address, since neither the system
 call nor a program-counter-relative address has a portable mnemonic.
 A `printf` is laid out at compile time -- runs of text, a `%s` of a
-literal among them, become one write each -- and what is left for run
-time is a `%c`, an integer converted to decimal in a buffer in the
-frame, and a `%s` of any other string, walked to its NUL.  `exit`
+literal among them fitted to its field, become one write each -- and
+what is left for run time is a `%c`, an integer converted to decimal or
+hex in a buffer in the frame, a `%s` of any other string, walked to its
+NUL, and padding whose size waits on the value, written from a run of
+spaces or zeros in the data.  `exit`
 leaves through the entry's own exit, the one main's return reaches,
 which sits a fixed distance before the helper.
 
@@ -56,22 +61,33 @@ page after the code -- `__DATA` in the Mach-O, a second `PT_LOAD` in the
 ELF.  The globals are at the front of it, each at its kind's size with
 the initializer's value already in place; the string literals follow,
 end to end and each stored once.  The entry hands compiled code the
-data's address the way it hands over the helper's.  A program that
+data's address the way it hands over the helper's.  The executable is
+loaded where the kernel chooses and nothing relocates it, so a global
+pointer that starts at an address -- a string literal, an array, what
+`&` takes of a global or of a static local in scope, any of these moved
+by a constant -- starts as zeros, and main writes the address before
+its body runs.  A program that
 calls `malloc` has a heap after the data: the segment runs on sixty-four
 megabytes past the file's bytes, and the kernel maps them zero-filled.
 The compiler writes the program's `malloc` after its last function, when
 the data's size is final; it takes sixteen-aligned blocks from the heap
 in order and answers the null pointer when there is no room, and `free`
-gives nothing back.
+gives nothing back.  `strlen`, `strcmp`, `strncmp`, `strcpy`, `strncpy`,
+`strcat`, `strchr`, `memcpy`, `memset`, `memcmp` and `atoi` are written
+there too, and so are `<ctype.h>`'s classifications and case changes and
+`abs`, each only when the program calls it and does not define its own.  The classifications are ranges of codes in one table,
+which `run` reads as well.
 
 The calling convention is the compiler's own, since nothing else links
 with what it writes: the first four arguments in registers, unless
 they are structs, and the rest stored where the callee's frame will
 have its top, the answer in one register, and a frame per call taken
-from a region below the machine stack.  A struct goes by value: an
-argument is copied whole to the callee's frame, and a call that
-answers one has a slot of its own in the caller's frame, which the
-callee's return copies into.  A local, a parameter and a global take
+from a four-megabyte region below the machine stack, a megabyte at most
+each.  A frame keeps its scalars low, where a load reaches them, and its
+arrays and structs above, reached through their address.  A struct
+goes by value: an argument is copied whole to the callee's frame, and a
+call that answers one has a slot of its own in the caller's frame,
+which the callee's return copies into.  A local, a parameter and a global take
 the size and alignment of their kind, and a value loads at that width,
 extended by its sign.  An operator works in the kind C's usual
 conversions give its operands -- `int` for `char` and `short`, then
@@ -79,10 +95,9 @@ conversions give its operands -- `int` for `char` and `short`, then
 value to its place's kind.  An integer constant has the type its
 suffixes and its value give it.  Anything else refuses by name:
 floating point, function pointers, a global initialized by something
-other than a constant or a global pointer initialized with an address
-(the executable is loaded where the kernel chooses, and nothing
-relocates it), any other `printf` conversion or a format that is not a
-literal, and the rest of the runtime.
+other than a constant or an address,
+any other `printf` conversion or a format that is not a literal, and
+the rest of the runtime.
 
     x -l cc -- run prog.c
 
@@ -101,19 +116,25 @@ struct's padding are what /usr/bin/cc counts.  Locals live in memory
 so &local works, the stack grows down and the heap up.
 
 Working: int/char/void/pointer/array declarations (specifier soup
-accepted, erased); all C89 operators with C precedence, short-circuit
-&& || and the ternary; casts, each converting its operand to its type
-and giving the expression that type; truncating division; if/else,
-while, do, for, break, continue, return; functions with recursion and
-prototypes; globals; string literals (interned); character constants;
-`#include` (dropped -- the runtime provides putchar, puts, printf %d
-%c %s %x, malloc, free, exit), object-like `#define` spliced
-token-wise; // and /* */ comments.
+accepted, erased, but for `static` on a local); all C89 operators with
+C precedence, short-circuit && || and the ternary; casts, each
+converting its operand to its type and giving the expression that type;
+truncating division; if/else, while, do, for, break, continue, return;
+functions with recursion and prototypes; globals; static locals, made
+once on first reach; string literals (interned, and joined when side by
+side); character constants; C's escapes, octal and hex among them;
+`#include` (dropped -- the runtime provides the functions compiled
+programs have: putchar, puts, printf, exit, malloc, free, strlen,
+strcmp, strncmp, strcpy, strncpy, strcat, strchr, memcpy, memset,
+memcmp, atoi, isdigit, isalpha, isalnum, isspace, isupper, islower,
+toupper, tolower, abs), object-like `#define` spliced token-wise; //
+and /* */ comments.
 
 Structs, too: `struct S { ... };`, `typedef struct { ... } T;`,
 fields by `.` and `->`, nested structs, arrays of structs, pointers to
 structs stepping by the struct's size, struct assignment as a byte
-copy, `sizeof` a struct with its padding, and the linked list built
+copy, `sizeof` a struct with its padding, bit-fields of the integer
+types but long, and the linked list built
 from `malloc(sizeof(struct N))` -- oracle-checked.  A field access
 whose chain the evaluator cannot type (a call's result) resolves by
 the field's name when exactly one struct has it.

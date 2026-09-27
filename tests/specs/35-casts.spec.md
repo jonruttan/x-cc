@@ -107,4 +107,4 @@ where both columns show, `run` and the compiled executable agree.
 (write (list (guard (e (e msg)) (cc-run src)) (guard (e (e msg)) (cc-exe-run src))))
 ```
 ---
-    ("cc: parse: not built yet: a cast to a pointer to a function or an array" "cc: parse: not built yet: a cast to a pointer to a function or an array")
+    ("cc: parse: not built yet: a cast to a pointer to a function" "cc: parse: not built yet: a cast to a pointer to a function")

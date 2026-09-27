@@ -60,7 +60,7 @@ B
 
 ```cc
 (display (guard (e (do (display "refused: ") (write e) ""))
-  (cc-exe-run "#include <string.h>\nint main(void) { return strlen(\"abc\"); }")))
+  (cc-exe-run "#include <stdio.h>\nint main(void) { return fopen(\"x\", \"r\") != 0; }")))
 ```
 ---
-    refused: #<err:cc cc: compile: not built yet: a call to strlen>
+    refused: #<err:cc cc: compile: not built yet: a call to fopen>

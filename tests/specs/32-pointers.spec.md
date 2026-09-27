@@ -40,6 +40,24 @@ through /usr/bin/cc, and exits as it does.
 ---
     (51 2)
 
+### what an address points at, interpreted and compiled
+
+`&a[1]` points at an int, so `+ 3` steps three of them; `1 + s` and
+`2[s]` name a char, as `s + 1` and `s[2]` do; two addresses subtract to
+a count, which adds as a number; `&a` points at the whole array; and a
+string literal's size counts its NUL.
+
+```cc
+(def src "#include <stdio.h>\nstruct P { int x; int y; };\nint main(void) { int a[5] = {10, 20, 30, 40, 50}; char s[] = \"abcde\"; struct P pts[2] = {{1, 2}, {3, 4}}; int *p = &a[3]; long n = (p - a) + 1; printf(\"%d %d %d %d %ld %d %d\\n\", *(&a[1] + 3), *(1 + s), 2[s], *(&pts[0].y + 2), n, (int)((char *)(&a + 1) - (char *)&a), (int)sizeof \"hello\"); return 0; }\n")
+(display (list (cc-run src) (cc-exe-run src)))
+```
+---
+```output
+50 98 99 4 4 20 6
+50 98 99 4 4 20 6
+(0 0)
+```
+
 ## arrays
 
 ### elements stored and loaded by subscript
@@ -148,14 +166,14 @@ Global l 7
 
 ## the refusals
 
-### a global pointer initialized with an address
+### a global pointer that starts at a number cast to a pointer, moved
 
 ```cc
 (display (guard (e (do (display "refused: ") (write e) ""))
-  (cc-exe-run "char *g = \"hi\";\nint main(void) { return 0; }")))
+  (cc-exe-run "int *g = (int *)4096 + 1;\nint main(void) { return g == (int *)4100; }")))
 ```
 ---
-    refused: #<err:cc cc: compile: not built yet: a global pointer initialized with an address>
+    refused: #<err:cc cc: compile: not built yet: a global initialized by arithmetic on an address>
 
 ### arithmetic other than + and - on an address
 

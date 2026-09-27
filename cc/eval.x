@@ -43,7 +43,43 @@
 ; runtime's builtins take ids too.
 (def %cc-fun-base 1048576)
 (def %cc-fun-ids ())    ; ((name . id) ...)
-(def %cc-builtins (list "putchar" "puts" "printf" "malloc" "free" "exit"))
+(def %cc-builtins (list "putchar" "puts" "printf" "malloc" "free" "exit"
+                    "strlen" "strcmp" "strcpy" "memcpy" "memset" "strcat" "strncmp"
+                    "memcmp" "strncpy" "strchr" "atoi"
+                    "isdigit" "isalpha" "isalnum" "isspace" "isupper" "islower"
+                    "toupper" "tolower" "abs"))
+
+; <ctype.h>'s classifications in the C locale, each the ranges of codes it
+; takes in: (NAME (LOW . HIGH) ...).  run reads them here and the compiled
+; runtime is written from them.
+(def ctype-ranges
+  (list (list "isdigit" (pair 48 57))
+        (list "isalpha" (pair 65 90) (pair 97 122))
+        (list "isalnum" (pair 48 57) (pair 65 90) (pair 97 122))
+        (list "isspace" (pair 9 13) (pair 32 32))
+        (list "isupper" (pair 65 90))
+        (list "islower" (pair 97 122))))
+
+; the ranges of the classification NAME, or nil
+(def %cc-ctype-find
+  (fn (_ name)
+    (def go (fn (self es)
+              (match
+                ((null? es) ())
+                ((string=? (first (first es)) name) (rest (first es)))
+                (#t (self (rest es))))))
+    (go ctype-ranges)))
+
+; 1 when C lies in one of RANGES, else 0
+(def %cc-in-ranges
+  (fn (_ c ranges)
+    (def go
+      (fn (self rs)
+        (match
+          ((null? rs) 0)
+          ((if (>= c (first (first rs))) (<= c (rest (first rs))) #f) 1)
+          (#t (self (rest rs))))))
+    (go ranges)))
 
 ; is the string S one of the strings in L
 (def %cc-member-str?
@@ -144,15 +180,43 @@
 
 (def %cc-load
   (fn (_ addr kind)
-    (if (<= addr 0) (%cc-oops "null or negative address read")
-      (let ((w (%cc-width kind)))
-        (let ((v (%cc-raw-ref addr w)))
-          (if (if (signed? kind) (< w 8) #f) (%cc-sext v w) v))))))
+    (match
+      ((<= addr 0) (%cc-oops "null or negative address read"))
+      ((%cc-bits? kind) (%cc-bits-read addr kind))
+      (#t (let ((w (%cc-width kind)))
+            (let ((v (%cc-raw-ref addr w)))
+              (if (if (signed? kind) (< w 8) #f) (%cc-sext v w) v)))))))
 
 (def %cc-store
   (fn (_ addr v kind)
-    (if (<= addr 0) (%cc-oops "null or negative address write")
-      (%cc-raw-set! addr v (%cc-width kind)))))
+    (match
+      ((<= addr 0) (%cc-oops "null or negative address write"))
+      ((%cc-bits? kind) (%cc-bits-write! addr v kind))
+      (#t (%cc-raw-set! addr v (%cc-width kind))))))
+
+; A bit-field, (bits C-TYPE BIT WIDTH): WIDTH bits from bit BIT of the unit
+; of C-TYPE at the field's address.  A read takes the unit whole and its
+; field with the sign of C-TYPE; a write puts V's low WIDTH bits there and
+; keeps the unit's others.
+(def %cc-bits? (fn (_ k) (if (pair? k) (eq? (first k) (lit bits)) #f)))
+
+(def %cc-bits-read
+  (fn (_ addr k)
+    (def unit (first (rest k)))
+    (def bit (first (rest (rest k))))
+    (def width (first (rest (rest (rest k)))))
+    (def v (& (>> (%cc-raw-ref addr (kind-size unit)) bit) (- (<< 1 width) 1)))
+    (if (if (signed? unit) (>= v (<< 1 (- width 1))) #f) (- v (<< 1 width)) v)))
+
+(def %cc-bits-write!
+  (fn (_ addr v k)
+    (def unit (first (rest k)))
+    (def bit (first (rest (rest k))))
+    (def width (first (rest (rest (rest k)))))
+    (def size (kind-size unit))
+    (def mask (<< (- (<< 1 width) 1) bit))
+    (def old (%cc-raw-ref addr size))
+    (%cc-raw-set! addr (+ (- old (& old mask)) (& (<< v bit) mask)) size)))
 
 ; V converted to KIND, as a cast does: cut to the kind's width and read
 ; back with its sign.  An address and the 64-bit kinds keep every bit, and
@@ -226,28 +290,29 @@
             (self (+ a 1) (pair (integer->char b) acc))))))
     (go addr ())))
 
+; N's digits in BASE, ten or sixteen, N read as unsigned: a number with
+; the top bit set is the one 2^64 above it.  Each turn's quotient is taken
+; with its top bit shifted out first, so it is never negative -- halved and
+; divided by five for ten, shifted four for sixteen.
+(def %cc-unsigned->str
+  (fn (_ n base)
+    (def go
+      (fn (self t acc)
+        (if (= t 0) acc
+          (let ((q (if (= base 16)
+                     (& (>> t 4) (- (<< 1 60) 1))
+                     (/ (& (>> t 1) (- (<< 1 63) 1)) 5))))
+            (def d (- t (* q base)))
+            (self q (pair (integer->char (if (< d 10) (+ 48 d) (+ 87 d))) acc))))))
+    (if (= n 0) "0" (list->string (go n ())))))
+
+; N's digits in decimal, with its sign; the most negative long's negation
+; is itself, which read as unsigned is the right number
 (def %cc-int->str
   (fn (_ n)
-    (if (= n 0) "0"
-      (let ((go (fn (self t acc)
-                  (if (= t 0) acc
-                    (self (/ t 10)
-                      (pair (integer->char (+ 48 (% t 10))) acc))))))
-        (if (< n 0)
-          (string-append "-" (list->string (go (- 0 n) ())))
-          (list->string (go n ())))))))
-
-(def %cc-hex->str
-  (fn (_ n)
-    (if (= n 0) "0"
-      (let ((go (fn (self t acc)
-                  (if (= t 0) (list->string acc)
-                    (let ((d (% t 16)))
-                      (self (/ t 16)
-                        (pair (integer->char
-                                (if (< d 10) (+ 48 d) (+ 87 d)))
-                          acc)))))))
-        (go n ())))))
+    (if (< n 0)
+      (string-append "-" (%cc-unsigned->str (- 0 n) 10))
+      (%cc-unsigned->str n 10))))
 
 ; division and remainder, with the evaluator's own report for a zero divisor
 (def %cc-div
@@ -345,36 +410,51 @@
 
 (set! %cc-kind-of
   (fn (self node env)
-    (let ((t (first node)))
-      (if (eq? t (lit var))
+    (def t (first node))
+    (def address?
+      (fn (_ k) (if (pair? k) (if (eq? (first k) (lit ptr)) #t (eq? (first k) (lit array))) #f)))
+    (match
+      ((eq? t (lit var))
         (let ((e (%cc-find (first (rest node)) env)))
-          (if (null? e) (lit int) (rest (rest e))))
-      (if (eq? t (lit dot))
+          (if (null? e) (lit int) (rest (rest e)))))
+      ((eq? t (lit str)) (list (lit array) (+ (byte-len (first (rest node))) 1) (lit char)))
+      ((eq? t (lit dot))
         (let ((f (%cc-field (%cc-struct-name (self (first (rest node)) env)
                               (first (rest (rest node))))
                    (first (rest (rest node))))))
-          (if (null? f) (%cc-oops (string-append "no field: " (first (rest (rest node))))) (rest f)))
-      (if (eq? t (lit arrow))
+          (if (null? f) (%cc-oops (string-append "no field: " (first (rest (rest node))))) (rest f))))
+      ((eq? t (lit arrow))
         (let ((f (%cc-field (%cc-struct-name (kind-elem (self (first (rest node)) env))
                               (first (rest (rest node))))
                    (first (rest (rest node))))))
-          (if (null? f) (%cc-oops (string-append "no field: " (first (rest (rest node))))) (rest f)))
-      (if (eq? t (lit idx)) (kind-elem (self (first (rest node)) env))
-      (if (if (eq? t (lit un)) (string=? (first (rest node)) "*") #f)
-        (kind-elem (self (first (rest (rest node))) env))
-      (if (eq? t (lit call))
-        ; a named call's kind is the function's declared return kind
+          (if (null? f) (%cc-oops (string-append "no field: " (first (rest (rest node))))) (rest f))))
+      ; A[I] is what A + I points at
+      ((eq? t (lit idx))
+        (kind-elem (self (list (lit bin) "+" (first (rest node)) (first (rest (rest node)))) env)))
+      ((if (eq? t (lit un)) (string=? (first (rest node)) "*") #f)
+        (kind-elem (self (first (rest (rest node))) env)))
+      ((if (eq? t (lit un)) (string=? (first (rest node)) "&") #f)
+        (list (lit ptr) (self (first (rest (rest node))) env)))
+      ((eq? t (lit call))
+        ; a named call's C type is the one its function declares it returns
         (let ((f (if (null? (%cc-find (first (rest node)) env)) (%cc-fun (first (rest node))) ())))
           (if (null? f) (lit int)
-            (let ((r (rest (rest (rest f))))) (if (null? r) (lit int) (first r)))))
-      (if (if (eq? t (lit bin)) (if (string=? (first (rest node)) "+") #t (string=? (first (rest node)) "-")) #f)
-        ; pointer arithmetic keeps the pointer's kind
-        (let ((ka (self (first (rest (rest node))) env)))
-          (if (if (pair? ka) (eq? (first ka) (lit ptr)) #f) ka
-            (if (if (pair? ka) (eq? (first ka) (lit array)) #f)
-              (list (lit ptr) (kind-elem ka))
-              (lit int))))
-        (if (eq? t (lit cast)) (first (rest node)) (lit int))))))))))))
+            (let ((r (rest (rest (rest f))))) (if (null? r) (lit int) (first r))))))
+      ; + and - with an address on either side of + or the left of -
+      ; answer a pointer to what it points at; two addresses subtract to
+      ; the count between them, a long
+      ((if (eq? t (lit bin)) (if (string=? (first (rest node)) "+") #t (string=? (first (rest node)) "-")) #f)
+        (let ((ka (self (first (rest (rest node))) env))
+              (kb (self (first (rest (rest (rest node)))) env)))
+          (def minus? (string=? (first (rest node)) "-"))
+          (def pointer (fn (_ k) (if (eq? (first k) (lit ptr)) k (list (lit ptr) (kind-elem k)))))
+          (match
+            ((if minus? (if (address? ka) (address? kb) #f) #f) (lit long))
+            ((address? ka) (pointer ka))
+            ((if minus? #f (address? kb)) (pointer kb))
+            (#t (lit int)))))
+      ((eq? t (lit cast)) (first (rest node)))
+      (#t (lit int)))))
 
 ; What `+ 1` moves an expression by: a pointer or an array steps by its
 ; element's size, and everything else by one.  Only an address scales.
@@ -432,6 +512,71 @@
                     (self (+ i 1))))))
     (go 0)))
 
+; N bytes at ADDR, each B
+(def %cc-fill-bytes!
+  (fn (_ addr b n)
+    (def go (fn (self i)
+              (if (>= i n) ()
+                (do (%cc-raw-set! (+ addr i) b 1) (self (+ i 1))))))
+    (go 0)))
+
+; the bytes before the NUL at ADDR
+(def %cc-strlen
+  (fn (_ addr)
+    (def go (fn (self i) (if (= (%cc-raw-ref (+ addr i) 1) 0) i (self (+ i 1)))))
+    (go 0)))
+
+; the first difference between the bytes at A and B, each read as an
+; unsigned char, over at most N of them (all, when N is nil), stopping at
+; a NUL when NUL? says; 0 when there is none -- strcmp, strncmp and memcmp
+(def %cc-bytes-compare
+  (fn (_ a b n nul?)
+    (def go
+      (fn (self i)
+        (if (if (null? n) #f (>= i n)) 0
+          (let ((x (%cc-raw-ref (+ a i) 1)) (y (%cc-raw-ref (+ b i) 1)))
+            (match
+              ((not (= x y)) (- x y))
+              ((if nul? (= x 0) #f) 0)
+              (#t (self (+ i 1))))))))
+    (go 0)))
+
+; N bytes to DST: the string at SRC, then NULs to the end of the N; answers
+; DST
+(def %cc-strncpy!
+  (fn (_ dst src n)
+    (def len (%cc-strlen src))
+    (def go (fn (self i)
+              (if (>= i n) ()
+                (do (%cc-raw-set! (+ dst i) (if (< i len) (%cc-raw-ref (+ src i) 1) 0) 1)
+                    (self (+ i 1))))))
+    (do (go 0) dst)))
+
+; the address of the first C, read as an unsigned char, in the string at S
+; -- its NUL included -- or 0
+(def %cc-strchr
+  (fn (_ s c)
+    (def ch (& c 255))
+    (def go (fn (self i)
+              (let ((b (%cc-raw-ref (+ s i) 1)))
+                (match ((= b ch) (+ s i)) ((= b 0) 0) (#t (self (+ i 1)))))))
+    (go 0)))
+
+; the int the digits at S spell, after spaces and a sign
+(def %cc-atoi
+  (fn (_ s)
+    (def space? (fn (_ b) (if (= b 32) #t (if (>= b 9) (<= b 13) #f))))
+    (def skip (fn (self i) (if (space? (%cc-raw-ref (+ s i) 1)) (self (+ i 1)) i)))
+    (def at (skip 0))
+    (def c (%cc-raw-ref (+ s at) 1))
+    (def minus? (= c 45))
+    (def digits
+      (fn (self i acc)
+        (let ((b (%cc-raw-ref (+ s i) 1)))
+          (if (if (>= b 48) (<= b 57) #f) (self (+ i 1) (+ (* acc 10) (- b 48))) acc))))
+    (def v (digits (if (if minus? #t (= c 43)) (+ at 1) at) 0))
+    (if minus? (- 0 v) v)))
+
 ; bytes out as a list, and back in: a returned struct is read before its
 ; frame pops -- the caller's fresh slot can be the very bytes the callee's
 ; first parameter held, and alloca zero-fills them (the bug: `return a;` of
@@ -459,10 +604,9 @@
           (if (null? e)
             (%cc-oops (string-append "undefined: " (first (rest node))))
             (first (rest e))))
+        ; A[I] is at A + I, and C lets either be the address
         (if (eq? t (lit idx))
-          (+ (%cc-eval (first (rest node)) env)
-            (* (%cc-step-of (first (rest node)) env)
-              (%cc-eval (first (rest (rest node))) env)))
+          (%cc-eval (list (lit bin) "+" (first (rest node)) (first (rest (rest node)))) env)
           (if (eq? t (lit dot))
             (let ((f (%cc-field (%cc-struct-name (%cc-kind-of (first (rest node)) env)
                                   (first (rest (rest node))))
@@ -572,17 +716,20 @@
             ; a struct-kinded place: copy the bytes from the value's address
             (let ((dst (%cc-lval (first (rest node)) env)))
               (do (%cc-copy-bytes! dst v (kind-size k)) dst))
-            (do (%cc-store (%cc-lval (first (rest node)) env) v k) v)))
+            ; an assignment answers what its place holds after it: the
+            ; value converted to the place's C type
+            (let ((a (%cc-lval (first (rest node)) env)))
+              (do (%cc-store a v k) (%cc-load a k)))))
       (if (eq? t (lit preinc))
         (let ((a (%cc-lval (first (rest node)) env)))
           (def k (%cc-kind-of (first (rest node)) env))
           (let ((v (+ (%cc-load a k) (%cc-step-of (first (rest node)) env))))
-            (do (%cc-store a v k) v)))
+            (do (%cc-store a v k) (%cc-load a k))))
       (if (eq? t (lit predec))
         (let ((a (%cc-lval (first (rest node)) env)))
           (def k (%cc-kind-of (first (rest node)) env))
           (let ((v (- (%cc-load a k) (%cc-step-of (first (rest node)) env))))
-            (do (%cc-store a v k) v)))
+            (do (%cc-store a v k) (%cc-load a k))))
       (if (eq? t (lit postinc))
         (let ((a (%cc-lval (first (rest node)) env)))
           (def k (%cc-kind-of (first (rest node)) env))
@@ -626,37 +773,106 @@
 
 ; --- calls and builtins ------------------------------------------------------
 
+; The conversion specification after the % at I in FMT, as printf reads
+; it: (NEXT LETTER L? LEFT? ZERO? WIDTH PRECISION), NEXT past the letter.
+; The flags - and 0 come first, then a field width (0 when none), a
+; precision after a . (() when none; a . alone is 0) and an l for a long.
+; () when FMT ends before the letter.
+(def printf-conversion
+  (fn (_ fmt i)
+    (def end (byte-len fmt))
+    (def byte (fn (_ j) (if (< j end) (byte-at fmt j) 0)))
+    ; (NEXT . VALUE) for the decimal digits from J
+    (def number
+      (fn (self j v)
+        (if (if (>= (byte j) 48) (<= (byte j) 57) #f)
+          (self (+ j 1) (+ (* v 10) (- (byte j) 48)))
+          (pair j v))))
+    (def flags
+      (fn (self j left? zero?)
+        (match
+          ((= (byte j) 45) (self (+ j 1) #t zero?))
+          ((= (byte j) 48) (self (+ j 1) left? #t))
+          (#t (list j left? zero?)))))
+    (def f (flags (+ i 1) #f #f))
+    (def w (number (first f) 0))
+    (def p (if (= (byte (first w)) 46) (number (+ (first w) 1) 0) (pair (first w) ())))
+    (def l? (= (byte (first p)) 108))
+    (def at (if l? (+ (first p) 1) (first p)))
+    (if (>= at end) ()
+      (list (+ at 1) (byte at) l? (first (rest f)) (first (rest (rest f))) (rest w) (rest p)))))
+
+; N bytes of padding, zeros for ZERO? and spaces otherwise
+(def printf-pad
+  (fn (_ zero? n)
+    (def go (fn (self k acc) (if (<= k 0) acc (self (- k 1) (pair (if zero? "0" " ") acc)))))
+    (string-concat (go n ()))))
+
+; TEXT, the conversion C's, fitted to FIELD (LEFT? ZERO? WIDTH PRECISION):
+; a number's digits made up to the precision with zeros, and none for a
+; zero at precision 0; a string cut to the precision; then padded to the
+; field width with spaces before, or after for LEFT?, or zeros after the
+; sign for ZERO? -- which a number with a precision ignores
+(def printf-fit
+  (fn (_ c text field)
+    (def left? (first field))
+    (def width (first (rest (rest field))))
+    (def precision (first (rest (rest (rest field)))))
+    (def number? (not (if (= c 99) #t (= c 115))))
+    (def zero? (if (first (rest field)) (if number? (null? precision) #t) #f))
+    (def sign (if number? (if (= (byte-at text 0) 45) "-" "") ""))
+    (def digits (substring text (byte-len sign) (byte-len text)))
+    (def body
+      (match
+        ((null? precision) digits)
+        ((= c 115) (if (< precision (byte-len digits)) (substring digits 0 precision) digits))
+        ((not number?) digits)
+        ((if (= precision 0) (string=? digits "0") #f) "")
+        (#t (string-append (printf-pad #t (- precision (byte-len digits))) digits))))
+    (def pad (- width (+ (byte-len sign) (byte-len body))))
+    (match
+      (left? (string-append sign body (printf-pad #f pad)))
+      (zero? (string-append sign (printf-pad #t pad) body))
+      (#t (string-append (printf-pad #f pad) sign body)))))
+
+; printf: %d %i %u %x %c %s and %%, and %ld %li %lu %lx, each with the
+; flags - and 0, a field width and a precision; an int's conversion reads
+; the argument's low 32 bits, as the compiled one does.  It answers the
+; count of bytes written, as C's does.
 (def %cc-printf
   (fn (_ args)
     (def fmt (%cc-cstr (first args)))
     (def end (byte-len fmt))
+    (def low32 (fn (_ v) (& v 4294967295)))
+    ; one conversion's text: its letter C, after an l when L?, of V
+    (def convert-one
+      (fn (_ c l? v)
+        (match
+          ((if (= c 100) #t (= c 105))                    ; d i
+            (%cc-int->str (if l? v (%cc-sext (low32 v) 4))))
+          ((= c 117) (%cc-unsigned->str (if l? v (low32 v)) 10))       ; u
+          ((= c 120) (%cc-unsigned->str (if l? v (low32 v)) 16))       ; x
+          ((if l? #f (= c 99)) (list->string (list (integer->char (& v 255)))))  ; c
+          ((if l? #f (= c 115)) (%cc-cstr v))            ; s
+          (#t (%cc-oops "printf: only %d %i %u %x %c %s %% and %ld %li %lu %lx")))))
     (def go
       (fn (self i as acc)
-        (if (>= i end)
-          (do (display (string-concat (reverse acc))) 0)
-          (let ((b (byte-at fmt i)))
-            (if (not (= b 37))                             ; %
-              (self (+ i 1) as
-                (pair (substring fmt i (+ i 1)) acc))
-              (let ((c (byte-at fmt (+ i 1))))
-                (if (= c 37)
-                  (self (+ i 2) as (pair "%" acc))
-                  (if (= c 100)                            ; d
-                    (self (+ i 2) (rest as)
-                      (pair (%cc-int->str (first as)) acc))
-                    (if (= c 99)                           ; c
-                      (self (+ i 2) (rest as)
-                        (pair (list->string
-                                (list (integer->char (first as))))
-                          acc))
-                      (if (= c 115)                        ; s
-                        (self (+ i 2) (rest as)
-                          (pair (%cc-cstr (first as)) acc))
-                        (if (= c 120)                      ; x
-                          (self (+ i 2) (rest as)
-                            (pair (%cc-hex->str (first as)) acc))
-                          (%cc-oops
-                            "printf: only %d %c %s %x %% so far"))))))))))))
+        (match
+          ((>= i end)
+            (let ((s (string-concat (reverse acc))))
+              (do (display s) (byte-len s))))
+          ((not (= (byte-at fmt i) 37)) (self (+ i 1) as (pair (substring fmt i (+ i 1)) acc)))
+          ((>= (+ i 1) end) (%cc-oops "printf's % at the end of its format"))
+          ((= (byte-at fmt (+ i 1)) 37) (self (+ i 2) as (pair "%" acc)))
+          (#t
+            (let ((spec (printf-conversion fmt i)))
+              (if (null? spec) (%cc-oops "printf's % at the end of its format"))
+              (if (null? as) (%cc-oops "printf with fewer arguments than conversions"))
+              (def c (first (rest spec)))
+              (self (first spec) (rest as)
+                (pair (printf-fit c (convert-one c (first (rest (rest spec))) (first as))
+                        (rest (rest (rest spec))))
+                  acc)))))))
     (go 0 (rest args) ())))
 
 (def %cc-call-interp
@@ -701,6 +917,36 @@
         ((string=? name "printf") (%cc-printf args))
         ((string=? name "malloc") (%cc-heap (first args)))
         ((string=? name "free") 0)
+        ((string=? name "strlen") (%cc-strlen (first args)))
+        ((string=? name "strcmp") (%cc-bytes-compare (first args) (first (rest args)) () #t))
+        ((string=? name "strncmp")
+          (%cc-bytes-compare (first args) (first (rest args)) (first (rest (rest args))) #t))
+        ((string=? name "memcmp")
+          (%cc-bytes-compare (first args) (first (rest args)) (first (rest (rest args))) #f))
+        ((string=? name "strcat")
+          (do (%cc-copy-bytes! (+ (first args) (%cc-strlen (first args))) (first (rest args))
+                (+ (%cc-strlen (first (rest args))) 1))
+              (first args)))
+        ((string=? name "strncpy")
+          (%cc-strncpy! (first args) (first (rest args)) (first (rest (rest args)))))
+        ((string=? name "strchr") (%cc-strchr (first args) (first (rest args))))
+        ((string=? name "atoi") (%cc-atoi (first args)))
+        ((string=? name "strcpy")
+          (do (%cc-copy-bytes! (first args) (first (rest args))
+                (+ (%cc-strlen (first (rest args))) 1))
+              (first args)))
+        ((string=? name "memcpy")
+          (do (%cc-copy-bytes! (first args) (first (rest args)) (first (rest (rest args))))
+              (first args)))
+        ((string=? name "memset")
+          (do (%cc-fill-bytes! (first args) (& (first (rest args)) 255) (first (rest (rest args))))
+              (first args)))
+        ((not (null? (%cc-ctype-find name))) (%cc-in-ranges (first args) (%cc-ctype-find name)))
+        ((string=? name "toupper")
+          (let ((c (first args))) (if (if (>= c 97) (<= c 122) #f) (- c 32) c)))
+        ((string=? name "tolower")
+          (let ((c (first args))) (if (if (>= c 65) (<= c 90) #f) (+ c 32) c)))
+        ((string=? name "abs") (let ((v (first args))) (if (< v 0) (- 0 v) v)))
         ((string=? name "exit")
           (do (set! %cc-exit-code (first args))
               (Err raise (lit cc-exit) "exit" ())))
@@ -799,6 +1045,27 @@
         (%cc-oops "unknown statement"))))))))))))))
 
 ; a block: declarations extend the env as they pass
+; A static local's storage, made the first time its declaration is reached
+; and kept for the rest of the run: taken from the heap, initialized once.
+; (NODE . ADDRESS), the declaration's node found again by identity.
+(def %cc-statics ())
+; The initializer sees the names of ENV, the block's, and its own.
+(def %cc-static-address
+  (fn (_ node c-type init env)
+    (def go (fn (self es)
+              (match
+                ((null? es) ())
+                ((same? (first (first es)) node) (rest (first es)))
+                (#t (self (rest es))))))
+    (def found (go %cc-statics))
+    (if (not (null? found)) found
+      (let ((a (%cc-heap (kind-size c-type))))
+        (do (if (null? init) ()
+              (%cc-init-into! a c-type init
+                (pair (pair (first (rest node)) (pair a c-type)) env)))
+            (set! %cc-statics (pair (pair node a) %cc-statics))
+            a)))))
+
 (set! %cc-exec-block
   (fn (_ blk env0)
     (def go
@@ -809,12 +1076,15 @@
               (let ((name (first (rest item))))
                 (def kind (first (rest (rest item))))
                 (def init (first (rest (rest (rest item)))))
-                (def size (kind-size kind))
-                (def a (%cc-alloca size))
-                (do (if (null? init) ()
-                      (%cc-init-into! a kind init env))
-                    (self (rest items)
-                      (pair (pair name (pair a kind)) env))))
+                (def static? (not (null? (rest (rest (rest (rest item)))))))
+                (def a (if static? (%cc-static-address item kind init env)
+                         (%cc-alloca (kind-size kind))))
+                ; the name is in scope in its own initializer:
+                ; struct node *n = malloc(sizeof *n);
+                (def inner (pair (pair name (pair a kind)) env))
+                (do (if (if static? #t (null? init)) ()
+                      (%cc-init-into! a kind init inner))
+                    (self (rest items) inner)))
               (let ((c (%cc-exec item env)))
                 (if (null? c) (self (rest items) env) c)))))))
     (go (first (rest blk)) env0)))
@@ -847,6 +1117,7 @@
     (set! %cc-genv ())
     (set! %cc-funs ())
     (set! %cc-strtab ())
+    (set! %cc-statics ())
     (set! %cc-fun-ids ())
     (set! %cc-exit-code ())
     (def prog (cc-parse (cc-lex src)))
@@ -862,10 +1133,10 @@
                     (def init (first (rest (rest (rest item)))))
                     (def size (kind-size kind))
                     (def a (%cc-heap size))
-                    (do (if (null? init) ()
-                          (%cc-init-into! a kind init ()))
-                        (set! %cc-genv
-                          (pair (pair name (pair a kind)) %cc-genv)))))
+                    ; in scope in its own initializer, as a local is
+                    (do (set! %cc-genv (pair (pair name (pair a kind)) %cc-genv))
+                        (if (null? init) ()
+                          (%cc-init-into! a kind init ())))))
                 (self (rest items)))))))
     (load! prog)
     (%cc-scan-program! prog)
@@ -881,4 +1152,5 @@
 
 (def cc-run (fn (_ src) (%cc-run-core src)))
 
-(provide cc/eval cc-run kind-elem signed?)
+(provide cc/eval cc-run ctype-ranges kind-elem printf-conversion printf-fit printf-pad
+  signed?)
