@@ -18,8 +18,9 @@
 ; in the form of its kind (the integer kinds, below), and an operator whose
 ; result can leave that form puts it back, so arithmetic wraps as C's does.
 ;
-; Compiled so far: main and the functions beside it, with globals, locals and
-; parameters of `char`, `short`, `int` and `long`, signed and unsigned,
+; Compiled so far: main and the functions beside it, with globals, locals
+; (static ones kept once, in the data), and parameters of `char`, `short`,
+; `int` and `long`, signed and unsigned,
 ; pointers to anything, and arrays, structs and unions of any of these, each
 ; at its kind's size,
 ; assignment, ++ and --, `if`/`else`, `while`, `do`, `for`, `switch`,
@@ -601,6 +602,50 @@
     (def off (%cc-gen-data! (%cc-gen-const-bytes kind init) (kind-align kind)))
     (set! %cc-gen-globals (pair (pair name (pair off kind)) %cc-gen-globals))))
 
+; A static local is kept once for the program, as a global is: room in the
+; data with its initializer's bytes in place, laid out with the globals
+; before any function is compiled.  (NODE OFFSET . C-TYPE), the
+; declaration's node found again by identity; the name is its function's
+; alone (%cc-gen-scan!).
+(def %cc-gen-statics ())
+
+(def %cc-gen-static-decl?
+  (fn (_ node) (not (null? (rest (rest (rest (rest node))))))))
+
+(def %cc-gen-static!
+  (fn (_ node)
+    (def c-type (%cc-gen-kind! (first (rest (rest node))) "a local"))
+    (def off
+      (%cc-gen-data! (%cc-gen-const-bytes c-type (first (rest (rest (rest node)))))
+        (kind-align c-type)))
+    (set! %cc-gen-statics (pair (pair node (pair off c-type)) %cc-gen-statics))))
+
+; every static declaration in NODE, laid out
+(def %cc-gen-scan-statics!
+  (fn (self node)
+    (if (pair? node)
+      (do (if (if (eq? (first node) (lit decl)) (%cc-gen-static-decl? node) #f)
+            (%cc-gen-static! node)
+            ())
+          (let ((go (fn (go xs) (if (pair? xs) (do (self (first xs)) (go (rest xs))) ()))))
+            (go node)))
+      ())))
+
+; the name a static declaration NODE declares, bound in the function being
+; compiled to its room in the data: an entry whose offset is (x22 . OFFSET)
+(def %cc-gen-bind-static!
+  (fn (_ node)
+    (def name (first (rest node)))
+    (if (not (null? (%cc-gen-find name)))
+      (%cc-gen-no (string-append "a second declaration of " name)))
+    (def go (fn (self es)
+              (match
+                ((null? es) (%cc-gen-no "a static local that was not laid out"))
+                ((same? (first (first es)) node) (rest (first es)))
+                (#t (self (rest es))))))
+    (def s (go %cc-gen-statics))
+    (set! %cc-gen-env (pair (pair name (pair (pair x22 (first s)) (rest s))) %cc-gen-env))))
+
 ; the little-endian bytes of V at KIND's width
 (def %cc-gen-value-bytes
   (fn (_ kind v)
@@ -893,18 +938,24 @@
 (def %cc-gen-place-of
   (fn (_ name)
     (let ((l (%cc-gen-find name)))
-      (if (not (null? l))
-        (%cc-gen-place x19
-          (if (< (first l) 0) (+ %cc-gen-frame-top (first l)) (first l))
-          (rest l))
-        (let ((g (%cc-gen-global-find name)))
-          (match
-            ((null? g) (%cc-gen-no (string-append "the name " name)))
-            ; a load takes twelve bits of offset, in units of its width,
-            ; and arm64's encoder masks a wider one
-            ((if (%cc-gen-array? (rest g)) #f (> (first g) (* 4095 (kind-size (rest g)))))
-              (%cc-gen-no "more globals than a load reaches"))
-            (#t (%cc-gen-place x22 (first g) (rest g)))))))))
+      (match
+        ; a static local's room in the data (%cc-gen-bind-static!), laid out
+        ; with the globals, so a load reaches it as it does them
+        ((if (null? l) #f (pair? (first l)))
+          (%cc-gen-place (first (first l)) (rest (first l)) (rest l)))
+        ((not (null? l))
+          (%cc-gen-place x19
+            (if (< (first l) 0) (+ %cc-gen-frame-top (first l)) (first l))
+            (rest l)))
+        (#t
+          (let ((g (%cc-gen-global-find name)))
+            (match
+              ((null? g) (%cc-gen-no (string-append "the name " name)))
+              ; a load takes twelve bits of offset, in units of its width,
+              ; and arm64's encoder masks a wider one
+              ((if (%cc-gen-array? (rest g)) #f (> (first g) (* 4095 (kind-size (rest g)))))
+                (%cc-gen-no "more globals than a load reaches"))
+              (#t (%cc-gen-place x22 (first g) (rest g))))))))))
 
 (def %cc-gen-load!
   (fn (_ place)
@@ -2301,6 +2352,8 @@
                       (if (null? items) ()
                         (do (self (first items)) (self2 (rest items)))))))
             (go (first (rest node)))))
+        ; a static local was laid out, initializer and all, with the globals
+        ((if (eq? t (lit decl)) (%cc-gen-static-decl? node) #f) ())
         ((eq? t (lit decl))
           ; the scan gave it its slot before any code was emitted, and a
           ; local of the name wins over a global of it
@@ -2443,11 +2496,15 @@
     (if (not (pair? node)) ()
       (let ((t (first node)))
         (match
+          ; a static local's name goes to its room in the data instead,
+          ; bound in the first pass
           ((eq? t (lit decl))
-            (let ((c-type (%cc-gen-kind! (first (rest (rest node))) "a local")))
-              (if (eq? (%cc-gen-aggregate? c-type) aggregates?)
-                (%cc-gen-slot! (first (rest node)) c-type)
-                ())))
+            (if (%cc-gen-static-decl? node)
+              (if aggregates? () (%cc-gen-bind-static! node))
+              (let ((c-type (%cc-gen-kind! (first (rest (rest node))) "a local")))
+                (if (eq? (%cc-gen-aggregate? c-type) aggregates?)
+                  (%cc-gen-slot! (first (rest node)) c-type)
+                  ()))))
           ((eq? t (lit block))
             (let ((go (fn (self2 items)
                         (if (null? items) ()
@@ -2598,6 +2655,10 @@
                   (do (%cc-gen-global! (first ds)) (self (rest ds)))))))
       (do (go (filter (fn (_ d) (not (aggregate-decl? d))) gdecls))
           (go (filter aggregate-decl? gdecls))))
+    ; then the static locals, before a string can push them past a load's
+    ; reach
+    (set! %cc-gen-statics ())
+    (%cc-gen-scan-statics! funs)
     (def a (asm-new 262144))
     (set! %cc-gen-asm a)
     (set! %cc-gen-nlabels 0)
