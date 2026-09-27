@@ -44,7 +44,8 @@
 (def %cc-fun-base 1048576)
 (def %cc-fun-ids ())    ; ((name . id) ...)
 (def %cc-builtins (list "putchar" "puts" "printf" "malloc" "free" "exit"
-                    "strlen" "strcmp" "strcpy" "memcpy" "memset"
+                    "strlen" "strcmp" "strcpy" "memcpy" "memset" "strcat" "strncmp"
+                    "memcmp" "strncpy" "strchr" "atoi"
                     "isdigit" "isalpha" "isalnum" "isspace" "isupper" "islower"
                     "toupper" "tolower" "abs"))
 
@@ -482,18 +483,56 @@
     (def go (fn (self i) (if (= (%cc-raw-ref (+ addr i) 1) 0) i (self (+ i 1)))))
     (go 0)))
 
-; the first difference between the strings at A and B, each byte read as
-; an unsigned char; 0 when they are the same
-(def %cc-strcmp
-  (fn (_ a b)
+; the first difference between the bytes at A and B, each read as an
+; unsigned char, over at most N of them (all, when N is nil), stopping at
+; a NUL when NUL? says; 0 when there is none -- strcmp, strncmp and memcmp
+(def %cc-bytes-compare
+  (fn (_ a b n nul?)
     (def go
       (fn (self i)
-        (let ((x (%cc-raw-ref (+ a i) 1)) (y (%cc-raw-ref (+ b i) 1)))
-          (match
-            ((not (= x y)) (- x y))
-            ((= x 0) 0)
-            (#t (self (+ i 1)))))))
+        (if (if (null? n) #f (>= i n)) 0
+          (let ((x (%cc-raw-ref (+ a i) 1)) (y (%cc-raw-ref (+ b i) 1)))
+            (match
+              ((not (= x y)) (- x y))
+              ((if nul? (= x 0) #f) 0)
+              (#t (self (+ i 1))))))))
     (go 0)))
+
+; N bytes to DST: the string at SRC, then NULs to the end of the N; answers
+; DST
+(def %cc-strncpy!
+  (fn (_ dst src n)
+    (def len (%cc-strlen src))
+    (def go (fn (self i)
+              (if (>= i n) ()
+                (do (%cc-raw-set! (+ dst i) (if (< i len) (%cc-raw-ref (+ src i) 1) 0) 1)
+                    (self (+ i 1))))))
+    (do (go 0) dst)))
+
+; the address of the first C, read as an unsigned char, in the string at S
+; -- its NUL included -- or 0
+(def %cc-strchr
+  (fn (_ s c)
+    (def ch (& c 255))
+    (def go (fn (self i)
+              (let ((b (%cc-raw-ref (+ s i) 1)))
+                (match ((= b ch) (+ s i)) ((= b 0) 0) (#t (self (+ i 1)))))))
+    (go 0)))
+
+; the int the digits at S spell, after spaces and a sign
+(def %cc-atoi
+  (fn (_ s)
+    (def space? (fn (_ b) (if (= b 32) #t (if (>= b 9) (<= b 13) #f))))
+    (def skip (fn (self i) (if (space? (%cc-raw-ref (+ s i) 1)) (self (+ i 1)) i)))
+    (def at (skip 0))
+    (def c (%cc-raw-ref (+ s at) 1))
+    (def minus? (= c 45))
+    (def digits
+      (fn (self i acc)
+        (let ((b (%cc-raw-ref (+ s i) 1)))
+          (if (if (>= b 48) (<= b 57) #f) (self (+ i 1) (+ (* acc 10) (- b 48))) acc))))
+    (def v (digits (if (if minus? #t (= c 43)) (+ at 1) at) 0))
+    (if minus? (- 0 v) v)))
 
 ; bytes out as a list, and back in: a returned struct is read before its
 ; frame pops -- the caller's fresh slot can be the very bytes the callee's
@@ -769,7 +808,19 @@
         ((string=? name "malloc") (%cc-heap (first args)))
         ((string=? name "free") 0)
         ((string=? name "strlen") (%cc-strlen (first args)))
-        ((string=? name "strcmp") (%cc-strcmp (first args) (first (rest args))))
+        ((string=? name "strcmp") (%cc-bytes-compare (first args) (first (rest args)) () #t))
+        ((string=? name "strncmp")
+          (%cc-bytes-compare (first args) (first (rest args)) (first (rest (rest args))) #t))
+        ((string=? name "memcmp")
+          (%cc-bytes-compare (first args) (first (rest args)) (first (rest (rest args))) #f))
+        ((string=? name "strcat")
+          (do (%cc-copy-bytes! (+ (first args) (%cc-strlen (first args))) (first (rest args))
+                (+ (%cc-strlen (first (rest args))) 1))
+              (first args)))
+        ((string=? name "strncpy")
+          (%cc-strncpy! (first args) (first (rest args)) (first (rest (rest args)))))
+        ((string=? name "strchr") (%cc-strchr (first args) (first (rest args))))
+        ((string=? name "atoi") (%cc-atoi (first args)))
         ((string=? name "strcpy")
           (do (%cc-copy-bytes! (first args) (first (rest args))
                 (+ (%cc-strlen (first (rest args))) 1))
