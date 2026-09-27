@@ -28,8 +28,9 @@
 ; & | ^ << >>, the six comparisons, &&, ||, the ternary, the comma,
 ; unary - ~ ! & *, casts, subscripts, `.` and `->`, each in the kind C's
 ; usual conversions give it, `putchar`, `puts`, `printf` of a literal
-; format with %d %i %u %x %ld %li %lu %lx %c %s and %%, `exit`, `malloc` and
-; `free`, unless the program defines its own; structs are passed and
+; format with %d %i %u %x %ld %li %lu %lx %c %s and %%, `exit`, `malloc`,
+; `free`, `strlen`, `strcmp`, `strcpy`, `memcpy` and `memset`, unless the
+; program defines its own; structs are passed and
 ; returned by value.  Everything else refuses by name: floating point,
 ; function pointers, and the rest of the runtime.
 ;
@@ -787,7 +788,6 @@
 
 (def %cc-gen-exit-at 0)     ; the entry's exit, this far before x21's helper
 
-(def %cc-gen-heap ())       ; the runtime malloc's label, once a call needs it
 (def %cc-gen-heap-bytes 0)  ; the heap the executable maps past the data
 (def %cc-gen-heap-size 67108864)   ; sixty-four megabytes of address space
 
@@ -1193,32 +1193,52 @@
         (%cc-gen-store! at k)
         (if after () (%cc-gen! (lit mov) x0 x8)))))
 
-; A call evaluates its arguments left to right, each onto the stack, then
-; takes them back into the argument registers -- last argument first, since
-; that is the one on top.  The answer comes back in x0.
+; A call: to one of the runtime's functions the program does not define
+; itself, to one of the program's own, or to a piece of the runtime the
+; generator writes out where the call is (putchar, puts, printf, exit,
+; free).  The answer comes back in x0.
 (def %cc-gen-call!
   (fn (_ node)
     (def name (first (rest node)))
     (def args (first (rest (rest node))))
-    (if (null? (%cc-gen-fun-find name))
-      (match
-        ((string=? name "putchar") (%cc-gen-putchar! args))
-        ((string=? name "puts") (%cc-gen-puts! args))
-        ((string=? name "printf") (%cc-gen-printf! args))
-        ((string=? name "exit") (%cc-gen-exit! args))
-        ((string=? name "malloc") (%cc-gen-malloc! args))
-        ((string=? name "free") (%cc-gen-free! args))
-        (#t (%cc-gen-call-fun! node)))
-      (%cc-gen-call-fun! node))))
+    (def entry (%cc-gen-runtime-find name))
+    (match
+      ((not (null? entry)) (%cc-gen-runtime-call! node entry))
+      ((not (null? (%cc-gen-fun-find name))) (%cc-gen-call-fun! node))
+      ((string=? name "putchar") (%cc-gen-putchar! args))
+      ((string=? name "puts") (%cc-gen-puts! args))
+      ((string=? name "printf") (%cc-gen-printf! args))
+      ((string=? name "exit") (%cc-gen-exit! args))
+      ((string=? name "free") (%cc-gen-free! args))
+      (#t (%cc-gen-call-fun! node)))))
 
-; malloc: a call to the runtime's, which is written after the program
-(def %cc-gen-malloc!
-  (fn (_ args)
-    (if (not (= (length args) 1))
-      (%cc-gen-no "malloc with other than one argument"))
-    (if (null? %cc-gen-heap) (set! %cc-gen-heap (%cc-gen-label)))
-    (do (%cc-gen-expr! (first args))
-        (%cc-gen! %cc-gen-callop (label %cc-gen-heap)))))
+; the runtime function's entry (%cc-gen-runtime) for NAME, unless the
+; program defines one of that name; nil otherwise
+(def %cc-gen-runtime-find
+  (fn (_ name)
+    (def go (fn (self es)
+              (match
+                ((null? es) ())
+                ((string=? (first (first es)) name) (first es))
+                (#t (self (rest es))))))
+    (go %cc-gen-runtime-live)))
+
+; A call to one of the runtime's functions: the first makes its label, and
+; each is a call like any other (%cc-gen-call-fun!).
+(def %cc-gen-runtime-call!
+  (fn (_ node entry)
+    (def name (first entry))
+    (def n (first (rest entry)))
+    (if (not (= (length (first (rest (rest node)))) n))
+      (%cc-gen-no
+        (string-append name " with other than "
+          (match ((= n 1) "one argument") ((= n 2) "two arguments") (#t "three arguments")))))
+    (if (null? (%cc-gen-fun-find name))
+      (let ((l (%cc-gen-label)))
+        (do (set! %cc-gen-funs (pair (pair name l) %cc-gen-funs))
+            (set! %cc-gen-runtime-called (pair (pair entry l) %cc-gen-runtime-called))))
+      ())
+    (%cc-gen-call-fun! node)))
 
 ; free: the heap is only ever taken from, so nothing goes back; the
 ; argument is still worked out, for whatever else it does
@@ -1236,13 +1256,12 @@
 ; no room left for answer the null pointer.  x86-64 spells a three-operand
 ; op as a move and a two-operand one, so no destination here is also its
 ; second source.
-(def %cc-gen-heap-fn!
+(def %cc-gen-malloc-body!
   (fn (_)
     (def taken (%cc-gen-data! (list 0 0 0 0 0 0 0 0) 8))
     (def base (round-up %cc-gen-databytes 16))
     (def full (%cc-gen-label))
     (set! %cc-gen-heap-bytes %cc-gen-heap-size)
-    (asm-label! %cc-gen-asm %cc-gen-heap)
     (%cc-gen! (lit cmp) x0 (imm 0))
     (%cc-gen! (lit b/lt) (label full))
     (asm-load-imm64! %cc-gen-asm x2 %cc-gen-heap-size)
@@ -1270,6 +1289,128 @@
     (asm-label! %cc-gen-asm full)
     (%cc-gen! (lit mov) x0 (imm 0))
     (%cc-gen! (lit ret))))
+
+; strlen: the bytes before the NUL at x0
+(def %cc-gen-strlen-body!
+  (fn (_)
+    (def next (%cc-gen-label))
+    (def done (%cc-gen-label))
+    (%cc-gen! (lit mov) x1 x0)
+    (asm-label! %cc-gen-asm next)
+    (%cc-gen! (lit ldrb) x2 (mem x0 0))
+    (%cc-gen! (lit cmp) x2 (imm 0))
+    (%cc-gen! (lit b/eq) (label done))
+    (%cc-gen! (lit add) x0 x0 (imm 1))
+    (%cc-gen! (lit b) (label next))
+    (asm-label! %cc-gen-asm done)
+    (%cc-gen! (lit sub) x0 x0 x1)
+    (%cc-gen! (lit ret))))
+
+; strcmp: the first difference between the strings at x0 and x1, each byte
+; read as an unsigned char; 0 when they are the same
+(def %cc-gen-strcmp-body!
+  (fn (_)
+    (def next (%cc-gen-label))
+    (def differ (%cc-gen-label))
+    (def same (%cc-gen-label))
+    (asm-label! %cc-gen-asm next)
+    (%cc-gen! (lit ldrb) x2 (mem x0 0))
+    (%cc-gen! (lit ldrb) x8 (mem x1 0))
+    (%cc-gen! (lit cmp) x2 x8)
+    (%cc-gen! (lit b/ne) (label differ))
+    (%cc-gen! (lit cmp) x2 (imm 0))
+    (%cc-gen! (lit b/eq) (label same))
+    (%cc-gen! (lit add) x0 x0 (imm 1))
+    (%cc-gen! (lit add) x1 x1 (imm 1))
+    (%cc-gen! (lit b) (label next))
+    (asm-label! %cc-gen-asm differ)
+    (%cc-gen! (lit sub) x2 x2 x8)
+    (%cc-gen! (lit mov) x0 x2)
+    (%cc-gen! (lit ret))
+    (asm-label! %cc-gen-asm same)
+    (%cc-gen! (lit mov) x0 (imm 0))
+    (%cc-gen! (lit ret))))
+
+; strcpy: the string at x1, its NUL included, to x0; answers x0
+(def %cc-gen-strcpy-body!
+  (fn (_)
+    (def next (%cc-gen-label))
+    (def done (%cc-gen-label))
+    (%cc-gen! (lit mov) x8 x0)
+    (asm-label! %cc-gen-asm next)
+    (%cc-gen! (lit ldrb) x2 (mem x1 0))
+    (%cc-gen! (lit strb) x2 (mem x0 0))
+    (%cc-gen! (lit cmp) x2 (imm 0))
+    (%cc-gen! (lit b/eq) (label done))
+    (%cc-gen! (lit add) x0 x0 (imm 1))
+    (%cc-gen! (lit add) x1 x1 (imm 1))
+    (%cc-gen! (lit b) (label next))
+    (asm-label! %cc-gen-asm done)
+    (%cc-gen! (lit mov) x0 x8)
+    (%cc-gen! (lit ret))))
+
+; memcpy: x2 bytes from x1 to x0, a byte at a time; answers x0, which
+; waits on the stack since the four registers are all in use
+(def %cc-gen-memcpy-body!
+  (fn (_)
+    (def next (%cc-gen-label))
+    (def done (%cc-gen-label))
+    (asm-push! %cc-gen-asm x0)
+    (asm-label! %cc-gen-asm next)
+    (%cc-gen! (lit cmp) x2 (imm 0))
+    (%cc-gen! (lit b/eq) (label done))
+    (%cc-gen! (lit ldrb) x8 (mem x1 0))
+    (%cc-gen! (lit strb) x8 (mem x0 0))
+    (%cc-gen! (lit add) x0 x0 (imm 1))
+    (%cc-gen! (lit add) x1 x1 (imm 1))
+    (%cc-gen! (lit sub) x2 x2 (imm 1))
+    (%cc-gen! (lit b) (label next))
+    (asm-label! %cc-gen-asm done)
+    (asm-pop! %cc-gen-asm x0)
+    (%cc-gen! (lit ret))))
+
+; memset: x2 bytes at x0, each the low byte of x1; answers x0
+(def %cc-gen-memset-body!
+  (fn (_)
+    (def next (%cc-gen-label))
+    (def done (%cc-gen-label))
+    (asm-push! %cc-gen-asm x0)
+    (asm-label! %cc-gen-asm next)
+    (%cc-gen! (lit cmp) x2 (imm 0))
+    (%cc-gen! (lit b/eq) (label done))
+    (%cc-gen! (lit strb) x1 (mem x0 0))
+    (%cc-gen! (lit add) x0 x0 (imm 1))
+    (%cc-gen! (lit sub) x2 x2 (imm 1))
+    (%cc-gen! (lit b) (label next))
+    (asm-label! %cc-gen-asm done)
+    (asm-pop! %cc-gen-asm x0)
+    (%cc-gen! (lit ret))))
+
+; The runtime's functions: each written after the program's last function
+; when the program calls it and does not define its own.  An entry is
+; (NAME ARGUMENTS C-TYPE . BODY): how many arguments it takes, the C type
+; it answers, and what writes its code.  Its arguments arrive in registers,
+; as any call's first four do.
+(def %cc-gen-runtime
+  (list (pair "malloc" (pair 1 (pair (list (lit ptr) (lit void)) %cc-gen-malloc-body!)))
+        (pair "strlen" (pair 1 (pair (lit ulong) %cc-gen-strlen-body!)))
+        (pair "strcmp" (pair 2 (pair (lit int) %cc-gen-strcmp-body!)))
+        (pair "strcpy" (pair 2 (pair (list (lit ptr) (lit char)) %cc-gen-strcpy-body!)))
+        (pair "memcpy" (pair 3 (pair (list (lit ptr) (lit void)) %cc-gen-memcpy-body!)))
+        (pair "memset" (pair 3 (pair (list (lit ptr) (lit void)) %cc-gen-memset-body!)))))
+(def %cc-gen-runtime-live ())    ; the entries the program does not define
+(def %cc-gen-runtime-called ())  ; ((ENTRY . LABEL) ...), the ones it calls
+
+; each runtime function the program called, at its label
+(def %cc-gen-runtime-emit!
+  (fn (_)
+    (def go
+      (fn (self cs)
+        (if (null? cs) ()
+          (do (asm-label! %cc-gen-asm (rest (first cs)))
+              ((rest (rest (rest (first (first cs))))))
+              (self (rest cs))))))
+    (go (reverse %cc-gen-runtime-called))))
 
 ; exit: the status into x0, then the entry's own exit, the one main's
 ; return reaches
@@ -2161,7 +2302,7 @@
     (set! %cc-gen-link (if (eq? target (lit macho-arm64)) %cc-gen-lr ()))
     (set! %cc-gen-callop (if (eq? target (lit macho-arm64)) (lit bl) (lit call)))
     (set! %cc-gen-exit-at (%cc-gen-exit-back target))
-    (set! %cc-gen-heap ())
+    (set! %cc-gen-runtime-called ())
     (set! %cc-gen-heap-bytes 0)
     ; every function gets its label before any code, so a call can name one
     ; that has not been compiled yet
@@ -2182,15 +2323,24 @@
                         (self (rest fs))))))))
       (go funs))
     ; the runtime's malloc answers an address
-    (if (null? (%cc-gen-fun-find "malloc"))
-      (set! %cc-gen-rets (pair (pair "malloc" (list (lit ptr) (lit void))) %cc-gen-rets)))
+    ; the runtime's functions the program does not define, and the C types
+    ; they answer
+    (set! %cc-gen-runtime-live
+      (filter (fn (_ e) (null? (%cc-gen-fun-find (first e)))) %cc-gen-runtime))
+    (let ((go (fn (self es)
+                (if (null? es) ()
+                  (do (set! %cc-gen-rets
+                        (pair (pair (first (first es)) (first (rest (rest (first es)))))
+                          %cc-gen-rets))
+                      (self (rest es)))))))
+      (go %cc-gen-runtime-live))
     ; a refusal can raise partway through; the buffer is released first
     (guard (err (do (asm-free! a)
                     (set! %cc-gen-asm ())
                     (error err (if (Err err? err) (err msg) "cc: compile failed"))))
       (let ((go (fn (self fs) (if (null? fs) () (do (%cc-gen-fun! (first fs)) (self (rest fs)))))))
         (do (go (pair main others))
-            (if (null? %cc-gen-heap) () (%cc-gen-heap-fn!)))))
+            (%cc-gen-runtime-emit!))))
     (def n (asm-pos a))
     (def code (%cc-gen-read (asm-finalize! a) (- n 1) ()))
     (asm-free! a)
