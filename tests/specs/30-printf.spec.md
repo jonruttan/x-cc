@@ -4,8 +4,9 @@
 Compiled printf.  The format is a literal, so it is laid out at compile
 time: it splits into runs of text and conversions, a `%s`'s literal and a
 `%%` join the text around them, and what is left for run time is a write
-per run of text, one per `%c`, and a conversion to decimal per `%d`, built
-in a buffer in the frame.  Every argument is evaluated before anything is
+per run of text, one per `%c`, and a conversion per `%d`, to decimal, or
+per `%x`, to hex, built in a buffer in the frame (the rest of the
+conversions are in 34 and 41).  Every argument is evaluated before anything is
 written, as a call's are, and printf answers the count of bytes it wrote.
 Each case below prints what the same source prints through /usr/bin/cc,
 and exits as it does.
@@ -134,10 +135,10 @@ hi 3
 
 ```cc
 (display (guard (e (do (display "refused: ") (write e) ""))
-  (cc-exe-run "#include <stdio.h>\nint main(void) { printf(\"%x\\n\", 255); return 0; }")))
+  (cc-exe-run "#include <stdio.h>\nint main(void) { printf(\"%o\\n\", 255); return 0; }")))
 ```
 ---
-    refused: #<err:cc cc: compile: not built yet: printf's %x>
+    refused: #<err:cc cc: compile: not built yet: printf's %o>
 
 ### a format that is not a literal
 

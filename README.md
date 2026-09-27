@@ -31,8 +31,8 @@ string literals, `+ - * / %`, `& | ^ << >>`, the six comparisons,
 `&&`, `||`, the ternary, the comma, unary `- ~ ! & *`, casts,
 subscripts, and `.` and `->`.
 A compiled program prints with `putchar`, `puts`, and `printf` of a
-literal format with `%d`, `%i`, `%u`, `%ld`, `%li`, `%lu`, `%c`, `%s`
-and `%%`: the entry writes out a helper that makes the write system
+literal format with `%d`, `%i`, `%u`, `%x`, `%ld`, `%li`, `%lu`, `%lx`,
+`%c`, `%s` and `%%`: the entry writes out a helper that makes the write system
 call and hands compiled code its address, since neither the system
 call nor a program-counter-relative address has a portable mnemonic.
 A `printf` is laid out at compile time -- runs of text, a `%s` of a
@@ -106,9 +106,9 @@ accepted, erased); all C89 operators with C precedence, short-circuit
 and giving the expression that type; truncating division; if/else,
 while, do, for, break, continue, return; functions with recursion and
 prototypes; globals; string literals (interned); character constants;
-`#include` (dropped -- the runtime provides putchar, puts, printf %d
-%c %s %x, malloc, free, exit), object-like `#define` spliced
-token-wise; // and /* */ comments.
+`#include` (dropped -- the runtime provides putchar, puts, printf with
+the compiled conversions, malloc, free, exit), object-like `#define`
+spliced token-wise; // and /* */ comments.
 
 Structs, too: `struct S { ... };`, `typedef struct { ... } T;`,
 fields by `.` and `->`, nested structs, arrays of structs, pointers to

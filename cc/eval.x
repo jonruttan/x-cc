@@ -226,28 +226,29 @@
             (self (+ a 1) (pair (integer->char b) acc))))))
     (go addr ())))
 
+; N's digits in BASE, ten or sixteen, N read as unsigned: a number with
+; the top bit set is the one 2^64 above it.  Each turn's quotient is taken
+; with its top bit shifted out first, so it is never negative -- halved and
+; divided by five for ten, shifted four for sixteen.
+(def %cc-unsigned->str
+  (fn (_ n base)
+    (def go
+      (fn (self t acc)
+        (if (= t 0) acc
+          (let ((q (if (= base 16)
+                     (& (>> t 4) (- (<< 1 60) 1))
+                     (/ (& (>> t 1) (- (<< 1 63) 1)) 5))))
+            (def d (- t (* q base)))
+            (self q (pair (integer->char (if (< d 10) (+ 48 d) (+ 87 d))) acc))))))
+    (if (= n 0) "0" (list->string (go n ())))))
+
+; N's digits in decimal, with its sign; the most negative long's negation
+; is itself, which read as unsigned is the right number
 (def %cc-int->str
   (fn (_ n)
-    (if (= n 0) "0"
-      (let ((go (fn (self t acc)
-                  (if (= t 0) acc
-                    (self (/ t 10)
-                      (pair (integer->char (+ 48 (% t 10))) acc))))))
-        (if (< n 0)
-          (string-append "-" (list->string (go (- 0 n) ())))
-          (list->string (go n ())))))))
-
-(def %cc-hex->str
-  (fn (_ n)
-    (if (= n 0) "0"
-      (let ((go (fn (self t acc)
-                  (if (= t 0) (list->string acc)
-                    (let ((d (% t 16)))
-                      (self (/ t 16)
-                        (pair (integer->char
-                                (if (< d 10) (+ 48 d) (+ 87 d)))
-                          acc)))))))
-        (go n ())))))
+    (if (< n 0)
+      (string-append "-" (%cc-unsigned->str (- 0 n) 10))
+      (%cc-unsigned->str n 10))))
 
 ; division and remainder, with the evaluator's own report for a zero divisor
 (def %cc-div
@@ -626,37 +627,41 @@
 
 ; --- calls and builtins ------------------------------------------------------
 
+; printf: %d %i %u %x %c %s and %%, and %ld %li %lu %lx; an int's
+; conversion reads the argument's low 32 bits, as the compiled one does.  It
+; answers the count of bytes written, as C's does.
 (def %cc-printf
   (fn (_ args)
     (def fmt (%cc-cstr (first args)))
     (def end (byte-len fmt))
+    (def low32 (fn (_ v) (& v 4294967295)))
+    ; one conversion's text: its letter C, after an l when L?, of V
+    (def convert-one
+      (fn (_ c l? v)
+        (match
+          ((if (= c 100) #t (= c 105))                    ; d i
+            (%cc-int->str (if l? v (%cc-sext (low32 v) 4))))
+          ((= c 117) (%cc-unsigned->str (if l? v (low32 v)) 10))       ; u
+          ((= c 120) (%cc-unsigned->str (if l? v (low32 v)) 16))       ; x
+          ((if l? #f (= c 99)) (list->string (list (integer->char (& v 255)))))  ; c
+          ((if l? #f (= c 115)) (%cc-cstr v))            ; s
+          (#t (%cc-oops "printf: only %d %i %u %x %c %s %% and %ld %li %lu %lx")))))
     (def go
       (fn (self i as acc)
-        (if (>= i end)
-          (do (display (string-concat (reverse acc))) 0)
-          (let ((b (byte-at fmt i)))
-            (if (not (= b 37))                             ; %
-              (self (+ i 1) as
-                (pair (substring fmt i (+ i 1)) acc))
-              (let ((c (byte-at fmt (+ i 1))))
-                (if (= c 37)
-                  (self (+ i 2) as (pair "%" acc))
-                  (if (= c 100)                            ; d
-                    (self (+ i 2) (rest as)
-                      (pair (%cc-int->str (first as)) acc))
-                    (if (= c 99)                           ; c
-                      (self (+ i 2) (rest as)
-                        (pair (list->string
-                                (list (integer->char (first as))))
-                          acc))
-                      (if (= c 115)                        ; s
-                        (self (+ i 2) (rest as)
-                          (pair (%cc-cstr (first as)) acc))
-                        (if (= c 120)                      ; x
-                          (self (+ i 2) (rest as)
-                            (pair (%cc-hex->str (first as)) acc))
-                          (%cc-oops
-                            "printf: only %d %c %s %x %% so far"))))))))))))
+        (match
+          ((>= i end)
+            (let ((s (string-concat (reverse acc))))
+              (do (display s) (byte-len s))))
+          ((not (= (byte-at fmt i) 37)) (self (+ i 1) as (pair (substring fmt i (+ i 1)) acc)))
+          ((>= (+ i 1) end) (%cc-oops "printf's % at the end of its format"))
+          ((= (byte-at fmt (+ i 1)) 37) (self (+ i 2) as (pair "%" acc)))
+          (#t
+            (let ((l? (= (byte-at fmt (+ i 1)) 108)))
+              (def at (if l? (+ i 2) (+ i 1)))
+              (if (>= at end) (%cc-oops "printf's % at the end of its format"))
+              (if (null? as) (%cc-oops "printf with fewer arguments than conversions"))
+              (self (+ at 1) (rest as)
+                (pair (convert-one (byte-at fmt at) l? (first as)) acc)))))))
     (go 0 (rest args) ())))
 
 (def %cc-call-interp
