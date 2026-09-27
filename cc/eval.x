@@ -728,9 +728,72 @@
 
 ; --- calls and builtins ------------------------------------------------------
 
-; printf: %d %i %u %x %c %s and %%, and %ld %li %lu %lx; an int's
-; conversion reads the argument's low 32 bits, as the compiled one does.  It
-; answers the count of bytes written, as C's does.
+; The conversion specification after the % at I in FMT, as printf reads
+; it: (NEXT LETTER L? LEFT? ZERO? WIDTH PRECISION), NEXT past the letter.
+; The flags - and 0 come first, then a field width (0 when none), a
+; precision after a . (() when none; a . alone is 0) and an l for a long.
+; () when FMT ends before the letter.
+(def printf-conversion
+  (fn (_ fmt i)
+    (def end (byte-len fmt))
+    (def byte (fn (_ j) (if (< j end) (byte-at fmt j) 0)))
+    ; (NEXT . VALUE) for the decimal digits from J
+    (def number
+      (fn (self j v)
+        (if (if (>= (byte j) 48) (<= (byte j) 57) #f)
+          (self (+ j 1) (+ (* v 10) (- (byte j) 48)))
+          (pair j v))))
+    (def flags
+      (fn (self j left? zero?)
+        (match
+          ((= (byte j) 45) (self (+ j 1) #t zero?))
+          ((= (byte j) 48) (self (+ j 1) left? #t))
+          (#t (list j left? zero?)))))
+    (def f (flags (+ i 1) #f #f))
+    (def w (number (first f) 0))
+    (def p (if (= (byte (first w)) 46) (number (+ (first w) 1) 0) (pair (first w) ())))
+    (def l? (= (byte (first p)) 108))
+    (def at (if l? (+ (first p) 1) (first p)))
+    (if (>= at end) ()
+      (list (+ at 1) (byte at) l? (first (rest f)) (first (rest (rest f))) (rest w) (rest p)))))
+
+; N bytes of padding, zeros for ZERO? and spaces otherwise
+(def printf-pad
+  (fn (_ zero? n)
+    (def go (fn (self k acc) (if (<= k 0) acc (self (- k 1) (pair (if zero? "0" " ") acc)))))
+    (string-concat (go n ()))))
+
+; TEXT, the conversion C's, fitted to FIELD (LEFT? ZERO? WIDTH PRECISION):
+; a number's digits made up to the precision with zeros, and none for a
+; zero at precision 0; a string cut to the precision; then padded to the
+; field width with spaces before, or after for LEFT?, or zeros after the
+; sign for ZERO? -- which a number with a precision ignores
+(def printf-fit
+  (fn (_ c text field)
+    (def left? (first field))
+    (def width (first (rest (rest field))))
+    (def precision (first (rest (rest (rest field)))))
+    (def number? (not (if (= c 99) #t (= c 115))))
+    (def zero? (if (first (rest field)) (if number? (null? precision) #t) #f))
+    (def sign (if number? (if (= (byte-at text 0) 45) "-" "") ""))
+    (def digits (substring text (byte-len sign) (byte-len text)))
+    (def body
+      (match
+        ((null? precision) digits)
+        ((= c 115) (if (< precision (byte-len digits)) (substring digits 0 precision) digits))
+        ((not number?) digits)
+        ((if (= precision 0) (string=? digits "0") #f) "")
+        (#t (string-append (printf-pad #t (- precision (byte-len digits))) digits))))
+    (def pad (- width (+ (byte-len sign) (byte-len body))))
+    (match
+      (left? (string-append sign body (printf-pad #f pad)))
+      (zero? (string-append sign (printf-pad #t pad) body))
+      (#t (string-append (printf-pad #f pad) sign body)))))
+
+; printf: %d %i %u %x %c %s and %%, and %ld %li %lu %lx, each with the
+; flags - and 0, a field width and a precision; an int's conversion reads
+; the argument's low 32 bits, as the compiled one does.  It answers the
+; count of bytes written, as C's does.
 (def %cc-printf
   (fn (_ args)
     (def fmt (%cc-cstr (first args)))
@@ -757,12 +820,14 @@
           ((>= (+ i 1) end) (%cc-oops "printf's % at the end of its format"))
           ((= (byte-at fmt (+ i 1)) 37) (self (+ i 2) as (pair "%" acc)))
           (#t
-            (let ((l? (= (byte-at fmt (+ i 1)) 108)))
-              (def at (if l? (+ i 2) (+ i 1)))
-              (if (>= at end) (%cc-oops "printf's % at the end of its format"))
+            (let ((spec (printf-conversion fmt i)))
+              (if (null? spec) (%cc-oops "printf's % at the end of its format"))
               (if (null? as) (%cc-oops "printf with fewer arguments than conversions"))
-              (self (+ at 1) (rest as)
-                (pair (convert-one (byte-at fmt at) l? (first as)) acc)))))))
+              (def c (first (rest spec)))
+              (self (first spec) (rest as)
+                (pair (printf-fit c (convert-one c (first (rest (rest spec))) (first as))
+                        (rest (rest (rest spec))))
+                  acc)))))))
     (go 0 (rest args) ())))
 
 (def %cc-call-interp
@@ -1037,4 +1102,5 @@
 
 (def cc-run (fn (_ src) (%cc-run-core src)))
 
-(provide cc/eval cc-run ctype-ranges kind-elem signed?)
+(provide cc/eval cc-run ctype-ranges kind-elem printf-conversion printf-fit printf-pad
+  signed?)

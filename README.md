@@ -33,13 +33,16 @@ string literals, `+ - * / %`, `& | ^ << >>`, the six comparisons,
 subscripts, and `.` and `->`.
 A compiled program prints with `putchar`, `puts`, and `printf` of a
 literal format with `%d`, `%i`, `%u`, `%x`, `%ld`, `%li`, `%lu`, `%lx`,
-`%c`, `%s` and `%%`: the entry writes out a helper that makes the write system
+`%c`, `%s` and `%%`, each with the flags `-` and `0`, a field width and
+a precision: the entry writes out a helper that makes the write system
 call and hands compiled code its address, since neither the system
 call nor a program-counter-relative address has a portable mnemonic.
 A `printf` is laid out at compile time -- runs of text, a `%s` of a
-literal among them, become one write each -- and what is left for run
-time is a `%c`, an integer converted to decimal in a buffer in the
-frame, and a `%s` of any other string, walked to its NUL.  `exit`
+literal among them fitted to its field, become one write each -- and
+what is left for run time is a `%c`, an integer converted to decimal or
+hex in a buffer in the frame, a `%s` of any other string, walked to its
+NUL, and padding whose size waits on the value, written from a run of
+spaces or zeros in the data.  `exit`
 leaves through the entry's own exit, the one main's return reaches,
 which sits a fixed distance before the helper.
 
