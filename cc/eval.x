@@ -180,15 +180,43 @@
 
 (def %cc-load
   (fn (_ addr kind)
-    (if (<= addr 0) (%cc-oops "null or negative address read")
-      (let ((w (%cc-width kind)))
-        (let ((v (%cc-raw-ref addr w)))
-          (if (if (signed? kind) (< w 8) #f) (%cc-sext v w) v))))))
+    (match
+      ((<= addr 0) (%cc-oops "null or negative address read"))
+      ((%cc-bits? kind) (%cc-bits-read addr kind))
+      (#t (let ((w (%cc-width kind)))
+            (let ((v (%cc-raw-ref addr w)))
+              (if (if (signed? kind) (< w 8) #f) (%cc-sext v w) v)))))))
 
 (def %cc-store
   (fn (_ addr v kind)
-    (if (<= addr 0) (%cc-oops "null or negative address write")
-      (%cc-raw-set! addr v (%cc-width kind)))))
+    (match
+      ((<= addr 0) (%cc-oops "null or negative address write"))
+      ((%cc-bits? kind) (%cc-bits-write! addr v kind))
+      (#t (%cc-raw-set! addr v (%cc-width kind))))))
+
+; A bit-field, (bits C-TYPE BIT WIDTH): WIDTH bits from bit BIT of the unit
+; of C-TYPE at the field's address.  A read takes the unit whole and its
+; field with the sign of C-TYPE; a write puts V's low WIDTH bits there and
+; keeps the unit's others.
+(def %cc-bits? (fn (_ k) (if (pair? k) (eq? (first k) (lit bits)) #f)))
+
+(def %cc-bits-read
+  (fn (_ addr k)
+    (def unit (first (rest k)))
+    (def bit (first (rest (rest k))))
+    (def width (first (rest (rest (rest k)))))
+    (def v (& (>> (%cc-raw-ref addr (kind-size unit)) bit) (- (<< 1 width) 1)))
+    (if (if (signed? unit) (>= v (<< 1 (- width 1))) #f) (- v (<< 1 width)) v)))
+
+(def %cc-bits-write!
+  (fn (_ addr v k)
+    (def unit (first (rest k)))
+    (def bit (first (rest (rest k))))
+    (def width (first (rest (rest (rest k)))))
+    (def size (kind-size unit))
+    (def mask (<< (- (<< 1 width) 1) bit))
+    (def old (%cc-raw-ref addr size))
+    (%cc-raw-set! addr (+ (- old (& old mask)) (& (<< v bit) mask)) size)))
 
 ; V converted to KIND, as a cast does: cut to the kind's width and read
 ; back with its sign.  An address and the 64-bit kinds keep every bit, and
@@ -688,17 +716,20 @@
             ; a struct-kinded place: copy the bytes from the value's address
             (let ((dst (%cc-lval (first (rest node)) env)))
               (do (%cc-copy-bytes! dst v (kind-size k)) dst))
-            (do (%cc-store (%cc-lval (first (rest node)) env) v k) v)))
+            ; an assignment answers what its place holds after it: the
+            ; value converted to the place's C type
+            (let ((a (%cc-lval (first (rest node)) env)))
+              (do (%cc-store a v k) (%cc-load a k)))))
       (if (eq? t (lit preinc))
         (let ((a (%cc-lval (first (rest node)) env)))
           (def k (%cc-kind-of (first (rest node)) env))
           (let ((v (+ (%cc-load a k) (%cc-step-of (first (rest node)) env))))
-            (do (%cc-store a v k) v)))
+            (do (%cc-store a v k) (%cc-load a k))))
       (if (eq? t (lit predec))
         (let ((a (%cc-lval (first (rest node)) env)))
           (def k (%cc-kind-of (first (rest node)) env))
           (let ((v (- (%cc-load a k) (%cc-step-of (first (rest node)) env))))
-            (do (%cc-store a v k) v)))
+            (do (%cc-store a v k) (%cc-load a k))))
       (if (eq? t (lit postinc))
         (let ((a (%cc-lval (first (rest node)) env)))
           (def k (%cc-kind-of (first (rest node)) env))

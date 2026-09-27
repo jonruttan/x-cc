@@ -181,6 +181,8 @@
             (if (null? e)
               (%cc-p-err (string-append "unknown struct: " (first (rest kind))))
               (first (rest e)))))
+        ; a bit-field's unit
+        ((eq? (first kind) (lit bits)) (self (first (rest kind))))
         (#t 8)))))
 
 ; What an address of this kind must be a multiple of: a scalar its own size,
@@ -199,6 +201,7 @@
                             (let ((fa (self (first (rest (rest (first fs)))))))
                               (self2 (rest fs) (if (> fa a) fa a)))))))
                 (go (rest (rest e)) 1)))))
+        ((eq? (first kind) (lit bits)) (self (first (rest kind))))
         (#t 8)))))
 
 (def round-up (fn (_ n a) (let ((m (+ n (- a 1)))) (- m (% m a)))))
@@ -752,34 +755,92 @@
 ; the body of a struct: decl lines to the closing brace, fields laid
 ; end to end -- or, for a union, all at offset 0 with the size the
 ; widest field's; registers the struct and answers the rest
+; One line of a struct's body: ((NAME C-TYPE WIDTH) ...), WIDTH the bits of
+; a bit-field and () for any other field.  A bit-field with no name, which
+; only pads, has NAME ().
+(def %cc-p-field-line
+  (fn (_ toks)
+    (def tr (%cc-p-specifiers toks))
+    (def width
+      (fn (_ ts) (let ((r (%cc-e-assign ts))) (pair (%cc-p-const (first r)) (rest r)))))
+    (def one
+      (fn (_ ts)
+        (if (%cc-p-op? ts ":")
+          (let ((w (width (rest ts))))
+            (pair (list () (first tr) (first w)) (rest w)))
+          (let ((h (%cc-p-declarator-head ts (first tr))))
+            (if (%cc-p-op? (rest (rest h)) ":")
+              (let ((w (width (rest (rest (rest h))))))
+                (pair (list (first h) (first (rest h)) (first w)) (rest w)))
+              (pair (list (first h) (first (rest h)) ()) (rest (rest h))))))))
+    (def go
+      (fn (self ts acc)
+        (let ((r (one ts)))
+          (if (%cc-p-op? (rest r) ",")
+            (self (rest (rest r)) (pair (first r) acc))
+            (pair (reverse (pair (first r) acc)) (%cc-p-eat (rest r) ";"))))))
+    ; `struct S { ... };` inside declares nothing
+    (if (%cc-p-op? (rest tr) ";") (pair () (rest (rest tr))) (go (rest tr) ()))))
+
+; the bit-field C type (bits C-TYPE BIT WIDTH) for WIDTH bits from bit BIT
+; of a unit of C-TYPE, refusing what C or this compiler does not take
+(def %cc-p-bits
+  (fn (_ name k bit w)
+    (match
+      ((if (eq? k (lit long)) #t (eq? k (lit ulong)))
+        (%cc-p-err "not built yet: a bit-field of a long"))
+      ((pair? k) (%cc-p-err "a bit-field that is not an integer"))
+      ((> w (* 8 (kind-size k))) (%cc-p-err "a bit-field wider than its type"))
+      ((< w 0) (%cc-p-err "a bit-field of negative width"))
+      ((if (= w 0) (not (null? name)) #f) (%cc-p-err "a bit-field of width 0 with a name"))
+      (#t (list (lit bits) k bit w)))))
+
 (set! %cc-p-struct-body
   (fn (_ name toks union?)
     ; A field sits at the next offset its own alignment allows, and the
     ; struct's size rounds up to the widest member's, so an array of them
-    ; keeps every member aligned.  A union's fields all sit at 0.
+    ; keeps every member aligned.  A union's fields all sit at 0.  A
+    ; bit-field takes the next WIDTH bits of a unit of its C type, the unit
+    ; at a multiple of that type's size; when they would run past the
+    ; unit's end it starts the next one, and width 0 starts the next one
+    ; and takes none.  The layout counts in bits.
+    (def bytes (fn (_ b) (/ (+ b 7) 8)))
+    (def most (fn (_ a b) (if (> a b) a b)))
     (def go
-      (fn (self ts off align fields)
+      (fn (self ts bits align fields)
         (if (%cc-p-op? ts "}")
           (do (set! %cc-p-structs
-                (pair (pair name (pair (round-up off align) (reverse fields)))
+                (pair (pair name (pair (round-up (bytes bits) align) (reverse fields)))
                   %cc-p-structs))
               (rest ts))
-          (let ((r (%cc-p-decl-line ts)))
+          (let ((r (%cc-p-field-line ts)))
             (def lay
-              (fn (self2 ds o a fs)
-                (if (null? ds) (list o a fs)
+              (fn (self2 ds b a fs)
+                (if (null? ds) (list b a fs)
                   (let ((d (first ds)))
-                    (def k (first (rest (rest d))))
+                    (def fname (first d))
+                    (def k (first (rest d)))
+                    (def w (first (rest (rest d))))
                     (def sz (kind-size k))
-                    (def ka (kind-align k))
-                    (def a2 (if (> ka a) ka a))
-                    (if union?
-                      (self2 (rest ds) (if (> sz o) sz o) a2
-                        (pair (list (first (rest d)) 0 k) fs))
-                      (let ((at (round-up o ka)))
-                        (self2 (rest ds) (+ at sz) a2
-                          (pair (list (first (rest d)) at k) fs))))))))
-            (def l (lay (first r) off align fields))
+                    (def unit (* 8 sz))
+                    (match
+                      ((null? w)
+                        (let ((at (if union? 0 (round-up (bytes b) (kind-align k)))))
+                          (self2 (rest ds) (most b (* 8 (+ at sz))) (most a (kind-align k))
+                            (pair (list fname at k) fs))))
+                      (#t
+                        (let ((start (match
+                                       (union? 0)
+                                       ((= w 0) (round-up b unit))
+                                       ((> (+ (% b unit) w) unit) (round-up b unit))
+                                       (#t b))))
+                          (def bk (%cc-p-bits fname k (% start unit) w))
+                          (match
+                            ((null? fname) (self2 (rest ds) (most b (+ start w)) a fs))
+                            (#t (self2 (rest ds) (most b (if union? unit (+ start w)))
+                                  (most a (kind-align k))
+                                  (pair (list fname (* sz (/ start unit)) bk) fs)))))))))))
+            (def l (lay (first r) bits align fields))
             (self (rest r) (first l) (first (rest l)) (first (rest (rest l))))))))
     (go toks 0 1 ())))
 

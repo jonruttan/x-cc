@@ -205,7 +205,16 @@
       ((eq? k (lit uint)) k)
       ((eq? k (lit long)) k)
       ((eq? k (lit ulong)) k)
+      ; a bit-field is an int unless an int cannot hold every value it can
+      ((%cc-gen-bits? k)
+        (if (if (= (first (rest (rest (rest k)))) 32) (eq? (first (rest k)) (lit uint)) #f)
+          (lit uint)
+          (lit int)))
       (#t (lit int)))))
+
+; a bit-field, (bits C-TYPE BIT WIDTH): WIDTH bits from bit BIT of a unit of
+; C-TYPE (parse.x)
+(def %cc-gen-bits? (fn (_ k) (if (pair? k) (eq? (first k) (lit bits)) #f)))
 
 (def %cc-gen-unsigned? (fn (_ k) (if (eq? k (lit uint)) #t (eq? k (lit ulong)))))
 
@@ -452,6 +461,7 @@
       ((eq? kind (lit uint)) kind)
       ((eq? kind (lit ulong)) kind)
       ((%cc-gen-ptr? kind) kind)
+      ((%cc-gen-bits? kind) (do (self (first (rest kind)) what) kind))
       ((%cc-gen-array? kind) (do (self (kind-elem kind) "an array's element") kind))
       ((%cc-gen-struct? kind)
         (do (let ((go (fn (go fs)
@@ -802,7 +812,9 @@
             (#t (%cc-gen-no "an array initialized by something other than a list or a string")))))
       ; a struct: each field's bytes at its offset, zeros in the padding and
       ; after the last field given.  A field that starts before the last one
-      ; ends overlaps it, which is a union's: it takes one initializer.
+      ; ends overlaps it, which is a union's: it takes one initializer.  The
+      ; bit-fields that share a unit are one value: each one's bits or'd in
+      ; at its place.
       ((%cc-gen-struct? kind)
         (do (if (not (eq? (first init) (lit initlist)))
               (%cc-gen-no "a global struct initialized by something other than a list"))
@@ -810,14 +822,40 @@
                   (fields (rest (rest (struct-entry (first (rest kind)))))))
               (if (> (length items) (length fields))
                 (%cc-gen-no "more initializers than a struct has fields"))
-              (def go
+              (def go ())
+              ; The unit of C type UK at FOFF, from the bit-fields at the
+              ; front of FS that share it and the items IS gives them: their
+              ; bits or'd into V, and only the bytes LO to HI of the unit
+              ; that they touch, since a field of another C type can sit in
+              ; the rest (char c; int x : 4; puts c in the unit's first).
+              (def unit
+                (fn (unit fs is foff uk v lo hi cur)
+                  (if (if (null? is) #t
+                        (not (if (%cc-gen-bits? (first (rest (rest (first fs)))))
+                               (= (first (rest (first fs))) foff) #f)))
+                    (do (if (< (+ foff lo) cur) (%cc-gen-no "more initializers than a union takes"))
+                        (append (zeros (- (+ foff lo) cur) ())
+                          (append (%cc-gen-take (- hi lo) (%cc-gen-value-bytes uk (>> v (* 8 lo))))
+                            (go fs is (+ foff hi)))))
+                    (let ((fk (first (rest (rest (first fs))))))
+                      (def bit (first (rest (rest fk))))
+                      (def width (first (rest (rest (rest fk)))))
+                      (def mask (- (<< 1 width) 1))
+                      (unit (rest fs) (rest is) foff uk
+                        (| v (<< (& (%cc-gen-fold (first is)) mask) bit))
+                        (if (< (/ bit 8) lo) (/ bit 8) lo)
+                        (if (> (/ (+ (+ bit width) 7) 8) hi) (/ (+ (+ bit width) 7) 8) hi)
+                        cur)))))
+              (set! go
                 (fn (go fs is cur)
                   (if (null? is) (zeros (- (kind-size kind) cur) ())
                     (let ((foff (first (rest (first fs)))) (fk (first (rest (rest (first fs))))))
-                      (if (< foff cur) (%cc-gen-no "more initializers than a union takes"))
-                      (append (zeros (- foff cur) ())
-                        (append (self fk (first is) (+ at foff))
-                          (go (rest fs) (rest is) (+ foff (kind-size fk)))))))))
+                      (if (%cc-gen-bits? fk)
+                        (unit fs is foff (first (rest fk)) 0 (kind-size (first (rest fk))) 0 cur)
+                        (do (if (< foff cur) (%cc-gen-no "more initializers than a union takes"))
+                            (append (zeros (- foff cur) ())
+                              (append (self fk (first is) (+ at foff))
+                                (go (rest fs) (rest is) (+ foff (kind-size fk)))))))))))
               (go fields items 0))))
       ; a pointer that starts at an address
       ((if (%cc-gen-ptr? kind) (%cc-gen-address-form? init) #f)
@@ -1073,11 +1111,73 @@
 
 (def %cc-gen-load!
   (fn (_ place)
-    (%cc-gen! (%cc-gen-load-op (%cc-gen-place-kind place)) x0 (%cc-gen-place-mem place))))
+    (def k (%cc-gen-place-kind place))
+    (if (%cc-gen-bits? k) (%cc-gen-bits-load! (%cc-gen-place-mem place) k)
+      (%cc-gen! (%cc-gen-load-op k) x0 (%cc-gen-place-mem place)))))
 
 (def %cc-gen-put!
   (fn (_ place)
-    (%cc-gen! (%cc-gen-store-op (%cc-gen-place-kind place)) x0 (%cc-gen-place-mem place))))
+    (def k (%cc-gen-place-kind place))
+    (if (%cc-gen-bits? k) (%cc-gen-bits-put! (%cc-gen-place-mem place) k)
+      (%cc-gen! (%cc-gen-store-op k) x0 (%cc-gen-place-mem place)))))
+
+; the load of a bit-field's unit, zero-extended: the field's bits are
+; taken from it whole
+(def %cc-gen-unit-load-op
+  (fn (_ unit)
+    (match ((%cc-gen-byte? unit) (lit ldrb)) ((%cc-gen-half? unit) (lit ldrh)) (#t (lit ldrw)))))
+
+; A bit-field K from its unit at AT, into x0: the unit, its field shifted
+; to the top of the register and back down, arithmetically for a signed
+; C type.  The value is in the form its promotion holds.
+(def %cc-gen-bits-load!
+  (fn (_ at k)
+    (def unit (first (rest k)))
+    (def bit (first (rest (rest k))))
+    (def width (first (rest (rest (rest k)))))
+    (do (%cc-gen! (%cc-gen-unit-load-op unit) x0 at)
+        (%cc-gen! (lit mov) x2 (imm (- 64 (+ bit width))))
+        (%cc-gen! (lit lslv) x0 x0 x2)
+        (%cc-gen! (lit mov) x2 (imm (- 64 width)))
+        (%cc-gen! (if (signed? unit) (lit asrv) (lit lsrv)) x0 x0 x2))))
+
+; x0 into the bit-field K of the unit at AT, the unit's other bits kept.
+; x0 is left as the field then holds it, which is what an assignment
+; answers.  AT's register is not touched, and x8, which a postfix ++
+; keeps its old value in, waits on the stack.
+(def %cc-gen-bits-put!
+  (fn (_ at k)
+    (def unit (first (rest k)))
+    (def bit (first (rest (rest k))))
+    (def width (first (rest (rest (rest k)))))
+    (do ; the value as the field holds it
+        (%cc-gen! (lit mov) x2 (imm (- 64 width)))
+        (%cc-gen! (lit lslv) x0 x0 x2)
+        (%cc-gen! (if (signed? unit) (lit asrv) (lit lsrv)) x0 x0 x2)
+        (asm-push! %cc-gen-asm x8)
+        (asm-push! %cc-gen-asm x0)
+        ; its bits in the field's place, zeros around them
+        (%cc-gen! (lit lslv) x0 x0 x2)
+        (%cc-gen! (lit mov) x2 (imm (- 64 (+ bit width))))
+        (%cc-gen! (lit lsrv) x0 x0 x2)
+        (asm-push! %cc-gen-asm x0)
+        ; the unit's bits above the field in x0, and below it in x8
+        (%cc-gen! (%cc-gen-unit-load-op unit) x8 at)
+        (%cc-gen! (lit mov) x0 x8)
+        (%cc-gen! (lit mov) x2 (imm (+ bit width)))
+        (%cc-gen! (lit lsrv) x0 x0 x2)
+        (%cc-gen! (lit lslv) x0 x0 x2)
+        (if (= bit 0)
+          (%cc-gen! (lit mov) x8 x0)
+          (do (%cc-gen! (lit mov) x2 (imm (- 64 bit)))
+              (%cc-gen! (lit lslv) x8 x8 x2)
+              (%cc-gen! (lit lsrv) x8 x8 x2)
+              (%cc-gen! (lit orr) x8 x8 x0)))
+        (asm-pop! %cc-gen-asm x0)
+        (%cc-gen! (lit orr) x8 x8 x0)
+        (%cc-gen! (%cc-gen-store-op unit) x8 at)
+        (asm-pop! %cc-gen-asm x0)
+        (asm-pop! %cc-gen-asm x8))))
 
 ; a kind whose values are held in an int's form: int, and the kinds C
 ; promotes to it
@@ -1109,8 +1209,10 @@
 ; array, whose value is that address.
 (def %cc-gen-load-at!
   (fn (_ kind)
-    (if (%cc-gen-aggregate? kind) ()
-      (%cc-gen! (%cc-gen-load-op kind) x0 (mem x0 0)))))
+    (match
+      ((%cc-gen-aggregate? kind) ())
+      ((%cc-gen-bits? kind) (%cc-gen-bits-load! (mem x0 0) kind))
+      (#t (%cc-gen! (%cc-gen-load-op kind) x0 (mem x0 0))))))
 
 ; The kind of what NODE computes, worked out without computing it: what a
 ; pointer's arithmetic scales by and what a load through it reads.
@@ -2477,13 +2579,18 @@
                 (def foff (first (rest f)))
                 (def fk (first (rest (rest f))))
                 (def fat (%cc-gen-place base (+ off foff) fk))
+                ; where the field starts and ends, in bits: bit-fields share
+                ; a unit
+                (def start (+ (* 8 foff) (if (%cc-gen-bits? fk) (first (rest (rest fk))) 0)))
+                (def size
+                  (if (%cc-gen-bits? fk) (first (rest (rest (rest fk)))) (* 8 (kind-size fk))))
                 ; a field that starts before the last one ends overlaps it,
                 ; which is a union's: it takes one
-                (if (< foff end) (%cc-gen-no "more initializers than a union takes"))
+                (if (< start end) (%cc-gen-no "more initializers than a union takes"))
                 (do (if (%cc-gen-aggregate? fk)
                       (%cc-gen-init-aggregate! fat (first is))
                       (do (%cc-gen-expr! (first is)) (%cc-gen-put! fat)))
-                    (fill (rest fs) (rest is) (+ foff (kind-size fk))))))))
+                    (fill (rest fs) (rest is) (+ start size)))))))
         (fill fields items 0)))))
 
 ; the same struct kind, or a refusal saying what the value was not
