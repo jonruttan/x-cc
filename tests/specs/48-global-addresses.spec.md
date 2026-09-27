@@ -7,10 +7,11 @@ zeros in the data, and main writes the address -- the data's, in x22,
 plus the place of what it names -- before its body runs.  A pointer can
 start at a string literal, an array, or what & takes of a global, of an
 element at a constant index, or of a field, and at any of these moved by
-a constant or cast to another pointer; a static local's can too.  Each
-case runs the program under `run`, then compiled, and shows
-both outputs and both statuses; every expectation is what the same
-source prints through /usr/bin/cc.
+a constant or cast to another pointer; a static local's can too, and at
+a static local in scope where it is declared.  Each case runs the
+program under `run`, then compiled, and shows both outputs and both
+statuses; every expectation is what the same source prints through
+/usr/bin/cc.
 
 ## pointers that start at an address
 
@@ -179,4 +180,84 @@ z
 10 9
 10 9
 (19 19)
+```
+
+## at a static local
+
+A name in a static local's initializer is a static local of its function
+in scope there, its own included, before it is a global.
+
+### another static local of the same function
+
+```cc
+(def src "int *f(void) { static int x = 5; static int *p = &x; return p; }\nint main(void) { *f() += 1; return *f(); }\n")
+(display (list (cc-run src) (cc-exe-run src)))
+```
+---
+```output
+(6 6)
+```
+
+### a static local whose block has ended is out of scope
+
+```cc
+(def src "int x = 1;\nint f(void) { { static int x = 2; x++; } static int *p = &x; return *p; }\nint main(void) { return f() * 10 + x; }\n")
+(display (list (cc-run src) (cc-exe-run src)))
+```
+---
+```output
+(11 11)
+```
+
+### another function's static local is out of scope
+
+```cc
+(def src "int x = 7;\nvoid g(void) { static int x = 3; x++; }\nint f(void) { static int *p = &x; return *p; }\nint main(void) { g(); return f(); }\n")
+(display (list (cc-run src) (cc-exe-run src)))
+```
+---
+```output
+(7 7)
+```
+
+### its own address
+
+```cc
+(def src "int check(void) { static void *p = &p; return p == (void *)&p; }\nint main(void) { return check() + check(); }\n")
+(display (list (cc-run src) (cc-exe-run src)))
+```
+---
+```output
+(2 2)
+```
+
+## a name in its own initializer
+
+A declaration's name is in scope from its declarator on, so its own
+initializer sees it: a global's and a local's as a static local's does.
+
+### a global and a local named in their own initializers
+
+```cc
+(def src "#include <stdio.h>\nvoid *gp = &gp;\nint main(void) { int n = sizeof n + 1; long *lp = (long *)&lp; printf(\"%d %d %d\\n\", gp == (void *)&gp, n, lp == (long *)&lp); return 0; }\n")
+(display (list (cc-run src) (cc-exe-run src)))
+```
+---
+```output
+1 5 1
+1 5 1
+(0 0)
+```
+
+### a static array and a static struct's field
+
+```cc
+(def src "#include <stdio.h>\nstruct S { int a; int b; };\nint *next(void) { static int buf[4] = {10, 20, 30, 40}; static int *cur = buf; static int *end = buf + 4; if (cur == end) cur = buf; return cur++; }\nint *pick(void) { static struct S s = {3, 4}; static int *q = &s.b; return q; }\nint main(void) { int t = 0; int i; for (i = 0; i < 6; i++) t += *next(); printf(\"%d %d\\n\", t, *pick()); return t; }\n")
+(display (list (cc-run src) (cc-exe-run src)))
+```
+---
+```output
+130 4
+130 4
+(130 130)
 ```

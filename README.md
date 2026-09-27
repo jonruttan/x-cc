@@ -64,8 +64,9 @@ end to end and each stored once.  The entry hands compiled code the
 data's address the way it hands over the helper's.  The executable is
 loaded where the kernel chooses and nothing relocates it, so a global
 pointer that starts at an address -- a string literal, an array, what
-`&` takes of a global, any of these moved by a constant -- starts as
-zeros, and main writes the address before its body runs.  A program that
+`&` takes of a global or of a static local in scope, any of these moved
+by a constant -- starts as zeros, and main writes the address before
+its body runs.  A program that
 calls `malloc` has a heap after the data: the segment runs on sixty-four
 megabytes past the file's bytes, and the kernel maps them zero-filled.
 The compiler writes the program's `malloc` after its last function, when

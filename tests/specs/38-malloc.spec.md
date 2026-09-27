@@ -22,6 +22,21 @@ alignment are compiled only.
 ---
     (55 55)
 
+### sized by the name being declared: sizeof *n
+
+```cc
+(def src "#include <stdio.h>\n#include <stdlib.h>\nstruct node { int v; struct node *next; };\nstruct node *push(struct node *h, int v) { struct node *n = malloc(sizeof *n); n->v = v; n->next = h; return n; }\nint main(void) { struct node *h = 0; int i; for (i = 1; i <= 5; i++) h = push(h, i * i); int s = 0; struct node *p; for (p = h; p; p = p->next) { printf(\"%d \", p->v); s += p->v; } printf(\"\\n%d\\n\", s); return s % 256; }\n")
+(display (list (cc-run src) (cc-exe-run src)))
+```
+---
+```output
+25 16 9 4 1 
+55
+25 16 9 4 1 
+55
+(55 55)
+```
+
 ### an int array and a string, then both freed
 
 ```cc
