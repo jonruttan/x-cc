@@ -28,7 +28,7 @@
 ; & | ^ << >>, the six comparisons, &&, ||, the ternary, the comma,
 ; unary - ~ ! & *, casts, subscripts, `.` and `->`, each in the kind C's
 ; usual conversions give it, `putchar`, `puts`, `printf` of a literal
-; format with %d %i %u %ld %li %lu %c %s and %%, `exit`, `malloc` and
+; format with %d %i %u %x %ld %li %lu %lx %c %s and %%, `exit`, `malloc` and
 ; `free`, unless the program defines its own; structs are passed and
 ; returned by value.  Everything else refuses by name: floating point,
 ; function pointers, and the rest of the runtime.
@@ -1480,14 +1480,14 @@
 ; printf of a literal format is laid out here, at compile time: the format
 ; splits into runs of text and conversions, a %s's literal and a %% join the
 ; text around them, and what is left for run time is a write per run of
-; text, one per %c, and a conversion to decimal per %d, %u, %ld or %lu (%i
-; and %li are %d and %ld).  Every argument is evaluated before anything is
-; written, as a call's are.  It answers the count of bytes written, as C's
-; does.
+; text, one per %c, and a conversion per %d, %u, %ld or %lu to decimal and
+; per %x or %lx to hex (%i and %li are %d and %ld).  Every argument is
+; evaluated before anything is written, as a call's are.  It answers the
+; count of bytes written, as C's does.
 
 ; (PIECES . ARGS) for FORMAT and the arguments after it: each piece is
 ; (text . STRING), or (CONV . N) for the Nth argument left to run time,
-; CONV one of d u ld lu c s
+; CONV one of d u x ld lu lx c s
 (def %cc-gen-printf-plan
   (fn (_ fmt args)
     (def n (byte-len fmt))
@@ -1518,6 +1518,7 @@
                   ((if l? #f (= c 37)) (lit pct))
                   ((if (= c 100) #t (= c 105)) (if l? (lit ld) (lit d)))
                   ((= c 117) (if l? (lit lu) (lit u)))
+                  ((= c 120) (if l? (lit lx) (lit x)))
                   ((if l? #f (= c 99)) (lit c))
                   ((if l? #f (= c 115)) (lit s))
                   (#t (%cc-gen-no (string-append "printf's %" (substring fmt (+ i 1) next))))))
@@ -1579,12 +1580,14 @@
     (def plus (%cc-gen-label))
     (def digit (%cc-gen-label))
     (def signed? (if (eq? conv (lit d)) #t (eq? conv (lit ld))))
+    (def hex? (if (eq? conv (lit x)) #t (eq? conv (lit lx))))
     (do (%cc-gen! (lit ldr) x0 (mem x19 slot))
-        ; %d and %u read an int and an unsigned int: the argument's low 32
-        ; bits, in that kind's form
+        ; %d reads an int, and %u and %x an unsigned int: the argument's low
+        ; 32 bits, in that C type's form
         (match
           ((eq? conv (lit d)) (do (%cc-gen-int!) (%cc-gen! (lit str) x0 (mem x19 slot))))
-          ((eq? conv (lit u)) (do (%cc-gen-uint!) (%cc-gen! (lit str) x0 (mem x19 slot))))
+          ((if (eq? conv (lit u)) #t (eq? conv (lit x)))
+            (do (%cc-gen-uint!) (%cc-gen! (lit str) x0 (mem x19 slot))))
           (#t ()))
         (if signed?
           (do (%cc-gen! (lit cmp) x0 (imm 0))
@@ -1599,21 +1602,38 @@
         (%cc-gen! (lit mov) x2 x19)
         (%cc-gen! (lit add) x2 x2 (imm end))
         (%cc-gen! (lit str) x2 cursor)
-        ; A digit a turn, the number read as unsigned: halved, it is not
-        ; negative, so a signed division by five is the unsigned one by ten.
-        ; That also carries the most negative long, whose negation is itself.
         (asm-label! %cc-gen-asm digit)
-        (%cc-gen! (lit ldr) x0 (mem x19 slot))
-        (%cc-gen! (lit mov) x2 (imm 1))
-        (%cc-gen! (lit lsrv) x0 x0 x2)
-        (%cc-gen! (lit mov) x1 (imm 5))
-        (%cc-gen! (lit sdiv) x0 x0 x1)
-        (%cc-gen! (lit mov) x8 x0)
-        (%cc-gen! (lit mov) x1 (imm 10))
-        (%cc-gen! (lit mul) x2 x8 x1)
-        (%cc-gen! (lit ldr) x0 (mem x19 slot))
-        (%cc-gen! (lit sub) x0 x0 x2)
-        (%cc-gen! (lit add) x0 x0 (imm 48))
+        (if hex?
+          ; A hex digit a turn: the low four bits, then the number shifted
+          ; right four with zeros in, as unsigned.
+          (let ((low (%cc-gen-label)))
+            (do (%cc-gen! (lit ldr) x0 (mem x19 slot))
+                (%cc-gen! (lit mov) x8 x0)
+                (%cc-gen! (lit mov) x1 (imm 15))
+                (%cc-gen! (lit and) x0 x0 x1)
+                (%cc-gen! (lit cmp) x0 (imm 10))
+                (%cc-gen! (lit b/lt) (label low))
+                (%cc-gen! (lit add) x0 x0 (imm 39))
+                (asm-label! %cc-gen-asm low)
+                (%cc-gen! (lit add) x0 x0 (imm 48))
+                (%cc-gen! (lit mov) x2 (imm 4))
+                (%cc-gen! (lit lsrv) x8 x8 x2)))
+          ; A decimal digit a turn, the number read as unsigned: halved, it is
+          ; not negative, so a signed division by five is the unsigned one by
+          ; ten.  That also carries the most negative long, whose negation is
+          ; itself.
+          (do (%cc-gen! (lit ldr) x0 (mem x19 slot))
+              (%cc-gen! (lit mov) x2 (imm 1))
+              (%cc-gen! (lit lsrv) x0 x0 x2)
+              (%cc-gen! (lit mov) x1 (imm 5))
+              (%cc-gen! (lit sdiv) x0 x0 x1)
+              (%cc-gen! (lit mov) x8 x0)
+              (%cc-gen! (lit mov) x1 (imm 10))
+              (%cc-gen! (lit mul) x2 x8 x1)
+              (%cc-gen! (lit ldr) x0 (mem x19 slot))
+              (%cc-gen! (lit sub) x0 x0 x2)
+              (%cc-gen! (lit add) x0 x0 (imm 48))))
+        ; the digit goes in before the ones already written; x8 is the rest
         (%cc-gen! (lit ldr) x2 cursor)
         (%cc-gen! (lit sub) x2 x2 (imm 1))
         (%cc-gen! (lit strb) x0 (mem x2 0))
