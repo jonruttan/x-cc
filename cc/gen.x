@@ -29,9 +29,10 @@
 ; unary - ~ ! & *, casts, subscripts, `.` and `->`, each in the kind C's
 ; usual conversions give it, `putchar`, `puts`, `printf` of a literal
 ; format with %d %i %u %x %ld %li %lu %lx %c %s and %%, `exit`, `malloc`,
-; `free`, `strlen`, `strcmp`, `strcpy`, `memcpy` and `memset`, unless the
-; program defines its own; structs are passed and
-; returned by value.  Everything else refuses by name: floating point,
+; `free`, `strlen`, `strcmp`, `strcpy`, `memcpy`, `memset`, `isdigit`,
+; `isalpha`, `isalnum`, `isspace`, `isupper`, `islower`, `toupper`,
+; `tolower` and `abs`, unless the program defines its own; structs are
+; passed and returned by value.  Everything else refuses by name: floating point,
 ; function pointers, and the rest of the runtime.
 ;
 ; The convention is this compiler's own, since nothing else links with what
@@ -49,7 +50,7 @@
   substring)
 (import cc/lex cc-lex)
 (import cc/parse cc-parse kind-size kind-align round-up struct-entry)
-(import cc/eval kind-elem signed?)
+(import cc/eval ctype-ranges kind-elem signed?)
 (import cc/macho macho-write! macho-data-at)
 (import cc/elf elf-write! elf-data-at elf-machine-x86-64)
 
@@ -1410,18 +1411,74 @@
     (asm-pop! %cc-gen-asm x0)
     (%cc-gen! (lit ret))))
 
+; x0 = 1 if x0 lies in one of RANGES, ((LOW . HIGH) ...), else 0: one of
+; <ctype.h>'s classifications (ctype-ranges)
+(def %cc-gen-ranges-body!
+  (fn (_ ranges)
+    (def yes (%cc-gen-label))
+    (def go
+      (fn (self rs)
+        (if (null? rs) ()
+          (let ((next (%cc-gen-label)))
+            (do (%cc-gen! (lit cmp) x0 (imm (first (first rs))))
+                (%cc-gen! (lit b/lt) (label next))
+                (%cc-gen! (lit cmp) x0 (imm (rest (first rs))))
+                (%cc-gen! (lit b/le) (label yes))
+                (asm-label! %cc-gen-asm next)
+                (self (rest rs)))))))
+    (go ranges)
+    (%cc-gen! (lit mov) x0 (imm 0))
+    (%cc-gen! (lit ret))
+    (asm-label! %cc-gen-asm yes)
+    (%cc-gen! (lit mov) x0 (imm 1))
+    (%cc-gen! (lit ret))))
+
+; x0 moved thirty-two by OP when it lies in LOW..HIGH: toupper and tolower
+(def %cc-gen-case-body!
+  (fn (_ low high op)
+    (def same (%cc-gen-label))
+    (%cc-gen! (lit cmp) x0 (imm low))
+    (%cc-gen! (lit b/lt) (label same))
+    (%cc-gen! (lit cmp) x0 (imm high))
+    (%cc-gen! (lit b/gt) (label same))
+    (%cc-gen! op x0 x0 (imm 32))
+    (asm-label! %cc-gen-asm same)
+    (%cc-gen! (lit ret))))
+
+; abs: x0, negated when it is below zero
+(def %cc-gen-abs-body!
+  (fn (_)
+    (def done (%cc-gen-label))
+    (%cc-gen! (lit cmp) x0 (imm 0))
+    (%cc-gen! (lit b/ge) (label done))
+    (%cc-gen! (lit sub) x0 xzr x0)
+    (asm-label! %cc-gen-asm done)
+    (%cc-gen! (lit ret))))
+
 ; The runtime's functions: each written after the program's last function
 ; when the program calls it and does not define its own.  An entry is
 ; (NAME ARGUMENTS C-TYPE . BODY): how many arguments it takes, the C type
 ; it answers, and what writes its code.  Its arguments arrive in registers,
-; as any call's first four do.
+; as any call's first four do.  The classifications come from the table
+; run reads them from.
 (def %cc-gen-runtime
-  (list (pair "malloc" (pair 1 (pair (list (lit ptr) (lit void)) %cc-gen-malloc-body!)))
-        (pair "strlen" (pair 1 (pair (lit ulong) %cc-gen-strlen-body!)))
-        (pair "strcmp" (pair 2 (pair (lit int) %cc-gen-strcmp-body!)))
-        (pair "strcpy" (pair 2 (pair (list (lit ptr) (lit char)) %cc-gen-strcpy-body!)))
-        (pair "memcpy" (pair 3 (pair (list (lit ptr) (lit void)) %cc-gen-memcpy-body!)))
-        (pair "memset" (pair 3 (pair (list (lit ptr) (lit void)) %cc-gen-memset-body!)))))
+  (append
+    (list (pair "malloc" (pair 1 (pair (list (lit ptr) (lit void)) %cc-gen-malloc-body!)))
+          (pair "strlen" (pair 1 (pair (lit ulong) %cc-gen-strlen-body!)))
+          (pair "strcmp" (pair 2 (pair (lit int) %cc-gen-strcmp-body!)))
+          (pair "strcpy" (pair 2 (pair (list (lit ptr) (lit char)) %cc-gen-strcpy-body!)))
+          (pair "memcpy" (pair 3 (pair (list (lit ptr) (lit void)) %cc-gen-memcpy-body!)))
+          (pair "memset" (pair 3 (pair (list (lit ptr) (lit void)) %cc-gen-memset-body!)))
+          (pair "toupper" (pair 1 (pair (lit int) (fn (_) (%cc-gen-case-body! 97 122 (lit sub))))))
+          (pair "tolower" (pair 1 (pair (lit int) (fn (_) (%cc-gen-case-body! 65 90 (lit add))))))
+          (pair "abs" (pair 1 (pair (lit int) %cc-gen-abs-body!))))
+    (let ((go (fn (self es)
+                (if (null? es) ()
+                  (let ((ranges (rest (first es))))
+                    (pair (pair (first (first es))
+                            (pair 1 (pair (lit int) (fn (_) (%cc-gen-ranges-body! ranges)))))
+                      (self (rest es))))))))
+      (go ctype-ranges))))
 (def %cc-gen-runtime-live ())    ; the entries the program does not define
 (def %cc-gen-runtime-called ())  ; ((ENTRY . LABEL) ...), the ones it calls
 
