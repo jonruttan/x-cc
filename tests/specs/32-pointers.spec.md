@@ -148,14 +148,14 @@ Global l 7
 
 ## the refusals
 
-### a global pointer initialized with an address
+### a global pointer initialized by arithmetic on an address
 
 ```cc
 (display (guard (e (do (display "refused: ") (write e) ""))
-  (cc-exe-run "char *g = \"hi\";\nint main(void) { return 0; }")))
+  (cc-exe-run "int a[4];\nint *g = a + 2;\nint main(void) { return 0; }")))
 ```
 ---
-    refused: #<err:cc cc: compile: not built yet: a global pointer initialized with an address>
+    refused: #<err:cc cc: compile: not built yet: a global pointer initialized by arithmetic on an address>
 
 ### arithmetic other than + and - on an address
 

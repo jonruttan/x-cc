@@ -589,9 +589,10 @@
 
 ; A global takes room of its kind, with its initializer's bytes in it.
 ; The initializer is a constant, as C asks, so the bytes are worked out
-; here.  A pointer's is the null pointer or a number: an address in the
-; data would move with the executable, which the kernel loads at a place
-; of its choosing, and nothing here relocates it.
+; here.  An address in the data would move with the executable, which the
+; kernel loads at a place of its choosing and nothing relocates, so a
+; pointer that starts at one starts as zeros and main writes the address
+; before its body runs (%cc-gen-fixups!).
 (def %cc-gen-global!
   (fn (_ node)
     (def name (first (rest node)))
@@ -599,8 +600,74 @@
     (if (not (null? (%cc-gen-global-find name)))
       (%cc-gen-no (string-append "a second declaration of " name)))
     (def init (first (rest (rest (rest node)))))
-    (def off (%cc-gen-data! (%cc-gen-const-bytes kind init) (kind-align kind)))
+    (set! %cc-gen-pending ())
+    (def off (%cc-gen-data! (%cc-gen-const-bytes kind init 0) (kind-align kind)))
+    (%cc-gen-keep-fixups! off)
     (set! %cc-gen-globals (pair (pair name (pair off kind)) %cc-gen-globals))))
+
+; (OFFSET . INIT) for each pointer in the data that starts at an address:
+; where the pointer is, and what names the address
+(def %cc-gen-fixups ())
+
+; the notes the object just placed at OFF left (%cc-gen-pending), as fixups
+(def %cc-gen-keep-fixups!
+  (fn (_ off)
+    (def go
+      (fn (self ps)
+        (if (null? ps) ()
+          (do (set! %cc-gen-fixups
+                (pair (pair (+ off (first (first ps))) (rest (first ps))) %cc-gen-fixups))
+              (self (rest ps))))))
+    (go %cc-gen-pending)
+    (set! %cc-gen-pending ())))
+
+; where in the data the address INIT names lies: a string literal's, a
+; global array's, or what & takes of a global, an element of one at a
+; constant index, or a field of one
+(def %cc-gen-address-constant
+  (fn (self init)
+    (def place
+      (fn (place node)
+        (def t (first node))
+        (match
+          ((eq? t (lit var))
+            (let ((g (%cc-gen-global-find (first (rest node)))))
+              (if (null? g)
+                (%cc-gen-no "a global pointer initialized with the address of something not global")
+                g)))
+          ((eq? t (lit idx))
+            (let ((a (place (first (rest node)))))
+              (if (not (%cc-gen-array? (rest a)))
+                (%cc-gen-no "a global pointer initialized with an address worked out at run time"))
+              (pair (+ (first a)
+                      (* (%cc-gen-fold (first (rest (rest node)))) (kind-size (kind-elem (rest a)))))
+                (kind-elem (rest a)))))
+          ((eq? t (lit dot))
+            (let ((s (place (first (rest node)))))
+              (let ((f (%cc-gen-field (rest s) (first (rest (rest node))))))
+                (pair (+ (first s) (first f)) (rest f)))))
+          (#t (%cc-gen-no "a global pointer initialized with an address worked out at run time")))))
+    (match
+      ((eq? (first init) (lit str)) (%cc-gen-string! (first (rest init))))
+      ((eq? (first init) (lit var))
+        (let ((g (place init)))
+          (if (%cc-gen-array? (rest g)) (first g)
+            (%cc-gen-no "a global pointer initialized with a value that is not an address"))))
+      (#t (first (place (first (rest (rest init)))))))))
+
+; The addresses the pointers in the data start at, written by main before
+; its body runs: x22 is the data's address only at run time
+(def %cc-gen-fixups!
+  (fn (_)
+    (def go
+      (fn (self fs)
+        (if (null? fs) ()
+          (do (%cc-gen-address! x22 (first (first fs)))
+              (%cc-gen! (lit mov) x1 x0)
+              (%cc-gen-address! x22 (%cc-gen-address-constant (rest (first fs))))
+              (%cc-gen! (lit str) x0 (mem x1 0))
+              (self (rest fs))))))
+    (go (reverse %cc-gen-fixups))))
 
 ; A static local is kept once for the program, as a global is: room in the
 ; data with its initializer's bytes in place, laid out with the globals
@@ -615,9 +682,11 @@
 (def %cc-gen-static!
   (fn (_ node)
     (def c-type (%cc-gen-kind! (first (rest (rest node))) "a local"))
+    (set! %cc-gen-pending ())
     (def off
-      (%cc-gen-data! (%cc-gen-const-bytes c-type (first (rest (rest (rest node)))))
+      (%cc-gen-data! (%cc-gen-const-bytes c-type (first (rest (rest (rest node)))) 0)
         (kind-align c-type)))
+    (%cc-gen-keep-fixups! off)
     (set! %cc-gen-statics (pair (pair node (pair off c-type)) %cc-gen-statics))))
 
 ; every static declaration in NODE, laid out
@@ -653,8 +722,24 @@
       (append (%cc-gen-le32 v) (%cc-gen-le32 (>> v 32))))))
 
 ; the bytes a constant initializer INIT lays down for KIND
+; AT is where in the object being laid out these bytes go: a pointer that
+; starts at an address leaves zeros there and a note of the address,
+; (AT . INIT), which the object's own placing turns into a fixup
+; (%cc-gen-keep-fixups!)
+(def %cc-gen-pending ())
+
+; does NODE name an address a global pointer can start at: a string
+; literal, an array's name, or &
+(def %cc-gen-address-form?
+  (fn (_ node)
+    (match
+      ((eq? (first node) (lit str)) #t)
+      ((eq? (first node) (lit var)) #t)
+      ((eq? (first node) (lit un)) (string=? (first (rest node)) "&"))
+      (#t #f))))
+
 (def %cc-gen-const-bytes
-  (fn (self kind init)
+  (fn (self kind init at)
     (def zeros
       (fn (zeros n acc) (if (<= n 0) acc (zeros (- n 1) (pair 0 acc)))))
     (match
@@ -669,7 +754,7 @@
                 (def go
                   (fn (go i is)
                     (if (>= i n) ()
-                      (append (self ek (if (null? is) () (first is)))
+                      (append (self ek (if (null? is) () (first is)) (+ at (* i (kind-size ek))))
                         (go (+ i 1) (if (null? is) () (rest is)))))))
                 (go 0 items)))
             ((if (eq? (first init) (lit str)) (%cc-gen-byte? ek) #f)
@@ -693,19 +778,26 @@
               (if (> (length items) (length fields))
                 (%cc-gen-no "more initializers than a struct has fields"))
               (def go
-                (fn (go fs is at)
-                  (if (null? is) (zeros (- (kind-size kind) at) ())
+                (fn (go fs is cur)
+                  (if (null? is) (zeros (- (kind-size kind) cur) ())
                     (let ((foff (first (rest (first fs)))) (fk (first (rest (rest (first fs))))))
-                      (if (< foff at) (%cc-gen-no "more initializers than a union takes"))
-                      (append (zeros (- foff at) ())
-                        (append (self fk (first is))
+                      (if (< foff cur) (%cc-gen-no "more initializers than a union takes"))
+                      (append (zeros (- foff cur) ())
+                        (append (self fk (first is) (+ at foff))
                           (go (rest fs) (rest is) (+ foff (kind-size fk)))))))))
               (go fields items 0))))
+      ; a pointer that starts at an address
+      ((if (%cc-gen-ptr? kind) (%cc-gen-address-form? init) #f)
+        (do (set! %cc-gen-pending (pair (pair at init) %cc-gen-pending))
+            (zeros 8 ())))
+      ; C lets an address and a constant add up here too; not built yet
       ((if (%cc-gen-ptr? kind)
-         (if (eq? (first init) (lit str)) #t
-           (if (eq? (first init) (lit un)) (string=? (first (rest init)) "&") #f))
+         (if (eq? (first init) (lit bin))
+           (if (%cc-gen-address-form? (first (rest (rest init)))) #t
+             (%cc-gen-address-form? (first (rest (rest (rest init))))))
+           #f)
          #f)
-        (%cc-gen-no "a global pointer initialized with an address"))
+        (%cc-gen-no "a global pointer initialized by arithmetic on an address"))
       ((eq? (first init) (lit initlist))
         (%cc-gen-no "a braced initializer for something that is not an array or a struct"))
       (#t (%cc-gen-value-bytes kind (%cc-gen-fold init))))))
@@ -2619,6 +2711,8 @@
           (%cc-gen! (lit ldr) x0 (mem x0 0))
           (%cc-gen! (lit str) x0 (mem x19 %cc-gen-sret-slot)))
       ())
+    ; main writes the addresses the data's pointers start at
+    (if (string=? (first (rest f)) "main") (%cc-gen-fixups!) ())
     (%cc-gen-stmt! body)
     ; falling off the end answers 0, which is what C says of main
     (%cc-gen-const! 0)
@@ -2643,6 +2737,8 @@
     (def others (filter (fn (_ f) (not (string=? (first (rest f)) "main"))) funs))
     ; the globals take the front of the data, before a body asks for one
     (set! %cc-gen-globals ())
+    (set! %cc-gen-fixups ())
+    (set! %cc-gen-pending ())
     (set! %cc-gen-strings ())
     (set! %cc-gen-databytes 0)
     (set! %cc-gen-data ())
