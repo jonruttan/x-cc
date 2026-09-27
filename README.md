@@ -133,7 +133,8 @@ and /* */ comments.
 Structs, too: `struct S { ... };`, `typedef struct { ... } T;`,
 fields by `.` and `->`, nested structs, arrays of structs, pointers to
 structs stepping by the struct's size, struct assignment as a byte
-copy, `sizeof` a struct with its padding, and the linked list built
+copy, `sizeof` a struct with its padding, bit-fields of the integer
+types but long, and the linked list built
 from `malloc(sizeof(struct N))` -- oracle-checked.  A field access
 whose chain the evaluator cannot type (a call's result) resolves by
 the field's name when exactly one struct has it.
