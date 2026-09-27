@@ -70,10 +70,12 @@ The calling convention is the compiler's own, since nothing else links
 with what it writes: the first four arguments in registers, unless
 they are structs, and the rest stored where the callee's frame will
 have its top, the answer in one register, and a frame per call taken
-from a region below the machine stack.  A struct goes by value: an
-argument is copied whole to the callee's frame, and a call that
-answers one has a slot of its own in the caller's frame, which the
-callee's return copies into.  A local, a parameter and a global take
+from a four-megabyte region below the machine stack, a megabyte at most
+each.  A frame keeps its scalars low, where a load reaches them, and its
+arrays and structs above, reached through their address.  A struct
+goes by value: an argument is copied whole to the callee's frame, and a
+call that answers one has a slot of its own in the caller's frame,
+which the callee's return copies into.  A local, a parameter and a global take
 the size and alignment of their kind, and a value loads at that width,
 extended by its sign.  An operator works in the kind C's usual
 conversions give its operands -- `int` for `char` and `short`, then
