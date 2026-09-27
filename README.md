@@ -175,7 +175,7 @@ Refused loudly, each a recorded pending: goto, floats, casts to
 function-pointer types.  Unsigned types take their own width and read
 zero-extended, and unsigned arithmetic is the recorded pending.
 
-Paired with x-lang v0.15.0 (`lang.xon` is the checkable row).
+Paired with x-lang v0.16.0 (`lang.xon` is the checkable row).
 
 ## Tests
 
