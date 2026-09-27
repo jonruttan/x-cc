@@ -7,7 +7,8 @@
 ; @license MIT No Attribution (MIT-0)
 ;
 ; Tokens: (num N) (str S) (id S) (kw SYM) (op S).  Character constants
-; arrive as (num CODE) -- they are ints in C.  Every C89 keyword is
+; arrive as (num CODE) -- they are ints in C -- and string literals side
+; by side as one (str S), as C's translation joins them.  Every C89 keyword is
 ; recognized (so the parser refuses the unimplemented ones loudly,
 ; never misreads them as identifiers).  Object-like macros splice here,
 ; token-wise: an id in the macro table lexes its body and continues --
@@ -53,20 +54,42 @@
 (def %cc-b->s
   (fn (_ b) (list->string (list (integer->char b)))))
 
-; an escape at i (past the backslash): (code . next-i)
+; an escape at i (past the backslash): (code . next-i) -- one of C's
+; simple escapes, up to three octal digits, or x and hex digits; the code
+; is the byte's, so what is past 255 keeps its low eight bits
 (def %cc-escape
   (fn (_ src end i)
     (def b (byte-at src i))
+    (def octal? (fn (_ c) (if (>= c 48) (<= c 55) #f)))
+    ; a hex digit's value, or nil
+    (def hex
+      (fn (_ c)
+        (match
+          ((if (>= c 48) (<= c 57) #f) (- c 48))
+          ((if (>= c 97) (<= c 102) #f) (- c 87))
+          ((if (>= c 65) (<= c 70) #f) (- c 55))
+          (#t ()))))
+    (def octal
+      (fn (self j v n)
+        (if (if (< n 3) (if (< j end) (octal? (byte-at src j)) #f) #f)
+          (self (+ j 1) (+ (* v 8) (- (byte-at src j) 48)) (+ n 1))
+          (pair (& v 255) j))))
+    (def hexes
+      (fn (self j v)
+        (if (if (< j end) (not (null? (hex (byte-at src j)))) #f)
+          (self (+ j 1) (+ (* v 16) (hex (byte-at src j))))
+          (pair (& v 255) j))))
     (match
+      ((octal? b) (octal i 0 0))                          ; \0 \12 \101
+      ((= b 120) (hexes (+ i 1) 0))                       ; x
       ((= b 110) (pair 10 (+ i 1)))                       ; n
       ((= b 116) (pair 9 (+ i 1)))                        ; t
       ((= b 114) (pair 13 (+ i 1)))                       ; r
-      ((= b 48)  (pair 0 (+ i 1)))                        ; 0
       ((= b 97)  (pair 7 (+ i 1)))                        ; a
       ((= b 98)  (pair 8 (+ i 1)))                        ; b
       ((= b 102) (pair 12 (+ i 1)))                       ; f
       ((= b 118) (pair 11 (+ i 1)))                       ; v
-      (#t (pair (+ 0 b) (+ i 1))))))                      ; \\ \' \" ...
+      (#t (pair (+ 0 b) (+ i 1))))))                      ; \\ \' \" \?
 
 ; number: decimal, 0x hex, 0 octal, as (VALUE KIND . NEXT); the suffixes
 ; u U l L, with the base and the value, give the literal its type
@@ -314,7 +337,12 @@
             (if (= b 34)                                   ; "
               (let ((r (%cc-lex-str src end (+ i 1))))
                 (self src end (rest r) macros expanding
-                  (pair (list (lit str) (first r)) acc)))
+                  ; a string literal right after another joins it, as C's
+                  ; translation joins adjacent ones
+                  (if (if (pair? acc) (eq? (first (first acc)) (lit str)) #f)
+                    (pair (list (lit str) (string-append (first (rest (first acc))) (first r)))
+                      (rest acc))
+                    (pair (list (lit str) (first r)) acc))))
               (if (= b 39)                                 ; '
                 ; (+ 0 ...): byte-at's value only becomes a plain int
                 ; through arithmetic; raw pass-through keeps a char

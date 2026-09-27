@@ -107,7 +107,8 @@ accepted, erased); all C89 operators with C precedence, short-circuit
 && || and the ternary; casts, each converting its operand to its type
 and giving the expression that type; truncating division; if/else,
 while, do, for, break, continue, return; functions with recursion and
-prototypes; globals; string literals (interned); character constants;
+prototypes; globals; string literals (interned, and joined when side by
+side); character constants; C's escapes, octal and hex among them;
 `#include` (dropped -- the runtime provides the functions compiled
 programs have: putchar, puts, printf, exit, malloc, free, strlen,
 strcmp, strcpy, memcpy, memset), object-like `#define` spliced
