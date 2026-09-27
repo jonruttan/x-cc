@@ -2123,15 +2123,13 @@
                 (%cc-gen-expr! (first t))
                 (asm-push! %cc-gen-asm x0)
                 (self (rest ts)))))))
-    ; the last pushed is on top; x86-64 subtracts an immediate in place,
-    ; so x20 is copied first
+    ; the last pushed is on top
     (def store-each
       (fn (self ts)
         (if (null? ts) ()
           (let ((t (first ts)))
             (do (asm-pop! %cc-gen-asm x0)
-                (%cc-gen! (lit mov) x1 x20)
-                (%cc-gen! (lit sub) x1 x1 (imm (rest (home t))))
+                (%cc-gen! (lit sub) x1 x20 (imm (rest (home t))))
                 (if (%cc-gen-struct? (first (rest t)))
                   (%cc-gen-copy! (kind-size (first (rest t))))
                   (%cc-gen! (lit str) x0 (mem x1 0)))
@@ -2146,8 +2144,7 @@
         (store-each (reverse above))
         (if sret?
           (do (%cc-gen-address! x19 (%cc-gen-rslot-of node))
-              (%cc-gen! (lit mov) x1 x20)
-              (%cc-gen! (lit sub) x1 x1 (imm 8))
+              (%cc-gen! (lit sub) x1 x20 (imm 8))
               (%cc-gen! (lit str) x0 (mem x1 0)))
           ())
         (pop-each (reverse regs))
@@ -2179,8 +2176,9 @@
     (def off %cc-gen-scratch)
     (do (%cc-gen! (lit str) x0 (mem x19 off))
         (%cc-gen! (lit mov) x0 (imm 1))
-        (%cc-gen! (lit mov) x1 x19)
-        (if (= off 0) () (%cc-gen! (lit add) x1 x1 (imm off)))
+        (if (= off 0)
+          (%cc-gen! (lit mov) x1 x19)
+          (%cc-gen! (lit add) x1 x19 (imm off)))
         (%cc-gen! (lit mov) x2 (imm 1))
         (%cc-gen! (lit blr) x21))))
 
@@ -2392,8 +2390,7 @@
                 (asm-label! %cc-gen-asm plus)))
           ())
         (%cc-gen! (lit str) x0 held)
-        (%cc-gen! (lit mov) x2 x19)
-        (%cc-gen! (lit add) x2 x2 (imm end))
+        (%cc-gen! (lit add) x2 x19 (imm end))
         (%cc-gen! (lit str) x2 cursor)
         ; a zero at precision 0 has no digits
         (if (if (null? precision) #f (= precision 0))
@@ -2481,8 +2478,7 @@
           ())
         ; the digits, from the cursor to the end
         (%cc-gen! (lit ldr) x1 cursor)
-        (%cc-gen! (lit mov) x2 x19)
-        (%cc-gen! (lit add) x2 x2 (imm end))
+        (%cc-gen! (lit add) x2 x19 (imm end))
         (%cc-gen! (lit sub) x2 x2 x1)
         (%cc-gen! (lit mov) x0 (imm 1))
         (%cc-gen! (lit blr) x21)
