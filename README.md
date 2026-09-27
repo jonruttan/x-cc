@@ -62,10 +62,10 @@ megabytes past the file's bytes, and the kernel maps them zero-filled.
 The compiler writes the program's `malloc` after its last function, when
 the data's size is final; it takes sixteen-aligned blocks from the heap
 in order and answers the null pointer when there is no room, and `free`
-gives nothing back.  `strlen`, `strcmp`, `strcpy`, `memcpy` and `memset`
-are written there too, and so are `<ctype.h>`'s classifications and case
-changes and `abs`, each only when the program calls it and does not
-define its own.  The classifications are ranges of codes in one table,
+gives nothing back.  `strlen`, `strcmp`, `strncmp`, `strcpy`, `strncpy`,
+`strcat`, `strchr`, `memcpy`, `memset`, `memcmp` and `atoi` are written
+there too, and so are `<ctype.h>`'s classifications and case changes and
+`abs`, each only when the program calls it and does not define its own.  The classifications are ranges of codes in one table,
 which `run` reads as well.
 
 The calling convention is the compiler's own, since nothing else links
@@ -114,9 +114,10 @@ while, do, for, break, continue, return; functions with recursion and
 prototypes; globals; string literals (interned); character constants;
 `#include` (dropped -- the runtime provides the functions compiled
 programs have: putchar, puts, printf, exit, malloc, free, strlen,
-strcmp, strcpy, memcpy, memset, isdigit, isalpha, isalnum, isspace,
-isupper, islower, toupper, tolower, abs), object-like `#define` spliced
-token-wise; // and /* */ comments.
+strcmp, strncmp, strcpy, strncpy, strcat, strchr, memcpy, memset,
+memcmp, atoi, isdigit, isalpha, isalnum, isspace, isupper, islower,
+toupper, tolower, abs), object-like `#define` spliced token-wise; //
+and /* */ comments.
 
 Structs, too: `struct S { ... };`, `typedef struct { ... } T;`,
 fields by `.` and `->`, nested structs, arrays of structs, pointers to

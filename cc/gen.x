@@ -29,9 +29,10 @@
 ; unary - ~ ! & *, casts, subscripts, `.` and `->`, each in the kind C's
 ; usual conversions give it, `putchar`, `puts`, `printf` of a literal
 ; format with %d %i %u %x %ld %li %lu %lx %c %s and %%, `exit`, `malloc`,
-; `free`, `strlen`, `strcmp`, `strcpy`, `memcpy`, `memset`, `isdigit`,
-; `isalpha`, `isalnum`, `isspace`, `isupper`, `islower`, `toupper`,
-; `tolower` and `abs`, unless the program defines its own; structs are
+; `free`, `strlen`, `strcmp`, `strncmp`, `strcpy`, `strncpy`, `strcat`,
+; `strchr`, `memcpy`, `memset`, `memcmp`, `atoi`, `isdigit`, `isalpha`,
+; `isalnum`, `isspace`, `isupper`, `islower`, `toupper`, `tolower` and
+; `abs`, unless the program defines its own; structs are
 ; passed and returned by value.  Everything else refuses by name: floating point,
 ; function pointers, and the rest of the runtime.
 ;
@@ -1411,6 +1412,188 @@
     (asm-pop! %cc-gen-asm x0)
     (%cc-gen! (lit ret))))
 
+; strcat: the string at x1, its NUL included, onto the end of the one at
+; x0; answers x0
+(def %cc-gen-strcat-body!
+  (fn (_)
+    (def seek (%cc-gen-label))
+    (def copy (%cc-gen-label))
+    (def done (%cc-gen-label))
+    (%cc-gen! (lit mov) x8 x0)
+    (asm-label! %cc-gen-asm seek)
+    (%cc-gen! (lit ldrb) x2 (mem x0 0))
+    (%cc-gen! (lit cmp) x2 (imm 0))
+    (%cc-gen! (lit b/eq) (label copy))
+    (%cc-gen! (lit add) x0 x0 (imm 1))
+    (%cc-gen! (lit b) (label seek))
+    (asm-label! %cc-gen-asm copy)
+    (%cc-gen! (lit ldrb) x2 (mem x1 0))
+    (%cc-gen! (lit strb) x2 (mem x0 0))
+    (%cc-gen! (lit cmp) x2 (imm 0))
+    (%cc-gen! (lit b/eq) (label done))
+    (%cc-gen! (lit add) x0 x0 (imm 1))
+    (%cc-gen! (lit add) x1 x1 (imm 1))
+    (%cc-gen! (lit b) (label copy))
+    (asm-label! %cc-gen-asm done)
+    (%cc-gen! (lit mov) x0 x8)
+    (%cc-gen! (lit ret))))
+
+; strncmp, NUL? true, and memcmp: the first difference among the x2 bytes
+; at x0 and x1, each read as an unsigned char, stopping at a NUL for
+; strncmp; 0 when there is none.  Two bytes, two addresses and the count
+; are one more than the registers, so the count waits in a frame of its
+; own, taken off x20 as a function's is.
+(def %cc-gen-compare-body!
+  (fn (_ nul?)
+    (def next (%cc-gen-label))
+    (def differ (%cc-gen-label))
+    (def same (%cc-gen-label))
+    (def out (%cc-gen-label))
+    (%cc-gen! (lit sub) x20 x20 (imm 16))
+    (%cc-gen! (lit str) x2 (mem x20 0))
+    (asm-label! %cc-gen-asm next)
+    (%cc-gen! (lit ldr) x2 (mem x20 0))
+    (%cc-gen! (lit cmp) x2 (imm 0))
+    (%cc-gen! (lit b/eq) (label same))
+    (%cc-gen! (lit sub) x2 x2 (imm 1))
+    (%cc-gen! (lit str) x2 (mem x20 0))
+    (%cc-gen! (lit ldrb) x2 (mem x0 0))
+    (%cc-gen! (lit ldrb) x8 (mem x1 0))
+    (%cc-gen! (lit cmp) x2 x8)
+    (%cc-gen! (lit b/ne) (label differ))
+    (if nul?
+      (do (%cc-gen! (lit cmp) x2 (imm 0))
+          (%cc-gen! (lit b/eq) (label same)))
+      ())
+    (%cc-gen! (lit add) x0 x0 (imm 1))
+    (%cc-gen! (lit add) x1 x1 (imm 1))
+    (%cc-gen! (lit b) (label next))
+    (asm-label! %cc-gen-asm differ)
+    (%cc-gen! (lit sub) x2 x2 x8)
+    (%cc-gen! (lit mov) x0 x2)
+    (%cc-gen! (lit b) (label out))
+    (asm-label! %cc-gen-asm same)
+    (%cc-gen! (lit mov) x0 (imm 0))
+    (asm-label! %cc-gen-asm out)
+    (%cc-gen! (lit add) x20 x20 (imm 16))
+    (%cc-gen! (lit ret))))
+
+; strncpy: x2 bytes to x0 -- the string at x1, then NULs to the end of the
+; count; answers x0, which waits in a frame of its own
+(def %cc-gen-strncpy-body!
+  (fn (_)
+    (def next (%cc-gen-label))
+    (def pad (%cc-gen-label))
+    (def done (%cc-gen-label))
+    (%cc-gen! (lit sub) x20 x20 (imm 16))
+    (%cc-gen! (lit str) x0 (mem x20 0))
+    (asm-label! %cc-gen-asm next)
+    (%cc-gen! (lit cmp) x2 (imm 0))
+    (%cc-gen! (lit b/eq) (label done))
+    (%cc-gen! (lit ldrb) x8 (mem x1 0))
+    (%cc-gen! (lit strb) x8 (mem x0 0))
+    (%cc-gen! (lit add) x0 x0 (imm 1))
+    (%cc-gen! (lit sub) x2 x2 (imm 1))
+    (%cc-gen! (lit cmp) x8 (imm 0))
+    (%cc-gen! (lit b/eq) (label pad))
+    (%cc-gen! (lit add) x1 x1 (imm 1))
+    (%cc-gen! (lit b) (label next))
+    ; x8 is the NUL just copied
+    (asm-label! %cc-gen-asm pad)
+    (%cc-gen! (lit cmp) x2 (imm 0))
+    (%cc-gen! (lit b/eq) (label done))
+    (%cc-gen! (lit strb) x8 (mem x0 0))
+    (%cc-gen! (lit add) x0 x0 (imm 1))
+    (%cc-gen! (lit sub) x2 x2 (imm 1))
+    (%cc-gen! (lit b) (label pad))
+    (asm-label! %cc-gen-asm done)
+    (%cc-gen! (lit ldr) x0 (mem x20 0))
+    (%cc-gen! (lit add) x20 x20 (imm 16))
+    (%cc-gen! (lit ret))))
+
+; strchr: the address of the first x1, read as an unsigned char, in the
+; string at x0 -- its NUL included -- or 0
+(def %cc-gen-strchr-body!
+  (fn (_)
+    (def next (%cc-gen-label))
+    (def found (%cc-gen-label))
+    (def none (%cc-gen-label))
+    (%cc-gen! (lit mov) x2 (imm 255))
+    (%cc-gen! (lit and) x1 x1 x2)
+    (asm-label! %cc-gen-asm next)
+    (%cc-gen! (lit ldrb) x2 (mem x0 0))
+    (%cc-gen! (lit cmp) x2 x1)
+    (%cc-gen! (lit b/eq) (label found))
+    (%cc-gen! (lit cmp) x2 (imm 0))
+    (%cc-gen! (lit b/eq) (label none))
+    (%cc-gen! (lit add) x0 x0 (imm 1))
+    (%cc-gen! (lit b) (label next))
+    (asm-label! %cc-gen-asm none)
+    (%cc-gen! (lit mov) x0 (imm 0))
+    (asm-label! %cc-gen-asm found)
+    (%cc-gen! (lit ret))))
+
+; atoi: the int the digits at x0 spell, after spaces and a sign; the sign
+; waits in a frame of its own while x1 gathers the digits
+(def %cc-gen-atoi-body!
+  (fn (_)
+    (def skip (%cc-gen-label))
+    (def over (%cc-gen-label))
+    (def sign (%cc-gen-label))
+    (def plus (%cc-gen-label))
+    (def digits (%cc-gen-label))
+    (def next (%cc-gen-label))
+    (def end (%cc-gen-label))
+    (def positive (%cc-gen-label))
+    (%cc-gen! (lit sub) x20 x20 (imm 16))
+    (asm-label! %cc-gen-asm skip)
+    (%cc-gen! (lit ldrb) x2 (mem x0 0))
+    (%cc-gen! (lit cmp) x2 (imm 32))
+    (%cc-gen! (lit b/eq) (label over))
+    (%cc-gen! (lit cmp) x2 (imm 9))
+    (%cc-gen! (lit b/lt) (label sign))
+    (%cc-gen! (lit cmp) x2 (imm 13))
+    (%cc-gen! (lit b/gt) (label sign))
+    (asm-label! %cc-gen-asm over)
+    (%cc-gen! (lit add) x0 x0 (imm 1))
+    (%cc-gen! (lit b) (label skip))
+    ; x8 = 1 for a minus sign, else 0
+    (asm-label! %cc-gen-asm sign)
+    (%cc-gen! (lit mov) x8 (imm 0))
+    (%cc-gen! (lit cmp) x2 (imm 45))
+    (%cc-gen! (lit b/ne) (label plus))
+    (%cc-gen! (lit mov) x8 (imm 1))
+    (%cc-gen! (lit add) x0 x0 (imm 1))
+    (%cc-gen! (lit b) (label digits))
+    (asm-label! %cc-gen-asm plus)
+    (%cc-gen! (lit cmp) x2 (imm 43))
+    (%cc-gen! (lit b/ne) (label digits))
+    (%cc-gen! (lit add) x0 x0 (imm 1))
+    (asm-label! %cc-gen-asm digits)
+    (%cc-gen! (lit str) x8 (mem x20 0))
+    (%cc-gen! (lit mov) x1 (imm 0))
+    (asm-label! %cc-gen-asm next)
+    (%cc-gen! (lit ldrb) x2 (mem x0 0))
+    (%cc-gen! (lit cmp) x2 (imm 48))
+    (%cc-gen! (lit b/lt) (label end))
+    (%cc-gen! (lit cmp) x2 (imm 57))
+    (%cc-gen! (lit b/gt) (label end))
+    (%cc-gen! (lit mov) x8 (imm 10))
+    (%cc-gen! (lit mul) x1 x1 x8)
+    (%cc-gen! (lit sub) x2 x2 (imm 48))
+    (%cc-gen! (lit add) x1 x1 x2)
+    (%cc-gen! (lit add) x0 x0 (imm 1))
+    (%cc-gen! (lit b) (label next))
+    (asm-label! %cc-gen-asm end)
+    (%cc-gen! (lit ldr) x8 (mem x20 0))
+    (%cc-gen! (lit cmp) x8 (imm 0))
+    (%cc-gen! (lit b/eq) (label positive))
+    (%cc-gen! (lit sub) x1 xzr x1)
+    (asm-label! %cc-gen-asm positive)
+    (%cc-gen! (lit mov) x0 x1)
+    (%cc-gen! (lit add) x20 x20 (imm 16))
+    (%cc-gen! (lit ret))))
+
 ; x0 = 1 if x0 lies in one of RANGES, ((LOW . HIGH) ...), else 0: one of
 ; <ctype.h>'s classifications (ctype-ranges)
 (def %cc-gen-ranges-body!
@@ -1469,6 +1652,12 @@
           (pair "strcpy" (pair 2 (pair (list (lit ptr) (lit char)) %cc-gen-strcpy-body!)))
           (pair "memcpy" (pair 3 (pair (list (lit ptr) (lit void)) %cc-gen-memcpy-body!)))
           (pair "memset" (pair 3 (pair (list (lit ptr) (lit void)) %cc-gen-memset-body!)))
+          (pair "strcat" (pair 2 (pair (list (lit ptr) (lit char)) %cc-gen-strcat-body!)))
+          (pair "strncmp" (pair 3 (pair (lit int) (fn (_) (%cc-gen-compare-body! #t)))))
+          (pair "memcmp" (pair 3 (pair (lit int) (fn (_) (%cc-gen-compare-body! #f)))))
+          (pair "strncpy" (pair 3 (pair (list (lit ptr) (lit char)) %cc-gen-strncpy-body!)))
+          (pair "strchr" (pair 2 (pair (list (lit ptr) (lit char)) %cc-gen-strchr-body!)))
+          (pair "atoi" (pair 1 (pair (lit int) %cc-gen-atoi-body!)))
           (pair "toupper" (pair 1 (pair (lit int) (fn (_) (%cc-gen-case-body! 97 122 (lit sub))))))
           (pair "tolower" (pair 1 (pair (lit int) (fn (_) (%cc-gen-case-body! 65 90 (lit add))))))
           (pair "abs" (pair 1 (pair (lit int) %cc-gen-abs-body!))))
