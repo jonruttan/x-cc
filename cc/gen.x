@@ -52,7 +52,8 @@
   substring)
 (import cc/lex cc-lex)
 (import cc/parse cc-parse kind-size kind-align round-up struct-entry)
-(import cc/eval ctype-ranges kind-elem printf-conversion printf-fit printf-pad signed?)
+(import cc/eval common-c-type ctype-ranges kind-elem library-c-type printf-conversion
+  printf-fit printf-pad promoted-c-type signed? unsigned-divide)
 (import cc/macho macho-write! macho-data-at)
 (import cc/elf elf-write! elf-data-at elf-machine-x86-64)
 
@@ -197,38 +198,15 @@
 ; An operator works in the kind C's usual conversions give its operands and
 ; leaves its result in that kind's form.  Between the 64-bit kinds and from
 ; either 32-bit one to them, the form already is the conversion: an int's
-; sign-extension is the long, and the unsigned long, it converts to.
-
-(def %cc-gen-promote
-  (fn (_ k)
-    (match
-      ((eq? k (lit uint)) k)
-      ((eq? k (lit long)) k)
-      ((eq? k (lit ulong)) k)
-      ; a bit-field is an int unless an int cannot hold every value it can
-      ((%cc-gen-bits? k)
-        (if (if (= (first (rest (rest (rest k)))) 32) (eq? (first (rest k)) (lit uint)) #f)
-          (lit uint)
-          (lit int)))
-      (#t (lit int)))))
+; sign-extension is the long, and the unsigned long, it converts to.  The
+; C types C's promotions and usual conversions give are cc/eval.x's
+; (promoted-c-type, common-c-type), which run works in too.
 
 ; a bit-field, (bits C-TYPE BIT WIDTH): WIDTH bits from bit BIT of a unit of
 ; C-TYPE (parse.x)
 (def %cc-gen-bits? (fn (_ k) (if (pair? k) (eq? (first k) (lit bits)) #f)))
 
 (def %cc-gen-unsigned? (fn (_ k) (if (eq? k (lit uint)) #t (eq? k (lit ulong)))))
-
-; the kind two operands meet in, on LP64: an unsigned long if either is one,
-; else a long, which holds every unsigned int, else an unsigned int, else int
-(def %cc-gen-arith-kind
-  (fn (_ ka kb)
-    (def a (%cc-gen-promote ka))
-    (def b (%cc-gen-promote kb))
-    (match
-      ((if (eq? a (lit ulong)) #t (eq? b (lit ulong))) (lit ulong))
-      ((if (eq? a (lit long)) #t (eq? b (lit long))) (lit long))
-      ((if (eq? a (lit uint)) #t (eq? b (lit uint))) (lit uint))
-      (#t (lit int)))))
 
 ; x0 into the form KIND holds a value in, after an operation that can leave it
 (def %cc-gen-normalize!
@@ -942,8 +920,8 @@
         ((string=? op "+") (+ x y))
         ((string=? op "-") (- x y))
         ((string=? op "*") (* x y))
-        ((string=? op "/") (if wide? (%cc-gen-fold-udiv x y #f) (/ x y)))
-        ((string=? op "%") (if wide? (%cc-gen-fold-udiv x y #t) (% x y)))
+        ((string=? op "/") (if wide? (unsigned-divide x y #f) (/ x y)))
+        ((string=? op "%") (if wide? (unsigned-divide x y #t) (% x y)))
         ((string=? op "&") (& x y))
         ((string=? op "|") (| x y))
         ((string=? op "^") (^ x y))
@@ -955,20 +933,6 @@
             (>> x y)))
         (#t (%cc-gen-no (string-append "a global initialized with " op))))
       kind)))
-
-; N / D, or N % D when REM?, both read as unsigned 64-bit values: the
-; division the code does at run time (%cc-gen-udiv64!), on constants
-(def %cc-gen-fold-udiv
-  (fn (_ n d rem?)
-    (def top (<< 1 63))
-    ; unsigned order is signed order with the top bit flipped
-    (def at-least? (fn (_ a b) (>= (^ a top) (^ b top))))
-    (def q
-      (if (< d 0)
-        (if (at-least? n d) 1 0)
-        (let ((q0 (<< (/ (& (>> n 1) (- top 1)) d) 1)))
-          (if (at-least? (- n (* q0 d)) d) (+ q0 1) q0))))
-    (if rem? (- n (* q d)) q)))
 
 ; the bytes of the data: every piece at its offset, zeros between.  The
 ; pieces are listed last-laid first, so the bytes build from the end back.
@@ -1216,7 +1180,7 @@
 (def %cc-gen-int-form?
   (fn (_ k)
     (if (pair? k) #f
-      (if (eq? k (lit fnptr)) #f (eq? (%cc-gen-promote k) (lit int))))))
+      (if (eq? k (lit fnptr)) #f (eq? (promoted-c-type k) (lit int))))))
 
 ; x0, a value of kind FROM, converted to KIND: narrowed to a char or short,
 ; and into an int's or an unsigned int's form from any other kind, an
@@ -1267,7 +1231,7 @@
               ((string=? op "*") (kind-elem (self (first (rest (rest node))))))
               ((string=? op "&") (list (lit ptr) (self (first (rest (rest node))))))
               ((string=? op "!") (lit int))
-              (#t (%cc-gen-promote (self (first (rest (rest node)))))))))
+              (#t (promoted-c-type (self (first (rest (rest node)))))))))
         ((eq? t (lit bin))
           (%cc-gen-bin-kind (first (rest node))
             (self (first (rest (rest node)))) (self (first (rest (rest (rest node)))))))
@@ -1278,7 +1242,7 @@
             (if (%cc-gen-addr-kind? ka) (%cc-gen-decay ka)
               (let ((kb (self (first (rest (rest (rest node)))))))
                 (if (%cc-gen-addr-kind? kb) (%cc-gen-decay kb)
-                  (%cc-gen-arith-kind ka kb))))))
+                  (common-c-type ka kb))))))
         ((eq? t (lit comma)) (self (first (rest (rest node)))))
         ((eq? t (lit dot))
           (rest (%cc-gen-field (self (first (rest node))) (first (rest (rest node))))))
@@ -1300,9 +1264,9 @@
         (match ((if (%cc-gen-addr-kind? ka) (%cc-gen-addr-kind? kb) #f) (lit long))
                ((%cc-gen-addr-kind? ka) (%cc-gen-decay ka))
                ((if (string=? op "+") (%cc-gen-addr-kind? kb) #f) (%cc-gen-decay kb))
-               (#t (%cc-gen-arith-kind ka kb))))
-      ((if (string=? op "<<") #t (string=? op ">>")) (%cc-gen-promote ka))
-      (#t (%cc-gen-arith-kind ka kb)))))
+               (#t (common-c-type ka kb))))
+      ((if (string=? op "<<") #t (string=? op ">>")) (promoted-c-type ka))
+      (#t (common-c-type ka kb)))))
 
 ; The address of what NODE names, into x0, answering the kind there: a
 ; name's own place, the pointee of a `*`, or an element.
@@ -1377,7 +1341,7 @@
           (%cc-gen-load-at! (%cc-gen-index! (first (rest node)) (first (rest (rest node))))))
         ((eq? t (lit un))
           (let ((op (first (rest node))))
-            (def k (%cc-gen-promote (%cc-gen-kind-of (first (rest (rest node))))))
+            (def k (promoted-c-type (%cc-gen-kind-of (first (rest (rest node))))))
             (do (self (first (rest (rest node))))
                 (match
                   ((string=? op "-")
@@ -1399,8 +1363,8 @@
             ; a shift works in its left operand's kind, anything else in the
             ; kind its two operands meet in
             (def k (if (if (string=? op "<<") #t (string=? op ">>"))
-                     (%cc-gen-promote ka)
-                     (%cc-gen-arith-kind ka kb)))
+                     (promoted-c-type ka)
+                     (common-c-type ka kb)))
             (do (self (first (rest (rest node))))
                 (asm-push! %cc-gen-asm x0)
                 (self (first (rest (rest (rest node)))))
@@ -1514,7 +1478,7 @@
         (%cc-gen! (lit mov) x8 x0)
         (if (%cc-gen-ptr? k)
           (%cc-gen-bump! up (kind-size (kind-elem k)))
-          (do (%cc-gen-bump! up 1) (%cc-gen-normalize! (%cc-gen-promote k))))
+          (do (%cc-gen-bump! up 1) (%cc-gen-normalize! (promoted-c-type k))))
         (%cc-gen-store! at k)
         (if after () (%cc-gen! (lit mov) x0 x8)))))
 
@@ -1945,21 +1909,21 @@
 ; run reads them from.
 (def %cc-gen-runtime
   (append
-    (list (pair "malloc" (pair 1 (pair (list (lit ptr) (lit void)) %cc-gen-malloc-body!)))
-          (pair "strlen" (pair 1 (pair (lit ulong) %cc-gen-strlen-body!)))
-          (pair "strcmp" (pair 2 (pair (lit int) %cc-gen-strcmp-body!)))
-          (pair "strcpy" (pair 2 (pair (list (lit ptr) (lit char)) %cc-gen-strcpy-body!)))
-          (pair "memcpy" (pair 3 (pair (list (lit ptr) (lit void)) %cc-gen-memcpy-body!)))
-          (pair "memset" (pair 3 (pair (list (lit ptr) (lit void)) %cc-gen-memset-body!)))
-          (pair "strcat" (pair 2 (pair (list (lit ptr) (lit char)) %cc-gen-strcat-body!)))
-          (pair "strncmp" (pair 3 (pair (lit int) (fn (_) (%cc-gen-compare-body! #t)))))
-          (pair "memcmp" (pair 3 (pair (lit int) (fn (_) (%cc-gen-compare-body! #f)))))
-          (pair "strncpy" (pair 3 (pair (list (lit ptr) (lit char)) %cc-gen-strncpy-body!)))
-          (pair "strchr" (pair 2 (pair (list (lit ptr) (lit char)) %cc-gen-strchr-body!)))
-          (pair "atoi" (pair 1 (pair (lit int) %cc-gen-atoi-body!)))
-          (pair "toupper" (pair 1 (pair (lit int) (fn (_) (%cc-gen-case-body! 97 122 (lit sub))))))
-          (pair "tolower" (pair 1 (pair (lit int) (fn (_) (%cc-gen-case-body! 65 90 (lit add))))))
-          (pair "abs" (pair 1 (pair (lit int) %cc-gen-abs-body!))))
+    (list (pair "malloc" (pair 1 (pair (library-c-type "malloc") %cc-gen-malloc-body!)))
+          (pair "strlen" (pair 1 (pair (library-c-type "strlen") %cc-gen-strlen-body!)))
+          (pair "strcmp" (pair 2 (pair (library-c-type "strcmp") %cc-gen-strcmp-body!)))
+          (pair "strcpy" (pair 2 (pair (library-c-type "strcpy") %cc-gen-strcpy-body!)))
+          (pair "memcpy" (pair 3 (pair (library-c-type "memcpy") %cc-gen-memcpy-body!)))
+          (pair "memset" (pair 3 (pair (library-c-type "memset") %cc-gen-memset-body!)))
+          (pair "strcat" (pair 2 (pair (library-c-type "strcat") %cc-gen-strcat-body!)))
+          (pair "strncmp" (pair 3 (pair (library-c-type "strncmp") (fn (_) (%cc-gen-compare-body! #t)))))
+          (pair "memcmp" (pair 3 (pair (library-c-type "memcmp") (fn (_) (%cc-gen-compare-body! #f)))))
+          (pair "strncpy" (pair 3 (pair (library-c-type "strncpy") %cc-gen-strncpy-body!)))
+          (pair "strchr" (pair 2 (pair (library-c-type "strchr") %cc-gen-strchr-body!)))
+          (pair "atoi" (pair 1 (pair (library-c-type "atoi") %cc-gen-atoi-body!)))
+          (pair "toupper" (pair 1 (pair (library-c-type "toupper") (fn (_) (%cc-gen-case-body! 97 122 (lit sub))))))
+          (pair "tolower" (pair 1 (pair (library-c-type "tolower") (fn (_) (%cc-gen-case-body! 65 90 (lit add))))))
+          (pair "abs" (pair 1 (pair (library-c-type "abs") %cc-gen-abs-body!))))
     (let ((go (fn (self es)
                 (if (null? es) ()
                   (let ((ranges (rest (first es))))
@@ -2818,7 +2782,7 @@
           ; promotes the value, and each label converts to its kind.
           (let ((out (%cc-gen-label)))
             (def e (first (rest node)))
-            (def k (%cc-gen-promote (%cc-gen-kind-of e)))
+            (def k (promoted-c-type (%cc-gen-kind-of e)))
             ; ((LABEL VALUE stmt ...) ...), a label for each clause
             (def clauses
               (let ((go (fn (go cs)
