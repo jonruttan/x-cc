@@ -1018,8 +1018,9 @@
 ; and kept for the rest of the run: taken from the heap, initialized once.
 ; (NODE . ADDRESS), the declaration's node found again by identity.
 (def %cc-statics ())
+; The initializer sees the names of ENV, the block's, and its own.
 (def %cc-static-address
-  (fn (_ node c-type init)
+  (fn (_ node c-type init env)
     (def go (fn (self es)
               (match
                 ((null? es) ())
@@ -1028,7 +1029,9 @@
     (def found (go %cc-statics))
     (if (not (null? found)) found
       (let ((a (%cc-heap (kind-size c-type))))
-        (do (if (null? init) () (%cc-init-into! a c-type init ()))
+        (do (if (null? init) ()
+              (%cc-init-into! a c-type init
+                (pair (pair (first (rest node)) (pair a c-type)) env)))
             (set! %cc-statics (pair (pair node a) %cc-statics))
             a)))))
 
@@ -1043,12 +1046,14 @@
                 (def kind (first (rest (rest item))))
                 (def init (first (rest (rest (rest item)))))
                 (def static? (not (null? (rest (rest (rest (rest item)))))))
-                (def a (if static? (%cc-static-address item kind init)
+                (def a (if static? (%cc-static-address item kind init env)
                          (%cc-alloca (kind-size kind))))
+                ; the name is in scope in its own initializer:
+                ; struct node *n = malloc(sizeof *n);
+                (def inner (pair (pair name (pair a kind)) env))
                 (do (if (if static? #t (null? init)) ()
-                      (%cc-init-into! a kind init env))
-                    (self (rest items)
-                      (pair (pair name (pair a kind)) env))))
+                      (%cc-init-into! a kind init inner))
+                    (self (rest items) inner)))
               (let ((c (%cc-exec item env)))
                 (if (null? c) (self (rest items) env) c)))))))
     (go (first (rest blk)) env0)))
@@ -1097,10 +1102,10 @@
                     (def init (first (rest (rest (rest item)))))
                     (def size (kind-size kind))
                     (def a (%cc-heap size))
-                    (do (if (null? init) ()
-                          (%cc-init-into! a kind init ()))
-                        (set! %cc-genv
-                          (pair (pair name (pair a kind)) %cc-genv)))))
+                    ; in scope in its own initializer, as a local is
+                    (do (set! %cc-genv (pair (pair name (pair a kind)) %cc-genv))
+                        (if (null? init) ()
+                          (%cc-init-into! a kind init ())))))
                 (self (rest items)))))))
     (load! prog)
     (%cc-scan-program! prog)

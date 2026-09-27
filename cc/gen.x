@@ -607,8 +607,9 @@
     (%cc-gen-keep-fixups! off)
     (set! %cc-gen-globals (pair (pair name (pair off kind)) %cc-gen-globals))))
 
-; (OFFSET . INIT) for each pointer in the data that starts at an address:
-; where the pointer is, and what names the address
+; (OFFSET INIT . SCOPE) for each pointer in the data that starts at an
+; address: where the pointer is, what names the address, and the static
+; locals in scope where INIT is (%cc-gen-static-scope)
 (def %cc-gen-fixups ())
 
 ; the notes the object just placed at OFF left (%cc-gen-pending), as fixups
@@ -618,10 +619,29 @@
       (fn (self ps)
         (if (null? ps) ()
           (do (set! %cc-gen-fixups
-                (pair (pair (+ off (first (first ps))) (rest (first ps))) %cc-gen-fixups))
+                (pair (pair (+ off (first (first ps)))
+                        (pair (rest (first ps)) %cc-gen-static-scope))
+                  %cc-gen-fixups))
               (self (rest ps))))))
     (go %cc-gen-pending)
     (set! %cc-gen-pending ())))
+
+; ((NAME OFFSET . C-TYPE) ...), the static locals in scope at a point of a
+; function, the latest first: a name in a constant initializer there is
+; one of them before it is a global's
+(def %cc-gen-static-scope ())
+
+; (OFFSET . C-TYPE) for the object NAME names in a constant initializer:
+; a static local in scope, else a global; nil when neither
+(def %cc-gen-constant-find
+  (fn (_ name)
+    (def go
+      (fn (self es)
+        (match
+          ((null? es) (%cc-gen-global-find name))
+          ((string=? (first (first es)) name) (rest (first es)))
+          (#t (self (rest es))))))
+    (go %cc-gen-static-scope)))
 
 ; (OFFSET . C-TYPE) for the address NODE stands for: where in the data it
 ; lies, and the C type of what is there.  A string literal or an array
@@ -655,7 +675,7 @@
           (def xt (first x))
           (match
             ((eq? xt (lit var))
-              (let ((g (%cc-gen-global-find (first (rest x)))))
+              (let ((g (%cc-gen-constant-find (first (rest x)))))
                 (if (null? g)
                   (%cc-gen-no "a global pointer initialized with the address of something not global")
                   g)))
@@ -685,12 +705,15 @@
     (def go
       (fn (self fs)
         (if (null? fs) ()
-          (do (%cc-gen-address! x22 (first (first fs)))
-              (%cc-gen! (lit mov) x1 x0)
-              (%cc-gen-address! x22 (%cc-gen-address-constant (rest (first fs))))
-              (%cc-gen! (lit str) x0 (mem x1 0))
-              (self (rest fs))))))
-    (go (reverse %cc-gen-fixups))))
+          (let ((f (first fs)))
+            (set! %cc-gen-static-scope (rest (rest f)))
+            (%cc-gen-address! x22 (first f))
+            (%cc-gen! (lit mov) x1 x0)
+            (%cc-gen-address! x22 (%cc-gen-address-constant (first (rest f))))
+            (%cc-gen! (lit str) x0 (mem x1 0))
+            (self (rest fs))))))
+    (go (reverse %cc-gen-fixups))
+    (set! %cc-gen-static-scope ())))
 
 ; A static local is kept once for the program, as a global is: room in the
 ; data with its initializer's bytes in place, laid out with the globals
@@ -702,6 +725,8 @@
 (def %cc-gen-static-decl?
   (fn (_ node) (not (null? (rest (rest (rest (rest node))))))))
 
+; A static local is in scope from its own initializer on, so the pointer
+; in it can start at its own address.
 (def %cc-gen-static!
   (fn (_ node)
     (def c-type (%cc-gen-kind! (first (rest (rest node))) "a local"))
@@ -709,18 +734,25 @@
     (def off
       (%cc-gen-data! (%cc-gen-const-bytes c-type (first (rest (rest (rest node)))) 0)
         (kind-align c-type)))
+    (set! %cc-gen-static-scope
+      (pair (pair (first (rest node)) (pair off c-type)) %cc-gen-static-scope))
     (%cc-gen-keep-fixups! off)
     (set! %cc-gen-statics (pair (pair node (pair off c-type)) %cc-gen-statics))))
 
-; every static declaration in NODE, laid out
+; every static declaration in NODE, laid out; the ones a block or a
+; function declares go out of scope at its end
 (def %cc-gen-scan-statics!
   (fn (self node)
     (if (pair? node)
-      (do (if (if (eq? (first node) (lit decl)) (%cc-gen-static-decl? node) #f)
-            (%cc-gen-static! node)
-            ())
-          (let ((go (fn (go xs) (if (pair? xs) (do (self (first xs)) (go (rest xs))) ()))))
-            (go node)))
+      (let ((scope %cc-gen-static-scope))
+        (if (if (eq? (first node) (lit decl)) (%cc-gen-static-decl? node) #f)
+          (%cc-gen-static! node)
+          ())
+        (let ((go (fn (go xs) (if (pair? xs) (do (self (first xs)) (go (rest xs))) ()))))
+          (go node))
+        (if (if (eq? (first node) (lit block)) #t (eq? (first node) (lit fun)))
+          (set! %cc-gen-static-scope scope)
+          ()))
       ())))
 
 ; the name a static declaration NODE declares, bound in the function being
@@ -2908,6 +2940,7 @@
     ; then the static locals, before a string can push them past a load's
     ; reach
     (set! %cc-gen-statics ())
+    (set! %cc-gen-static-scope ())
     (%cc-gen-scan-statics! funs)
     (def a (asm-new 262144))
     (set! %cc-gen-asm a)

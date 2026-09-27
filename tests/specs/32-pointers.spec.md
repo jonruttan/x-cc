@@ -166,14 +166,14 @@ Global l 7
 
 ## the refusals
 
-### a static local's pointer that starts at another static local
+### a global pointer that starts at a number cast to a pointer, moved
 
 ```cc
 (display (guard (e (do (display "refused: ") (write e) ""))
-  (cc-exe-run "int *f(void) { static int x = 5; static int *p = &x; return p; }\nint main(void) { return *f(); }")))
+  (cc-exe-run "int *g = (int *)4096 + 1;\nint main(void) { return g == (int *)4100; }")))
 ```
 ---
-    refused: #<err:cc cc: compile: not built yet: a global pointer initialized with the address of something not global>
+    refused: #<err:cc cc: compile: not built yet: a global initialized by arithmetic on an address>
 
 ### arithmetic other than + and - on an address
 
