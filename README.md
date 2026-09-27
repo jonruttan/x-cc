@@ -25,7 +25,8 @@ all 64 bits -- so arithmetic wraps as C's does in each kind.
 Compiled so far: main and the functions beside it, with integer
 globals, locals (a static one kept once, in the data) and parameters of
 every width, signed and unsigned,
-pointers, arrays, structs and unions, assignment, `++` and `--`,
+pointers, arrays, pointers to arrays, structs and unions, typedefs of
+any of them, assignment, `++` and `--`,
 `if`/`else`, `while`, `do`, `for`, `switch`, `break`, `continue`,
 `return` and calls, recursion included, over integer constants and
 string literals, `+ - * / %`, `& | ^ << >>`, the six comparisons,
