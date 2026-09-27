@@ -80,7 +80,10 @@
 ; The frames go in a region below the machine stack, so a push never lands
 ; in one: the entry points x20 at the region's top and moves the machine
 ; stack below it, and each function's prologue takes its frame off x20.
-(def %cc-gen-region 65536)
+; Four megabytes of the eight a process's stack has on both targets; a
+; frame takes at most a megabyte of it.
+(def %cc-gen-region 4194304)
+(def %cc-gen-frame-most 1048576)
 
 ; the bytes of several pieces, in order
 (def %cc-gen-cat
@@ -112,7 +115,7 @@
     (def write-nr (syscall-id (lit write)))
     (if (eq? target (lit macho-arm64))
       ; ten words: adr x21, write3; adr x22, the data; mov x20, sp;
-      ; sub sp, #64K; bl main (six words on); movz x16, #exit; svc #0x80;
+      ; sub sp, #4M; bl main (six words on); movz x16, #exit; svc #0x80;
       ; then write3: movz x16, #write; svc #0x80; ret
       (%cc-gen-cat
         (list (%cc-gen-le32 (%cc-gen-adr 21 28))
@@ -126,7 +129,7 @@
               (%cc-gen-le32 0xD4001001)
               (%cc-gen-le32 0xD65F03C0)))
       ; forty-seven bytes: lea r13, [rip+32] (write3); lea r14, [rip+...]
-      ; (the data); mov r12, rsp; sub rsp, 64K; call main (eighteen bytes
+      ; (the data); mov r12, rsp; sub rsp, 4M; call main (eighteen bytes
       ; on); mov rdi, rax; mov eax, exit; syscall; then write3:
       ; mov eax, write; syscall; ret
       (%cc-gen-cat
@@ -810,20 +813,36 @@
     (if (not (null? (%cc-gen-find name)))
       (%cc-gen-no (string-append "a second declaration of " name)))
     (def off (round-up %cc-gen-frame-bytes (kind-align kind)))
+    ; a scalar loads and stores at its offset from x19, which reaches 4095
+    ; of its widths; an array or a struct is reached through its address
+    (if (if (%cc-gen-aggregate? kind) #f (> off (* 4095 (kind-size kind))))
+      (%cc-gen-no "more locals than a load reaches"))
     (set! %cc-gen-frame-bytes (+ off (kind-size kind)))
     (set! %cc-gen-env (pair (pair name (pair off kind)) %cc-gen-env))
     off))
 
-; A parameter the caller stored above: OFF bytes below the top of this
-; frame (%cc-gen-homes).  The top is known once the frame is laid out, so
-; the offset counts back from it, negative, and a place adds the frame's
-; size.
+; A struct parameter, where the caller stored it: OFF bytes below the top of
+; this frame (%cc-gen-homes).  The top is known once the frame is laid out,
+; so the offset counts back from it, negative, and a place adds the frame's
+; size.  A struct is reached through its address, from any distance.
 (def %cc-gen-frame-top 0)   ; the size of the frame being compiled
 (def %cc-gen-slot-above!
   (fn (_ name kind off)
     (if (not (null? (%cc-gen-find name)))
       (%cc-gen-no (string-append "a second declaration of " name)))
     (set! %cc-gen-env (pair (pair name (pair (- 0 off) kind)) %cc-gen-env))))
+
+(def %cc-gen-sret-slot 0)   ; where a struct the function answers goes, a word
+
+; x20 moved by N, OP sub or add, in steps an arm64 immediate holds: the
+; prologue's arguments are still in their registers, so none is free to
+; hold the whole
+(def %cc-gen-step-x20!
+  (fn (self op n)
+    (if (<= n 0) ()
+      (let ((step (if (> n 4080) 4080 n)))
+        (do (%cc-gen! op x20 x20 (imm step))
+            (self op (- n step)))))))
 
 ; Room for KIND in the frame, with no name: where a call puts the struct
 ; it answers (%cc-gen-scan-calls!)
@@ -2093,12 +2112,13 @@
                 (%cc-gen! (lit b) (label top))
                 (asm-label! %cc-gen-asm out)
                 (set! %cc-gen-loops (rest %cc-gen-loops)))))
-        ; a struct is copied to where the caller asked for it, in the word at
-        ; the top of the frame (%cc-gen-call-fun!), and that address answers
+        ; a struct is copied to where the caller asked for it, in the word
+        ; the prologue brought down from the frame's top, and that address
+        ; answers
         ((if (eq? t (lit return)) (%cc-gen-struct? %cc-gen-ret-kind) #f)
           (do (%cc-gen-same-struct! %cc-gen-ret-kind (first (rest node)) "a return")
               (%cc-gen-expr! (first (rest node)))
-              (%cc-gen! (lit ldr) x1 (mem x19 (- %cc-gen-frame-top 8)))
+              (%cc-gen! (lit ldr) x1 (mem x19 %cc-gen-sret-slot))
               (%cc-gen-copy! (kind-size %cc-gen-ret-kind))
               (%cc-gen! (lit mov) x0 x1)
               (%cc-gen! (lit b) (label %cc-gen-epilogue))))
@@ -2169,33 +2189,37 @@
 ; --- a function --------------------------------------------------------------
 
 ; Every declaration in the body takes a slot before any code is emitted: the
-; prologue has to know the frame's size, and it comes first.
+; prologue has to know the frame's size, and it comes first.  One pass takes
+; the scalars and another, AGGREGATES? true, the arrays and structs, so the
+; scalars sit low in the frame, where a load reaches them.
 (def %cc-gen-scan!
-  (fn (self node)
+  (fn (self node aggregates?)
     (if (not (pair? node)) ()
       (let ((t (first node)))
         (match
           ((eq? t (lit decl))
-            (%cc-gen-slot! (first (rest node))
-              (%cc-gen-kind! (first (rest (rest node))) "a local")))
+            (let ((c-type (%cc-gen-kind! (first (rest (rest node))) "a local")))
+              (if (eq? (%cc-gen-aggregate? c-type) aggregates?)
+                (%cc-gen-slot! (first (rest node)) c-type)
+                ())))
           ((eq? t (lit block))
             (let ((go (fn (self2 items)
                         (if (null? items) ()
-                          (do (self (first items)) (self2 (rest items)))))))
+                          (do (self (first items) aggregates?) (self2 (rest items)))))))
               (go (first (rest node)))))
           ((eq? t (lit if))
-            (do (self (first (rest (rest node))))
+            (do (self (first (rest (rest node))) aggregates?)
                 (let ((e (first (rest (rest (rest node))))))
-                  (if (null? e) () (self e)))))
-          ((eq? t (lit while)) (self (first (rest (rest node)))))
-          ((eq? t (lit do)) (self (first (rest node))))
+                  (if (null? e) () (self e aggregates?)))))
+          ((eq? t (lit while)) (self (first (rest (rest node))) aggregates?))
+          ((eq? t (lit do)) (self (first (rest node)) aggregates?))
           ((eq? t (lit for))
-            (do (let ((i (first (rest node)))) (if (null? i) () (self i)))
-                (self (first (rest (rest (rest (rest node))))))))
+            (do (let ((i (first (rest node)))) (if (null? i) () (self i aggregates?)))
+                (self (first (rest (rest (rest (rest node))))) aggregates?)))
           ((eq? t (lit switch))
             (let ((go (fn (self2 cs)
                         (if (null? cs) ()
-                          (do (self (list (lit block) (rest (first cs))))
+                          (do (self (list (lit block) (rest (first cs))) aggregates?)
                               (self2 (rest cs)))))))
               (go (first (rest (rest node))))))
           (#t ()))))))
@@ -2216,60 +2240,87 @@
     (set! %cc-gen-loops ())
     (set! %cc-gen-rslots ())
     (set! %cc-gen-epilogue (%cc-gen-label))
-    ; the parameters in registers take the first slots, then the body's
-    ; declarations; the rest, and every struct, are at the frame's top
-    ; already, where the caller stored them
+    ; The frame, from its base in x19 up: the slot the runtime writes a byte
+    ; from; the parameters, the declarations that are not arrays or structs,
+    ; and the word that says where a struct the function answers goes, each
+    ; where a load reaches it; printf's area when the function calls it; the
+    ; arrays and structs, reached through their address from any distance;
+    ; and at the top, the arguments the caller stored there (%cc-gen-homes),
+    ; which the prologue copies down into slots of their own, a struct
+    ; excepted.
+    (set! %cc-gen-scratch (%cc-gen-room! (lit long)))
     (def pkinds
       (let ((go (fn (self ks)
                   (if (null? ks) ()
                     (pair (%cc-gen-kind! (first ks) "a parameter") (self (rest ks)))))))
         (go kinds)))
     (def homes (%cc-gen-homes pkinds sret?))
-    ; (MEM KIND . REGISTER) for each parameter that arrives in a register
+    ; (MEM C-TYPE . HOME) for each parameter but a struct stored above,
+    ; which stays where the caller put it
     (def places
       (let ((go (fn (self ps ks hs)
                   (if (null? ps) ()
-                    (if (eq? (first (first hs)) (lit reg))
-                      (pair (pair (mem x19 (%cc-gen-slot! (first ps) (first ks)))
-                              (pair (first ks) (rest (first hs))))
-                        (self (rest ps) (rest ks) (rest hs)))
+                    (if (if (eq? (first (first hs)) (lit above)) (%cc-gen-struct? (first ks)) #f)
                       (do (%cc-gen-slot-above! (first ps) (first ks) (rest (first hs)))
-                          (self (rest ps) (rest ks) (rest hs))))))))
+                          (self (rest ps) (rest ks) (rest hs)))
+                      (pair (pair (mem x19 (%cc-gen-slot! (first ps) (first ks)))
+                              (pair (first ks) (first hs)))
+                        (self (rest ps) (rest ks) (rest hs))))))))
         (go params pkinds homes)))
-    (def above (%cc-gen-above-size homes sret?))
-    (%cc-gen-scan! body)
-    (%cc-gen-scan-calls! body)
-    ; the slot past the named ones, for the runtime to write a byte from,
-    ; then printf's area if the function calls it
-    (set! %cc-gen-scratch (round-up %cc-gen-frame-bytes 8))
-    (set! %cc-gen-pf (+ %cc-gen-scratch 8))
+    (set! %cc-gen-sret-slot (if sret? (%cc-gen-room! (lit long)) 0))
+    (%cc-gen-scan! body #f)
+    ; printf's area: to the digits' end, then a slot per argument after the
+    ; format
     (def width
       (if (null? (%cc-gen-fun-find "printf")) (%cc-gen-printf-width body) 0))
-    ; the area to the digits' end, then a slot per argument after the format
     (def pf-slots (if (= width 0) 0 (+ (/ %cc-gen-pf-end 8) (- width 1))))
-    (def frame (+ (round-up (+ %cc-gen-pf (* 8 pf-slots)) 16) above))
-    (if (> frame 4080) (%cc-gen-no "a frame past four kilobytes"))
+    (set! %cc-gen-pf (round-up %cc-gen-frame-bytes 8))
+    (set! %cc-gen-frame-bytes (+ %cc-gen-pf (* 8 pf-slots)))
+    (if (> %cc-gen-frame-bytes 32760) (%cc-gen-no "more locals than a load reaches"))
+    (%cc-gen-scan! body #t)
+    (%cc-gen-scan-calls! body)
+    (def frame
+      (+ (round-up %cc-gen-frame-bytes 16) (%cc-gen-above-size homes sret?)))
+    (if (> frame %cc-gen-frame-most) (%cc-gen-no "a frame past a megabyte"))
     (set! %cc-gen-frame-top frame)
+    (def home (fn (_ p) (rest (rest p))))
+    (def in-reg? (fn (_ p) (eq? (first (home p)) (lit reg))))
     (asm-label! %cc-gen-asm (%cc-gen-fun-label (first (rest f))))
     ; prologue: the caller's frame base is saved, this one taken off x20
     (if (null? %cc-gen-link) () (asm-push! %cc-gen-asm %cc-gen-link))
     (asm-push! %cc-gen-asm x19)
-    ; an immediate, not a scratch register: the arguments are still in theirs
-    (if (= frame 0) () (%cc-gen! (lit sub) x20 x20 (imm frame)))
+    (%cc-gen-step-x20! (lit sub) frame)
     (%cc-gen! (lit mov) x19 x20)
-    ; the arguments in registers live in slots from here, each narrowed to
-    ; its parameter's kind as it is stored
+    ; the arguments in registers go to their slots first, each narrowed to
+    ; its parameter's C type as it is stored; then the registers are free to
+    ; bring the ones above down, through their address
     (let ((go (fn (self ps)
                 (if (null? ps) ()
                   (let ((p (first ps)))
-                    (do (%cc-gen! (%cc-gen-store-op (first (rest p))) (rest (rest p)) (first p))
+                    (do (if (in-reg? p)
+                          (%cc-gen! (%cc-gen-store-op (first (rest p))) (rest (home p)) (first p))
+                          ())
                         (self (rest ps))))))))
       (go places))
+    (let ((go (fn (self ps)
+                (if (null? ps) ()
+                  (let ((p (first ps)))
+                    (do (if (in-reg? p) ()
+                          (do (%cc-gen-address! x19 (- frame (rest (home p))))
+                              (%cc-gen! (%cc-gen-load-op (first (rest p))) x0 (mem x0 0))
+                              (%cc-gen! (%cc-gen-store-op (first (rest p))) x0 (first p))))
+                        (self (rest ps))))))))
+      (go places))
+    (if sret?
+      (do (%cc-gen-address! x19 (- frame 8))
+          (%cc-gen! (lit ldr) x0 (mem x0 0))
+          (%cc-gen! (lit str) x0 (mem x19 %cc-gen-sret-slot)))
+      ())
     (%cc-gen-stmt! body)
     ; falling off the end answers 0, which is what C says of main
     (%cc-gen-const! 0)
     (asm-label! %cc-gen-asm %cc-gen-epilogue)
-    (if (= frame 0) () (%cc-gen! (lit add) x20 x20 (imm frame)))
+    (%cc-gen-step-x20! (lit add) frame)
     (asm-pop! %cc-gen-asm x19)
     (if (null? %cc-gen-link) () (asm-pop! %cc-gen-asm %cc-gen-link))
     (%cc-gen! (lit ret))))
