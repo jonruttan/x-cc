@@ -52,7 +52,7 @@
   substring)
 (import cc/lex cc-lex)
 (import cc/parse cc-parse kind-size kind-align round-up struct-entry)
-(import cc/eval ctype-ranges kind-elem signed?)
+(import cc/eval ctype-ranges kind-elem printf-conversion printf-fit printf-pad signed?)
 (import cc/macho macho-write! macho-data-at)
 (import cc/elf elf-write! elf-data-at elf-machine-x86-64)
 
@@ -535,14 +535,16 @@
 (def %cc-gen-scratch 0)     ; the slot past the named ones, which the runtime writes from
 
 ; A function that calls printf has an area past the scratch slot for it:
-; the count of bytes written so far, the cursor into the digits, twenty-four
-; bytes the digits are built in -- an unsigned long has twenty -- then one
-; slot for each argument after the format.  It is in the frame, so a printf
+; the count of bytes written so far, the cursor into the digits, a slot a
+; conversion keeps a number in across a write, twenty-four bytes the
+; digits are built in -- an unsigned long has twenty -- then one slot for
+; each argument after the format.  It is in the frame, so a printf
 ; reached from another's arguments, or from a recursive call, has its own.
 (def %cc-gen-pf 0)          ; where the area starts
 (def %cc-gen-pf-count 0)
 (def %cc-gen-pf-cursor 8)
-(def %cc-gen-pf-end 40)     ; the digits end here, and the arguments start
+(def %cc-gen-pf-held 16)
+(def %cc-gen-pf-end 48)     ; the digits end here, and the arguments start
 
 ; The data a program carries, in the segment the container maps readable and
 ; writable on the page after the code: the globals first, each at the size
@@ -1889,20 +1891,31 @@
 ; back in x0
 (def %cc-gen-put-cstr!
   (fn (_)
+    (do (%cc-gen-cstr-length! ())
+        (%cc-gen! (lit mov) x0 (imm 1))
+        (%cc-gen! (lit blr) x21))))
+
+; x1 = x0, and x2 = the count of bytes from there to the NUL, or to MOST
+; when that comes first and is not ()
+(def %cc-gen-cstr-length!
+  (fn (_ most)
     (def top (%cc-gen-label))
     (def done (%cc-gen-label))
     (do (%cc-gen! (lit mov) x1 x0)
         (%cc-gen! (lit mov) x2 x0)
         (asm-label! %cc-gen-asm top)
+        (if (null? most) ()
+          (do (%cc-gen! (lit mov) x8 x2)
+              (%cc-gen! (lit sub) x8 x8 x1)
+              (%cc-gen! (lit cmp) x8 (imm most))
+              (%cc-gen! (lit b/ge) (label done))))
         (%cc-gen! (lit ldrb) x0 (mem x2 0))
         (%cc-gen! (lit cmp) x0 (imm 0))
         (%cc-gen! (lit b/eq) (label done))
         (%cc-gen! (lit add) x2 x2 (imm 1))
         (%cc-gen! (lit b) (label top))
         (asm-label! %cc-gen-asm done)
-        (%cc-gen! (lit sub) x2 x2 x1)
-        (%cc-gen! (lit mov) x0 (imm 1))
-        (%cc-gen! (lit blr) x21))))
+        (%cc-gen! (lit sub) x2 x2 x1))))
 
 ; Where each argument of a call goes, by the kinds of the callee's
 ; parameters: (reg . R) for one of the first four that is not a struct,
@@ -2055,13 +2068,18 @@
 ; splits into runs of text and conversions, a %s's literal and a %% join the
 ; text around them, and what is left for run time is a write per run of
 ; text, one per %c, and a conversion per %d, %u, %ld or %lu to decimal and
-; per %x or %lx to hex (%i and %li are %d and %ld).  Every argument is
-; evaluated before anything is written, as a call's are.  It answers the
-; count of bytes written, as C's does.
+; per %x or %lx to hex (%i and %li are %d and %ld).  A conversion reads its
+; flags, field width and precision as run's printf does
+; (printf-conversion): a padding whose size is known here is text, and one
+; that waits on the value is a write of that many bytes from a run of
+; spaces or zeros in the data.  Every argument is evaluated before anything
+; is written, as a call's are.  It answers the count of bytes written, as
+; C's does.
 
 ; (PIECES . ARGS) for FORMAT and the arguments after it: each piece is
-; (text . STRING), or (CONV . N) for the Nth argument left to run time,
-; CONV one of d u x ld lu lx c s
+; (text . STRING), or (CONV N . FIELD) for the Nth argument left to run
+; time, CONV one of d u x ld lu lx c s and FIELD (LEFT? ZERO? WIDTH
+; PRECISION)
 (def %cc-gen-printf-plan
   (fn (_ fmt args)
     (def n (byte-len fmt))
@@ -2079,14 +2097,18 @@
                 (pair (reverse (flush (pair (substring fmt from n) text) pieces))
                   (reverse later))))
           ((not (= (byte-at fmt i) 37)) (self (+ i 1) from text args pieces later))
-          ((>= (+ i 1) n) (%cc-gen-no "printf's % at the end of its format"))
           (#t
-            (let ((text (pair (substring fmt from i) text)))
-              ; a conversion: an l for a long, then its letter
-              (def l? (if (< (+ i 2) n) (= (byte-at fmt (+ i 1)) 108) #f))
-              (def at (if l? (+ i 2) (+ i 1)))
-              (def c (byte-at fmt at))
-              (def next (+ at 1))
+            (let ((text (pair (substring fmt from i) text))
+                  (spec (printf-conversion fmt i)))
+              (if (null? spec) (%cc-gen-no "printf's % at the end of its format"))
+              (def next (first spec))
+              (def c (first (rest spec)))
+              (def l? (first (rest (rest spec))))
+              (def field (rest (rest (rest spec))))
+              (def left? (first field))
+              (def zero? (if (first (rest field)) (not left?) #f))
+              (def width (first (rest (rest field))))
+              (def precision (first (rest (rest (rest field)))))
               (def conv
                 (match
                   ((if l? #f (= c 37)) (lit pct))
@@ -2096,18 +2118,28 @@
                   ((if l? #f (= c 99)) (lit c))
                   ((if l? #f (= c 115)) (lit s))
                   (#t (%cc-gen-no (string-append "printf's %" (substring fmt (+ i 1) next))))))
+              (if (> width 4095) (%cc-gen-no "printf's field width past 4095"))
+              (if (if (null? precision) #f (> precision 4095))
+                (%cc-gen-no "printf's precision past 4095"))
               (match
                 ((eq? conv (lit pct)) (self next next (pair "%" text) args pieces later))
                 ((null? args) (%cc-gen-no "printf with fewer arguments than conversions"))
-                ; a literal's text joins the text around it
+                ; a literal's text, fitted to its field, joins the text around it
                 ((if (eq? conv (lit s)) (eq? (first (first args)) (lit str)) #f)
-                  (self next next (pair (first (rest (first args))) text)
+                  (self next next (pair (printf-fit c (first (rest (first args))) field) text)
                     (rest args) pieces later))
                 ((if (eq? conv (lit s)) (not (%cc-gen-addr-kind? (%cc-gen-kind-of (first args)))) #f)
                   (%cc-gen-no "printf's %s of something that is not a string"))
+                ; a character is one byte, so its padding is text before or after it
+                ((eq? conv (lit c))
+                  (let ((pad (printf-pad zero? (- width 1))))
+                    (self next next (if left? (list pad) ()) (rest args)
+                      (pair (pair conv (pair (length later) field))
+                        (flush (if left? text (pair pad text)) pieces))
+                      (pair (first args) later))))
                 (#t
                   (self next next () (rest args)
-                    (pair (pair conv (length later)) (flush text pieces))
+                    (pair (pair conv (pair (length later) field)) (flush text pieces))
                     (pair (first args) later)))))))))
     (go 0 0 () args () ())))
 
@@ -2143,18 +2175,76 @@
         (%cc-gen! (lit blr) x21)
         (%cc-gen-printf-count!))))
 
-; A number, as CONV reads it -- d and ld signed, u and lu unsigned, the l
-; forms all 64 bits: the sign first if there is one, then the digits, built
-; from the end of the buffer back.  The number and the cursor live in their
-; slots rather than registers, which the division and the multiply take.
+; Padding that waits on the value: N less the number LENGTH! leaves in x0
+; bytes of PAD, a run of spaces or zeros N long, when that is above zero.
+; The run's address may take x2, so the count waits on the stack.
+(def %cc-gen-printf-pad!
+  (fn (_ pad n length!)
+    (def skip (%cc-gen-label))
+    (do (length!)
+        (%cc-gen! (lit mov) x2 (imm n))
+        (%cc-gen! (lit sub) x2 x2 x0)
+        (%cc-gen! (lit cmp) x2 (imm 0))
+        (%cc-gen! (lit b/le) (label skip))
+        (asm-push! %cc-gen-asm x2)
+        (%cc-gen-string-at! pad)
+        (%cc-gen! (lit mov) x1 x0)
+        (asm-pop! %cc-gen-asm x2)
+        (%cc-gen! (lit mov) x0 (imm 1))
+        (%cc-gen! (lit blr) x21)
+        (%cc-gen-printf-count!)
+        (asm-label! %cc-gen-asm skip))))
+
+; A string, from the address in SLOT, in its FIELD (LEFT? ZERO? WIDTH
+; PRECISION): its bytes to the NUL, or to the precision, padded to the
+; field width.  The count waits in the held slot across the padding.
+(def %cc-gen-printf-str!
+  (fn (_ slot field)
+    (def left? (first field))
+    (def zero? (if (first (rest field)) (not left?) #f))
+    (def width (first (rest (rest field))))
+    (def held (mem x19 (+ %cc-gen-pf %cc-gen-pf-held)))
+    (def length! (fn (_) (%cc-gen! (lit ldr) x0 held)))
+    (do (%cc-gen! (lit ldr) x0 (mem x19 slot))
+        (%cc-gen-cstr-length! (first (rest (rest (rest field)))))
+        (%cc-gen! (lit str) x2 held)
+        (if (if left? #t (= width 0)) () (%cc-gen-printf-pad! (printf-pad zero? width) width length!))
+        (%cc-gen! (lit ldr) x1 (mem x19 slot))
+        (%cc-gen! (lit ldr) x2 held)
+        (%cc-gen! (lit mov) x0 (imm 1))
+        (%cc-gen! (lit blr) x21)
+        (%cc-gen-printf-count!)
+        (if (if left? (> width 0) #f) (%cc-gen-printf-pad! (printf-pad #f width) width length!) ()))))
+
+; A number, as CONV reads it -- d and ld signed, u and lu unsigned, x and
+; lx in hex, the l forms all 64 bits -- in its FIELD (LEFT? ZERO? WIDTH
+; PRECISION).  The digits of its magnitude are built from the end of the
+; buffer back before anything is written; then come the padding before,
+; the sign, zeros to the field width for ZERO? or to the precision, the
+; digits, and the padding after.  The value stays in its slot; the
+; magnitude, then the length the field is filled against, is in the held
+; slot, and the cursor in its own, rather than in registers, which the
+; division and the multiply take.
 (def %cc-gen-printf-int!
-  (fn (_ slot conv)
+  (fn (_ slot conv field)
+    (def left? (first field))
+    (def width (first (rest (rest field))))
+    (def precision (first (rest (rest (rest field)))))
+    (def zero? (if (first (rest field)) (if left? #f (null? precision)) #f))
     (def cursor (mem x19 (+ %cc-gen-pf %cc-gen-pf-cursor)))
+    (def held (mem x19 (+ %cc-gen-pf %cc-gen-pf-held)))
     (def end (+ %cc-gen-pf %cc-gen-pf-end))
-    (def plus (%cc-gen-label))
     (def digit (%cc-gen-label))
+    (def digits-done (%cc-gen-label))
     (def signed? (if (eq? conv (lit d)) #t (eq? conv (lit ld))))
     (def hex? (if (eq? conv (lit x)) #t (eq? conv (lit lx))))
+    ; x0 = the count of digits built
+    (def digits!
+      (fn (_)
+        (do (%cc-gen-address! x19 end)
+            (%cc-gen! (lit ldr) x1 cursor)
+            (%cc-gen! (lit sub) x0 x0 x1))))
+    (def length! (fn (_) (%cc-gen! (lit ldr) x0 held)))
     (do (%cc-gen! (lit ldr) x0 (mem x19 slot))
         ; %d reads an int, and %u and %x an unsigned int: the argument's low
         ; 32 bits, in that C type's form
@@ -2164,24 +2254,27 @@
             (do (%cc-gen-uint!) (%cc-gen! (lit str) x0 (mem x19 slot))))
           (#t ()))
         (if signed?
-          (do (%cc-gen! (lit cmp) x0 (imm 0))
-              (%cc-gen! (lit b/ge) (label plus))
-              (%cc-gen! (lit sub) x0 xzr x0)
-              (%cc-gen! (lit str) x0 (mem x19 slot))
-              (%cc-gen! (lit mov) x0 (imm 45))
-              (%cc-gen-put-byte!)
-              (%cc-gen-printf-count!)
-              (asm-label! %cc-gen-asm plus))
+          (let ((plus (%cc-gen-label)))
+            (do (%cc-gen! (lit cmp) x0 (imm 0))
+                (%cc-gen! (lit b/ge) (label plus))
+                (%cc-gen! (lit sub) x0 xzr x0)
+                (asm-label! %cc-gen-asm plus)))
           ())
+        (%cc-gen! (lit str) x0 held)
         (%cc-gen! (lit mov) x2 x19)
         (%cc-gen! (lit add) x2 x2 (imm end))
         (%cc-gen! (lit str) x2 cursor)
+        ; a zero at precision 0 has no digits
+        (if (if (null? precision) #f (= precision 0))
+          (do (%cc-gen! (lit cmp) x0 (imm 0))
+              (%cc-gen! (lit b/eq) (label digits-done)))
+          ())
         (asm-label! %cc-gen-asm digit)
         (if hex?
           ; A hex digit a turn: the low four bits, then the number shifted
           ; right four with zeros in, as unsigned.
           (let ((low (%cc-gen-label)))
-            (do (%cc-gen! (lit ldr) x0 (mem x19 slot))
+            (do (%cc-gen! (lit ldr) x0 held)
                 (%cc-gen! (lit mov) x8 x0)
                 (%cc-gen! (lit mov) x1 (imm 15))
                 (%cc-gen! (lit and) x0 x0 x1)
@@ -2196,7 +2289,7 @@
           ; not negative, so a signed division by five is the unsigned one by
           ; ten.  That also carries the most negative long, whose negation is
           ; itself.
-          (do (%cc-gen! (lit ldr) x0 (mem x19 slot))
+          (do (%cc-gen! (lit ldr) x0 held)
               (%cc-gen! (lit mov) x2 (imm 1))
               (%cc-gen! (lit lsrv) x0 x0 x2)
               (%cc-gen! (lit mov) x1 (imm 5))
@@ -2204,7 +2297,7 @@
               (%cc-gen! (lit mov) x8 x0)
               (%cc-gen! (lit mov) x1 (imm 10))
               (%cc-gen! (lit mul) x2 x8 x1)
-              (%cc-gen! (lit ldr) x0 (mem x19 slot))
+              (%cc-gen! (lit ldr) x0 held)
               (%cc-gen! (lit sub) x0 x0 x2)
               (%cc-gen! (lit add) x0 x0 (imm 48))))
         ; the digit goes in before the ones already written; x8 is the rest
@@ -2212,9 +2305,49 @@
         (%cc-gen! (lit sub) x2 x2 (imm 1))
         (%cc-gen! (lit strb) x0 (mem x2 0))
         (%cc-gen! (lit str) x2 cursor)
-        (%cc-gen! (lit str) x8 (mem x19 slot))
+        (%cc-gen! (lit str) x8 held)
         (%cc-gen! (lit cmp) x8 (imm 0))
         (%cc-gen! (lit b/ne) (label digit))
+        (asm-label! %cc-gen-asm digits-done)
+        ; the length the field is filled against: the digits, or the
+        ; precision when that is more, and the sign
+        (if (> width 0)
+          (do (digits!)
+              (if (null? precision) ()
+                (let ((more (%cc-gen-label)))
+                  (do (%cc-gen! (lit cmp) x0 (imm precision))
+                      (%cc-gen! (lit b/ge) (label more))
+                      (%cc-gen! (lit mov) x0 (imm precision))
+                      (asm-label! %cc-gen-asm more))))
+              (if signed?
+                (let ((plus (%cc-gen-label)))
+                  (do (%cc-gen! (lit ldr) x1 (mem x19 slot))
+                      (%cc-gen! (lit cmp) x1 (imm 0))
+                      (%cc-gen! (lit b/ge) (label plus))
+                      (%cc-gen! (lit add) x0 x0 (imm 1))
+                      (asm-label! %cc-gen-asm plus)))
+                ())
+              (%cc-gen! (lit str) x0 held))
+          ())
+        (if (if (> width 0) (if left? #f (not zero?)) #f)
+          (%cc-gen-printf-pad! (printf-pad #f width) width length!)
+          ())
+        (if signed?
+          (let ((plus (%cc-gen-label)))
+            (do (%cc-gen! (lit ldr) x0 (mem x19 slot))
+                (%cc-gen! (lit cmp) x0 (imm 0))
+                (%cc-gen! (lit b/ge) (label plus))
+                (%cc-gen! (lit mov) x0 (imm 45))
+                (%cc-gen-put-byte!)
+                (%cc-gen-printf-count!)
+                (asm-label! %cc-gen-asm plus)))
+          ())
+        (if (if zero? (> width 0) #f)
+          (%cc-gen-printf-pad! (printf-pad #t width) width length!)
+          ())
+        (if (if (null? precision) #f (> precision 0))
+          (%cc-gen-printf-pad! (printf-pad #t precision) precision digits!)
+          ())
         ; the digits, from the cursor to the end
         (%cc-gen! (lit ldr) x1 cursor)
         (%cc-gen! (lit mov) x2 x19)
@@ -2222,7 +2355,10 @@
         (%cc-gen! (lit sub) x2 x2 x1)
         (%cc-gen! (lit mov) x0 (imm 1))
         (%cc-gen! (lit blr) x21)
-        (%cc-gen-printf-count!))))
+        (%cc-gen-printf-count!)
+        (if (if left? (> width 0) #f)
+          (%cc-gen-printf-pad! (printf-pad #f width) width length!)
+          ()))))
 
 (def %cc-gen-printf!
   (fn (_ args)
@@ -2252,14 +2388,12 @@
             (do (match
                   ((eq? (first p) (lit text)) (%cc-gen-printf-text! (rest p)))
                   ((eq? (first p) (lit c))
-                    (do (%cc-gen! (lit ldr) x0 (mem x19 (arg-at (rest p))))
+                    (do (%cc-gen! (lit ldr) x0 (mem x19 (arg-at (first (rest p)))))
                         (%cc-gen-put-byte!)
                         (%cc-gen-printf-count!)))
                   ((eq? (first p) (lit s))
-                    (do (%cc-gen! (lit ldr) x0 (mem x19 (arg-at (rest p))))
-                        (%cc-gen-put-cstr!)
-                        (%cc-gen-printf-count!)))
-                  (#t (%cc-gen-printf-int! (arg-at (rest p)) (first p))))
+                    (%cc-gen-printf-str! (arg-at (first (rest p))) (rest (rest p))))
+                  (#t (%cc-gen-printf-int! (arg-at (first (rest p))) (first p) (rest (rest p)))))
                 (self (rest pieces)))))))
     (do (push-all later)
         (pop-all (- (length later) 1))
