@@ -1277,11 +1277,8 @@
   (fn (_ args)
     (if (not (= (length args) 1))
       (%cc-gen-no "exit with other than one argument"))
-    ; x86-64 subtracts an immediate in place, from its destination alone,
-    ; so the helper's address is copied before the distance comes off it
     (do (%cc-gen-expr! (first args))
-        (%cc-gen! (lit mov) x1 x21)
-        (%cc-gen! (lit sub) x1 x1 (imm %cc-gen-exit-at))
+        (%cc-gen! (lit sub) x1 x21 (imm %cc-gen-exit-at))
         (%cc-gen! (lit blr) x1))))
 
 ; puts: the string and the newline it adds.  A literal's text is known
