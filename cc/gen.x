@@ -53,6 +53,11 @@
 (import cc/macho macho-write! macho-data-at)
 (import cc/elf elf-write! elf-data-at elf-machine-x86-64)
 
+; The type handles this file asks convert for, fetched by name through the
+; platform's public door and private to this module.
+(def %string (Type named STRING))
+(def %symbol (Type named SYMBOL))
+
 (def %cc-gen-no
   (fn (_ what)
     (Err raise (lit cc) (string-append "cc: compile: not built yet: " what) ())))
