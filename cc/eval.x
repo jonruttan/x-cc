@@ -6,18 +6,24 @@
 ; @copyright 2026 Jon Ruttan
 ; @license MIT No Attribution (MIT-0)
 ;
-; Memory is bytes: one buffer, and an address is a byte offset into it (0 is
-; NULL and guarded).  Every read and write carries the width of the type it
-; goes through -- char 1, short 2, int 4, long and pointers 8 -- and a signed
-; type sign-extends what it read, since the prim answers the bytes
-; zero-extended.  Sizes and offsets are therefore the ones /usr/bin/cc counts,
-; padding included.  Locals live in memory (a stack growing down from the top),
-; so &local works; the heap bumps up from past the globals, each allocation
-; eight-aligned.
+; Memory is bytes, and an address is a real one, so the C library works on
+; what the program hands it.  The program's globals, string literals and
+; stack are in one buffer: the literals and globals bump up from its start,
+; eight-aligned, and locals live on a stack growing down from its top, so
+; &local works.  Anything else -- what malloc answers, the C library's own
+; data -- is wherever the library put it.  Every read and write carries the
+; width of the type it goes through -- char 1, short 2, int 4, long and
+; pointers 8 -- and a signed type sign-extends what it read, since the prim
+; answers the bytes zero-extended.  Sizes and offsets are therefore the ones
+; /usr/bin/cc counts, padding included.  An address below 4096 is a null
+; pointer, and refuses rather than reaching the memory under it.
+;
+; A call to a function the program does not define is a call into the C
+; library, found by name (%cc-libc-call).
 (module cc/eval)
 
-(import cc/prims append byte-at byte-len file-read file-write integer->char length
-  list->string map mem-make mem-ptr mem-ref-at mem-set-at! reverse string-append
+(import cc/prims append byte-at byte-len integer->char length list->string
+  map mem-make mem-ptr mem-ref-at mem-set-at! ptr-int reverse string-append
   string-concat string=? substring word-set! x-write)
 (import cc/lex cc-lex)
 (import cc/parse cc-parse kind-size round-up struct-entry struct-table)
@@ -27,51 +33,59 @@
 (def %cc-mem ())        ; the buffer string, held so it stays alive
 (def %cc-memp ())       ; its ptr object, for the interpreter's words
 (def %cc-memsize 131072)   ; bytes of program memory
-(def %cc-raw-ref (fn (_ i w) (mem-ref-at %cc-memp i w)))
-(def %cc-raw-set! (fn (_ i v w) (mem-set-at! %cc-memp i v w)))
+(def %cc-base 0)        ; the buffer's address
+; the W bytes at address A: the prim takes a pointer and an offset, and
+; the buffer's pointer and A's distance from it reach A wherever it is
+(def %cc-raw-ref
+  (fn (_ a w)
+    (if (< a 4096) (%cc-oops "a read through a null pointer"))
+    (mem-ref-at %cc-memp (- a %cc-base) w)))
+(def %cc-raw-set!
+  (fn (_ a v w)
+    (if (< a 4096) (%cc-oops "a write through a null pointer"))
+    (mem-set-at! %cc-memp (- a %cc-base) v w)))
 (def %cc-sp 0)          ; stack pointer, grows down
-(def %cc-hp 0)          ; heap bump, grows up
+(def %cc-hp 0)          ; the bump for literals and globals, grows up
 (def %cc-genv ())       ; ((name addr . kind) ...)
 (def %cc-funs ())       ; ((name params . body) ...)
 (def %cc-strtab ())     ; ((text . addr) ...), interned
 (def %cc-exit-code ())  ; set when exit() raises its sentinel
 
-; Function values: a function's address is an id above every memory address (so
-; it is never NULL, never confused with memory), handed out the first time a
+; Function values: a function's address is an id, never NULL and below the
+; memory any program or library is mapped at, handed out the first time a
 ; function's name is used as a value; a call through a value maps the id back
-; to the name and dispatches as a named call would (native twin first). The
-; runtime's builtins take ids too.
+; to the name and dispatches as a named call would.  The C library's
+; functions take ids too.
 (def %cc-fun-base 1048576)
 (def %cc-fun-ids ())    ; ((name . id) ...)
-(def %cc-builtins (list "putchar" "puts" "printf" "sprintf" "snprintf" "malloc"
-                    "free" "exit"
-                    "strlen" "strcmp" "strcpy" "memcpy" "memset" "strcat" "strncmp"
-                    "memcmp" "strncpy" "strchr" "atoi" "strrchr" "strstr" "memmove"
-                    "calloc" "isdigit" "isalpha" "isalnum" "isspace" "isupper"
-                    "islower" "isxdigit" "ispunct" "isprint" "iscntrl" "isgraph"
-                    "toupper" "tolower" "abs" "labs" "getchar" "read" "write"))
 
 ; The C type each of the library's functions answers, as its header
 ; declares it, for those that do not answer an int: (NAME . C-TYPE).  run
-; reads them here and the compiled runtime is written from them.
+; converts what the library answers to it, and the compiler types a call
+; with it.
 (def library-c-types
-  (list (pair "malloc" (list (lit ptr) (lit void)))
-        (pair "strlen" (lit ulong))
-        (pair "strcpy" (list (lit ptr) (lit char)))
-        (pair "strcat" (list (lit ptr) (lit char)))
-        (pair "strncpy" (list (lit ptr) (lit char)))
-        (pair "strchr" (list (lit ptr) (lit char)))
-        (pair "strrchr" (list (lit ptr) (lit char)))
-        (pair "strstr" (list (lit ptr) (lit char)))
-        (pair "memcpy" (list (lit ptr) (lit void)))
-        (pair "memmove" (list (lit ptr) (lit void)))
-        (pair "memset" (list (lit ptr) (lit void)))
-        (pair "calloc" (list (lit ptr) (lit void)))
-        (pair "labs" (lit long))
-        (pair "read" (lit long))
-        (pair "write" (lit long))
-        (pair "free" (lit void))
-        (pair "exit" (lit void))))
+  (let ((each (fn (_ t names) (map (fn (_ n) (pair n t)) names)))
+        (cat (fn (self ls) (if (null? ls) () (append (first ls) (self (rest ls)))))))
+    (cat
+      (list
+        (each (list (lit ptr) (lit void))
+          (list "malloc" "calloc" "realloc" "memcpy" "memmove" "memset" "memchr"
+                "bsearch" "fopen" "fdopen" "freopen" "tmpfile" "popen"))
+        (each (list (lit ptr) (lit char))
+          (list "strcpy" "strncpy" "strcat" "strncat" "strchr" "strrchr" "strstr"
+                "strpbrk" "strtok" "strdup" "strndup" "strerror" "getenv" "fgets"
+                "gets" "setlocale" "ctime" "asctime" "realpath" "basename"
+                "dirname" "stpcpy"))
+        (each (lit ulong)
+          (list "strlen" "strnlen" "strspn" "strcspn" "fread" "fwrite" "strtoul"
+                "strtoull" "strftime" "wcslen"))
+        (each (lit long)
+          (list "labs" "llabs" "atol" "atoll" "strtol" "strtoll" "ftell" "read"
+                "write" "pread" "pwrite" "lseek" "time" "clock" "getline"
+                "getdelim" "sysconf" "random"))
+        (each (lit void)
+          (list "free" "exit" "_exit" "abort" "qsort" "srand" "srandom" "perror"
+                "rewind" "setbuf" "clearerr"))))))
 
 (def library-c-type
   (fn (_ name)
@@ -98,27 +112,6 @@
         (list "iscntrl" (pair 0 31) (pair 127 127))
         (list "isgraph" (pair 33 126))))
 
-; the ranges of the classification NAME, or nil
-(def %cc-ctype-find
-  (fn (_ name)
-    (def go (fn (self es)
-              (match
-                ((null? es) ())
-                ((string=? (first (first es)) name) (rest (first es)))
-                (#t (self (rest es))))))
-    (go ctype-ranges)))
-
-; 1 when C lies in one of RANGES, else 0
-(def %cc-in-ranges
-  (fn (_ c ranges)
-    (def go
-      (fn (self rs)
-        (match
-          ((null? rs) 0)
-          ((if (>= c (first (first rs))) (<= c (rest (first rs))) #f) 1)
-          (#t (self (rest rs))))))
-    (go ranges)))
-
 ; is the string S one of the strings in L
 (def %cc-member-str?
   (fn (_ s l)
@@ -135,7 +128,7 @@
                 (if (string=? (first (first es)) name) (rest (first es)) (self (rest es))))))
     (def hit (go %cc-fun-ids))
     (if (not (null? hit)) hit
-      (if (if (null? (%cc-fun name)) (not (%cc-member-str? name %cc-builtins)) #f)
+      (if (if (null? (%cc-fun name)) (null? (%cc-libc-fn name)) #f)
         (%cc-oops (string-append "undefined: " name))
         (let ((id (+ %cc-fun-base (length %cc-fun-ids))))
           (set! %cc-fun-ids (pair (pair name id) %cc-fun-ids))
@@ -153,7 +146,7 @@
     (set! %cc-addr-taken ())
     (def named?
       (fn (_ n)
-        (if (null? (%cc-fun n)) (%cc-member-str? n %cc-builtins) #t)))
+        (if (null? (%cc-fun n)) (not (null? (%cc-libc-fn n))) #t)))
     (def walk
       (fn (self node)
         (if (not (pair? node)) ()
@@ -278,22 +271,24 @@
     (if (<= %cc-sp %cc-hp) (%cc-oops "stack overflow")
       (let ((clear (fn (self i)
                      (if (>= i size) ()
-                       (do (word-set! %cc-memp (+ %cc-sp i) 0)
+                       (do (word-set! %cc-memp (+ (- %cc-sp %cc-base) i) 0)
                            (self (+ i 8)))))))
         (do (clear 0) %cc-sp)))))
 
-; heap bytes, zero-filled like the stack's: the raw buffer behind the
-; memory is space-filled at birth (0x20 bytes), and a global array's
-; uninitialized tail read 0x2020202020202020 until this cleared it
+; bytes for a literal or a global, zero-filled like the stack's: the raw
+; buffer behind the memory is space-filled at birth (0x20 bytes), and a
+; global array's uninitialized tail read 0x2020202020202020 until this
+; cleared it
 (def %cc-heap
   (fn (_ n)
     (def size (round-up (if (< n 1) 1 n) 8))
     (def base %cc-hp)
     (set! %cc-hp (+ %cc-hp size))
-    (if (>= %cc-hp %cc-sp) (%cc-oops "heap exhausted")
+    (if (>= %cc-hp %cc-sp) (%cc-oops "program memory exhausted")
       (let ((clear (fn (self i)
                      (if (>= i size) ()
-                       (do (word-set! %cc-memp (+ base i) 0) (self (+ i 8)))))))
+                       (do (word-set! %cc-memp (+ (- base %cc-base) i) 0)
+                           (self (+ i 8)))))))
         (do (clear 0) base)))))
 
 ; a C string into memory, interned; answers its address
@@ -332,87 +327,6 @@
           (if (= b 0) (list->string (reverse acc))
             (self (+ a 1) (pair (integer->char b) acc))))))
     (go addr ())))
-
-; Standard input under run: the text a caller hands over, or else fd 0,
-; read four kilobytes at a time as the program asks for bytes.
-(def %cc-in "")         ; the bytes waiting, a string
-(def %cc-in-at 0)       ; where the next one is in it
-(def %cc-in-len 0)      ; how many it holds
-(def %cc-in-fd? #f)     ; whether a read from fd 0 refills it
-
-; standard input starts as INPUT, or as fd 0 when INPUT is nil
-(def %cc-in-start!
-  (fn (_ input)
-    (do (set! %cc-in (if (null? input) (mem-make 4096) input))
-        (set! %cc-in-at 0)
-        (set! %cc-in-len (if (null? input) 0 (byte-len input)))
-        (set! %cc-in-fd? (null? input)))))
-
-; whether a read from fd 0 brought more bytes, which replace the used ones
-(def %cc-in-fill!
-  (fn (_)
-    (if (not %cc-in-fd?) #f
-      (let ((n (file-read 0 %cc-in 4096)))
-        (do (set! %cc-in-at 0)
-            (set! %cc-in-len (if (> n 0) n 0))
-            (> n 0))))))
-
-; getchar under run: the next byte of standard input, or -1 at its end
-(def %cc-in-byte
-  (fn (self)
-    (if (< %cc-in-at %cc-in-len)
-      (let ((b (byte-at %cc-in %cc-in-at)))
-        (do (set! %cc-in-at (+ %cc-in-at 1)) (& b 255)))
-      (if (%cc-in-fill!) (self) -1))))
-
-; read(0, BUF, N) under run: the bytes waiting, N at most, into BUF, after
-; a refill when none are; 0 at the end
-(def %cc-in-read!
-  (fn (_ buf n)
-    (if (< %cc-in-at %cc-in-len) () (%cc-in-fill!))
-    (def k (let ((w (- %cc-in-len %cc-in-at))) (if (< n w) (if (< n 0) 0 n) w)))
-    (def go
-      (fn (self i)
-        (if (>= i k) ()
-          (do (%cc-raw-set! (+ buf i) (& (byte-at %cc-in (+ %cc-in-at i)) 255) 1)
-              (self (+ i 1))))))
-    (go 0)
-    (set! %cc-in-at (+ %cc-in-at k))
-    k))
-
-; write(FD, BUF, N) under run: N bytes from BUF to standard output or
-; standard error; -1 for any other fd
-(def %cc-write
-  (fn (_ fd buf n)
-    (def text (list->string (map integer->char (%cc-read-bytes buf n))))
-    (match
-      ((= fd 1) (do (display text) n))
-      ((= fd 2) (do (file-write 2 text) n))
-      (#t -1))))
-
-; N's digits in BASE, ten or sixteen, N read as unsigned: a number with
-; the top bit set is the one 2^64 above it.  Each turn's quotient is taken
-; with its top bit shifted out first, so it is never negative -- halved and
-; divided by five for ten, shifted four for sixteen.
-(def %cc-unsigned->str
-  (fn (_ n base)
-    (def go
-      (fn (self t acc)
-        (if (= t 0) acc
-          (let ((q (if (= base 16)
-                     (& (>> t 4) (- (<< 1 60) 1))
-                     (/ (& (>> t 1) (- (<< 1 63) 1)) 5))))
-            (def d (- t (* q base)))
-            (self q (pair (integer->char (if (< d 10) (+ 48 d) (+ 87 d))) acc))))))
-    (if (= n 0) "0" (list->string (go n ())))))
-
-; N's digits in decimal, with its sign; the most negative long's negation
-; is itself, which read as unsigned is the right number
-(def %cc-int->str
-  (fn (_ n)
-    (if (< n 0)
-      (string-append "-" (%cc-unsigned->str (- 0 n) 10))
-      (%cc-unsigned->str n 10))))
 
 ; division and remainder, with the evaluator's own report for a zero divisor
 (def %cc-div
@@ -490,7 +404,8 @@
             (first es)
             (self (rest es))))))
     (def l (go env))
-    (if (null? l) (go %cc-genv) l)))
+    (def g (if (null? l) (go %cc-genv) l))
+    (if (null? g) (%cc-libc-stream name) g)))
 
 (def %cc-fun
   (fn (_ name)
@@ -501,6 +416,134 @@
             (rest (first es))
             (self (rest es))))))
     (go %cc-funs)))
+
+; --- the C library -----------------------------------------------------------
+; A call to a function the program does not define goes to the C library,
+; opened once for the process and searched by name.  The arguments go as the
+; C calling convention passes long integers -- a pointer is a real address,
+; and an integer is already in its C type -- seven at most.  A variadic
+; function goes through its v- form, the arguments after its fixed ones laid
+; out as a va_list: on arm64 macOS that is a pointer to eight-byte slots, and
+; on x86-64 Linux a record whose offsets say the registers are used up, so
+; every argument is read from the slots.  The answer is converted to the C
+; type the function's header declares (library-c-type).
+
+(def %cc-ptr-call (prim-ref (lit ptr) (lit call)))
+(def %cc-libc ())       ; the library's handle
+(def %cc-libc-syms ())  ; ((name . function) ...), looked up once each
+
+; the C library's function or variable NAME, or nil
+(def %cc-libc-fn
+  (fn (_ name)
+    (if (null? %cc-libc) (set! %cc-libc ((prim-ref (lit ffi) (lit dlopen)) () 1)) ())
+    (def go
+      (fn (self es)
+        (match
+          ((null? es)
+            (let ((f ((prim-ref (lit ffi) (lit dlsym)) %cc-libc name)))
+              (do (set! %cc-libc-syms (pair (pair name f) %cc-libc-syms)) f)))
+          ((string=? (first (first es)) name) (rest (first es)))
+          (#t (self (rest es))))))
+    (go %cc-libc-syms)))
+
+; the variadic functions: (NAME V-NAME FIXED), FIXED the arguments before
+; the variable ones
+(def %cc-libc-variadic
+  (list (list "printf" "vprintf" 1) (list "fprintf" "vfprintf" 2)
+        (list "sprintf" "vsprintf" 2) (list "snprintf" "vsnprintf" 3)
+        (list "dprintf" "vdprintf" 2) (list "scanf" "vscanf" 1)
+        (list "fscanf" "vfscanf" 2) (list "sscanf" "vsscanf" 2)))
+
+; ARGS as a va_list on the stack; answers its address
+(def %cc-va-list
+  (fn (_ args)
+    (def slots (%cc-alloca (* 8 (length args))))
+    (def go
+      (fn (self as i)
+        (if (null? as) ()
+          (do (%cc-raw-set! (+ slots (* 8 i)) (first as) 8)
+              (self (rest as) (+ i 1))))))
+    (go args 0)
+    (if os-darwin? slots
+      (let ((v (%cc-alloca 24)))
+        (do (%cc-raw-set! v 48 4)
+            (%cc-raw-set! (+ v 4) 304 4)
+            (%cc-raw-set! (+ v 8) slots 8)
+            v)))))
+
+; the first N of a list, and what follows them
+(def %cc-take
+  (fn (self n xs) (if (<= n 0) () (pair (first xs) (self (- n 1) (rest xs))))))
+(def %cc-drop
+  (fn (self n xs) (if (<= n 0) xs (self (- n 1) (rest xs)))))
+
+; NAME called with ARGS in the C library
+(def %cc-libc-call
+  (fn (_ name args)
+    (def v
+      (let ((go (fn (self es)
+                  (match
+                    ((null? es) ())
+                    ((string=? (first (first es)) name) (rest (first es)))
+                    (#t (self (rest es)))))))
+        (go %cc-libc-variadic)))
+    (def saved %cc-sp)
+    (def all
+      (if (null? v) args
+        (let ((n (first (rest v))))
+          (if (< (length args) n)
+            (%cc-oops (string-append name " with too few arguments")))
+          (append (%cc-take n args) (list (%cc-va-list (%cc-drop n args)))))))
+    (def f (%cc-libc-fn (if (null? v) name (first v))))
+    (if (null? f)
+      (%cc-oops (string-append "a call to " name
+                  ", which neither the program nor the C library defines")))
+    (if (> (length all) 7)
+      (%cc-oops (string-append "a call to " name " with more than seven arguments")))
+    ; a function value is an id, which the library could not call
+    (def id?
+      (fn (_ x)
+        (def go (fn (self es) (if (null? es) #f (if (= (rest (first es)) x) #t (self (rest es))))))
+        (go %cc-fun-ids)))
+    (def any-id?
+      (fn (self as) (if (null? as) #f (if (id? (first as)) #t (self (rest as))))))
+    (if (any-id? args)
+      (%cc-oops (string-append "a pointer to a function, handed to " name)))
+    (def a (fn (_ k) (%cc-drop k all)))
+    (def r
+      (match
+        ((= (length all) 0) (%cc-ptr-call f))
+        ((= (length all) 1) (%cc-ptr-call f (first all)))
+        ((= (length all) 2) (%cc-ptr-call f (first all) (first (a 1))))
+        ((= (length all) 3) (%cc-ptr-call f (first all) (first (a 1)) (first (a 2))))
+        ((= (length all) 4)
+          (%cc-ptr-call f (first all) (first (a 1)) (first (a 2)) (first (a 3))))
+        ((= (length all) 5)
+          (%cc-ptr-call f (first all) (first (a 1)) (first (a 2)) (first (a 3))
+            (first (a 4))))
+        ((= (length all) 6)
+          (%cc-ptr-call f (first all) (first (a 1)) (first (a 2)) (first (a 3))
+            (first (a 4)) (first (a 5))))
+        (#t
+          (%cc-ptr-call f (first all) (first (a 1)) (first (a 2)) (first (a 3))
+            (first (a 4)) (first (a 5)) (first (a 6))))))
+    (set! %cc-sp saved)
+    (%cc-convert r (library-c-type name))))
+
+; the C library writes out what its streams hold, so what the program
+; printed comes before anything x prints after it
+(def %cc-libc-flush!
+  (fn (_) (%cc-ptr-call (%cc-libc-fn "fflush") 0)))
+
+; stdin, stdout and stderr: the C library's own variables, each holding its
+; FILE pointer -- __stdinp and the like on macOS
+(def %cc-libc-stream
+  (fn (_ name)
+    (if (if (string=? name "stdin") #t (if (string=? name "stdout") #t (string=? name "stderr")))
+      (let ((f (%cc-libc-fn
+                 (if os-darwin? (string-append "__" (string-append name "p")) name))))
+        (if (null? f) () (pair name (pair (ptr-int f) (list (lit ptr) (lit void))))))
+      ())))
 
 ; --- expressions -------------------------------------------------------------
 
@@ -743,110 +786,6 @@
                 (do (%cc-raw-set! (+ dst i) (%cc-raw-ref (+ src i) 1) 1)
                     (self (+ i 1))))))
     (go 0)))
-
-; N bytes at ADDR, each B
-(def %cc-fill-bytes!
-  (fn (_ addr b n)
-    (def go (fn (self i)
-              (if (>= i n) ()
-                (do (%cc-raw-set! (+ addr i) b 1) (self (+ i 1))))))
-    (go 0)))
-
-; the bytes before the NUL at ADDR
-(def %cc-strlen
-  (fn (_ addr)
-    (def go (fn (self i) (if (= (%cc-raw-ref (+ addr i) 1) 0) i (self (+ i 1)))))
-    (go 0)))
-
-; the first difference between the bytes at A and B, each read as an
-; unsigned char, over at most N of them (all, when N is nil), stopping at
-; a NUL when NUL? says; 0 when there is none -- strcmp, strncmp and memcmp
-(def %cc-bytes-compare
-  (fn (_ a b n nul?)
-    (def go
-      (fn (self i)
-        (if (if (null? n) #f (>= i n)) 0
-          (let ((x (%cc-raw-ref (+ a i) 1)) (y (%cc-raw-ref (+ b i) 1)))
-            (match
-              ((not (= x y)) (- x y))
-              ((if nul? (= x 0) #f) 0)
-              (#t (self (+ i 1))))))))
-    (go 0)))
-
-; N bytes to DST: the string at SRC, then NULs to the end of the N; answers
-; DST
-(def %cc-strncpy!
-  (fn (_ dst src n)
-    (def len (%cc-strlen src))
-    (def go (fn (self i)
-              (if (>= i n) ()
-                (do (%cc-raw-set! (+ dst i) (if (< i len) (%cc-raw-ref (+ src i) 1) 0) 1)
-                    (self (+ i 1))))))
-    (do (go 0) dst)))
-
-; the address of the first C, read as an unsigned char, in the string at S
-; -- its NUL included -- or 0
-(def %cc-strchr
-  (fn (_ s c)
-    (def ch (& c 255))
-    (def go (fn (self i)
-              (let ((b (%cc-raw-ref (+ s i) 1)))
-                (match ((= b ch) (+ s i)) ((= b 0) 0) (#t (self (+ i 1)))))))
-    (go 0)))
-
-; the address of the last C, read as an unsigned char, in the string at S
-; -- its NUL included -- or 0
-(def %cc-strrchr
-  (fn (_ s c)
-    (def ch (& c 255))
-    (def go (fn (self i last)
-              (let ((b (%cc-raw-ref (+ s i) 1)))
-                (def at (if (= b ch) (+ s i) last))
-                (if (= b 0) at (self (+ i 1) at)))))
-    (go 0 0)))
-
-; the address of the first place the string at N starts in the one at H,
-; or 0; an empty N starts at H
-(def %cc-strstr
-  (fn (_ h n)
-    (def at? (fn (self p i)
-               (let ((b (%cc-raw-ref (+ n i) 1)))
-                 (match
-                   ((= b 0) #t)
-                   ((= (%cc-raw-ref (+ p i) 1) b) (self p (+ i 1)))
-                   (#t #f)))))
-    (def go (fn (self p)
-              (match
-                ((at? p 0) p)
-                ((= (%cc-raw-ref p 1) 0) 0)
-                (#t (self (+ p 1))))))
-    (go h)))
-
-; N bytes from SRC to DST, as memmove moves them: from the end back when
-; DST is past SRC, so an overlap copies what was there
-(def %cc-move-bytes!
-  (fn (_ dst src n)
-    (if (<= dst src) (%cc-copy-bytes! dst src n)
-      (let ((go (fn (self i)
-                  (if (< i 0) ()
-                    (do (%cc-raw-set! (+ dst i) (%cc-raw-ref (+ src i) 1) 1)
-                        (self (- i 1)))))))
-        (go (- n 1))))))
-
-; the int the digits at S spell, after spaces and a sign
-(def %cc-atoi
-  (fn (_ s)
-    (def space? (fn (_ b) (if (= b 32) #t (if (>= b 9) (<= b 13) #f))))
-    (def skip (fn (self i) (if (space? (%cc-raw-ref (+ s i) 1)) (self (+ i 1)) i)))
-    (def at (skip 0))
-    (def c (%cc-raw-ref (+ s at) 1))
-    (def minus? (= c 45))
-    (def digits
-      (fn (self i acc)
-        (let ((b (%cc-raw-ref (+ s i) 1)))
-          (if (if (>= b 48) (<= b 57) #f) (self (+ i 1) (+ (* acc 10) (- b 48))) acc))))
-    (def v (digits (if (if minus? #t (= c 43)) (+ at 1) at) 0))
-    (if minus? (- 0 v) v)))
 
 ; bytes out as a list, and back in: a returned struct is read before its
 ; frame pops -- the caller's fresh slot can be the very bytes the callee's
@@ -1106,46 +1045,6 @@
       (zero? (string-append sign (printf-pad #t pad) body))
       (#t (string-append (printf-pad #f pad) sign body)))))
 
-; The text printf writes for the format at FMT-AT and ARGS: %d %i %u %x
-; %c %s and %%, and %ld %li %lu %lx, each with the flags - and 0, a field
-; width and a precision; an int's conversion reads the argument's low 32
-; bits, as the compiled one does.  A refusal names NAME, the function
-; whose format it is.
-(def %cc-format
-  (fn (_ name fmt-at args)
-    (def fmt (%cc-cstr fmt-at))
-    (def end (byte-len fmt))
-    (def low32 (fn (_ v) (& v 4294967295)))
-    ; one conversion's text: its letter C, after an l when L?, of V
-    (def convert-one
-      (fn (_ c l? v)
-        (match
-          ((if (= c 100) #t (= c 105))                    ; d i
-            (%cc-int->str (if l? v (%cc-sext (low32 v) 4))))
-          ((= c 117) (%cc-unsigned->str (if l? v (low32 v)) 10))       ; u
-          ((= c 120) (%cc-unsigned->str (if l? v (low32 v)) 16))       ; x
-          ((if l? #f (= c 99)) (list->string (list (integer->char (& v 255)))))  ; c
-          ((if l? #f (= c 115)) (%cc-cstr v))            ; s
-          (#t (%cc-oops (string-append name ": only %d %i %u %x %c %s %% and %ld %li %lu %lx"))))))
-    (def go
-      (fn (self i as acc)
-        (match
-          ((>= i end) (string-concat (reverse acc)))
-          ((not (= (byte-at fmt i) 37)) (self (+ i 1) as (pair (substring fmt i (+ i 1)) acc)))
-          ((>= (+ i 1) end) (%cc-oops (string-append name "'s % at the end of its format")))
-          ((= (byte-at fmt (+ i 1)) 37) (self (+ i 2) as (pair "%" acc)))
-          (#t
-            (let ((spec (printf-conversion fmt i)))
-              (if (null? spec) (%cc-oops (string-append name "'s % at the end of its format")))
-              (if (null? as)
-                (%cc-oops (string-append name " with fewer arguments than conversions")))
-              (def c (first (rest spec)))
-              (self (first spec) (rest as)
-                (pair (printf-fit c (convert-one c (first (rest (rest spec))) (first as))
-                        (rest (rest (rest spec))))
-                  acc)))))))
-    (go 0 args ())))
-
 (def %cc-call-interp
   (fn (_ name args)
     (def f (%cc-fun name))
@@ -1182,80 +1081,13 @@
             (let ((tmp (%cc-alloca (kind-size ret))))
               (do (%cc-write-bytes! tmp vals) tmp)))
           (do (set! %cc-sp saved-sp) v)))
-      (match
-        ((string=? name "putchar")
-          (do (display (list->string (list (integer->char (first args)))))
-              (first args)))
-        ((string=? name "puts")
-          (do (display (string-append (%cc-cstr (first args)) "\n")) 0))
-        ((string=? name "printf")
-          (let ((s (%cc-format name (first args) (rest args))))
-            (do (display s) (byte-len s))))
-        ; sprintf and snprintf answer the count printf would write, and
-        ; snprintf keeps to its size, a NUL included
-        ((string=? name "sprintf")
-          (let ((s (%cc-format name (first (rest args)) (rest (rest args)))))
-            (do (%cc-put-text! (first args) s (byte-len s)) (byte-len s))))
-        ((string=? name "snprintf")
-          (let ((s (%cc-format name (first (rest (rest args))) (rest (rest (rest args)))))
-                (size (first (rest args))))
-            (do (if (> size 0)
-                  (%cc-put-text! (first args) s
-                    (if (< (byte-len s) size) (byte-len s) (- size 1)))
-                  ())
-                (byte-len s))))
-        ((string=? name "malloc") (%cc-heap (first args)))
-        ; the heap is zeros where nothing has been, and nothing is given back
-        ((string=? name "calloc") (%cc-heap (* (first args) (first (rest args)))))
-        ((string=? name "free") 0)
-        ((string=? name "getchar") (%cc-in-byte))
-        ((string=? name "read")
-          (if (= (first args) 0)
-            (%cc-in-read! (first (rest args)) (first (rest (rest args))))
-            -1))
-        ((string=? name "write")
-          (%cc-write (first args) (first (rest args)) (first (rest (rest args)))))
-        ((string=? name "strlen") (%cc-strlen (first args)))
-        ((string=? name "strcmp") (%cc-bytes-compare (first args) (first (rest args)) () #t))
-        ((string=? name "strncmp")
-          (%cc-bytes-compare (first args) (first (rest args)) (first (rest (rest args))) #t))
-        ((string=? name "memcmp")
-          (%cc-bytes-compare (first args) (first (rest args)) (first (rest (rest args))) #f))
-        ((string=? name "strcat")
-          (do (%cc-copy-bytes! (+ (first args) (%cc-strlen (first args))) (first (rest args))
-                (+ (%cc-strlen (first (rest args))) 1))
-              (first args)))
-        ((string=? name "strncpy")
-          (%cc-strncpy! (first args) (first (rest args)) (first (rest (rest args)))))
-        ((string=? name "strchr") (%cc-strchr (first args) (first (rest args))))
-        ((string=? name "strrchr") (%cc-strrchr (first args) (first (rest args))))
-        ((string=? name "strstr") (%cc-strstr (first args) (first (rest args))))
-        ((string=? name "atoi") (%cc-atoi (first args)))
-        ((string=? name "memmove")
-          (do (%cc-move-bytes! (first args) (first (rest args)) (first (rest (rest args))))
-              (first args)))
-        ((string=? name "strcpy")
-          (do (%cc-copy-bytes! (first args) (first (rest args))
-                (+ (%cc-strlen (first (rest args))) 1))
-              (first args)))
-        ((string=? name "memcpy")
-          (do (%cc-copy-bytes! (first args) (first (rest args)) (first (rest (rest args))))
-              (first args)))
-        ((string=? name "memset")
-          (do (%cc-fill-bytes! (first args) (& (first (rest args)) 255) (first (rest (rest args))))
-              (first args)))
-        ((not (null? (%cc-ctype-find name))) (%cc-in-ranges (first args) (%cc-ctype-find name)))
-        ((string=? name "toupper")
-          (let ((c (first args))) (if (if (>= c 97) (<= c 122) #f) (- c 32) c)))
-        ((string=? name "tolower")
-          (let ((c (first args))) (if (if (>= c 65) (<= c 90) #f) (+ c 32) c)))
-        ((string=? name "abs") (let ((v (first args))) (if (< v 0) (- 0 v) v)))
-        ((string=? name "labs") (let ((v (first args))) (if (< v 0) (- 0 v) v)))
-        ((string=? name "exit")
-          (do (set! %cc-exit-code (first args))
-              (Err raise (lit cc-exit) "exit" ())))
-        (#t (%cc-oops
-              (string-append "no such function: " name)))))))
+      ; exit leaves through the interpreter, once the C library has written
+      ; what it holds; everything else is the C library's
+      (if (string=? name "exit")
+        (do (%cc-libc-flush!)
+            (set! %cc-exit-code (first args))
+            (Err raise (lit cc-exit) "exit" ()))
+        (%cc-libc-call name args)))))
 
 (set! %cc-call %cc-call-interp)
 
@@ -1490,12 +1322,13 @@
       (do (set! %cc-mem (mem-make %cc-memsize))
           (set! %cc-memp (mem-ptr %cc-mem))
           (%cc-mem-clear 0 %cc-memsize))
-      (do (%cc-mem-clear 0 (round-up %cc-hp 8))
-          (%cc-mem-clear %cc-sp-min %cc-memsize)))
+      (do (%cc-mem-clear 0 (round-up (- %cc-hp %cc-base) 8))
+          (%cc-mem-clear (- %cc-sp-min %cc-base) %cc-memsize)))
     (set! %cc-memp (mem-ptr %cc-mem))
-    (set! %cc-sp-min %cc-memsize)
-    (set! %cc-sp %cc-memsize)
-    (set! %cc-hp 16)
+    (set! %cc-base (ptr-int %cc-memp))
+    (set! %cc-sp-min (+ %cc-base %cc-memsize))
+    (set! %cc-sp (+ %cc-base %cc-memsize))
+    (set! %cc-hp (+ %cc-base 16))
     (set! %cc-genv ())
     (set! %cc-funs ())
     (set! %cc-strtab ())
@@ -1522,16 +1355,61 @@
                 (self (rest items)))))))
     (load! prog)
     (%cc-scan-program! prog)
-    (%cc-in-start! input)
-    (guard (e
-             (if (null? %cc-exit-code)
-               ; a genuine failure: say it and answer 1, the loud way
-               (do (display "cc: run failed: ")
-                   (x-write e)
-                   (newline)
-                   1)
-               (& %cc-exit-code 255)))
-      (& (%cc-call "main" (%cc-main-args argv)) 255))))
+    (def saved (if (null? input) () (%cc-stdin-from! input)))
+    (def status
+      (guard (e
+               (if (null? %cc-exit-code)
+                 ; a genuine failure: say it, after what the program
+                 ; printed, and answer 1, the loud way
+                 (do (%cc-libc-flush!)
+                     (display "cc: run failed: ")
+                     (x-write e)
+                     (newline)
+                     1)
+                 (& %cc-exit-code 255)))
+        (& (%cc-call "main" (%cc-main-args argv)) 255)))
+    (%cc-libc-flush!)
+    (if (null? saved) () (%cc-stdin-back! saved))
+    status))
+
+; The C library's own call, for run's plumbing rather than the program's
+(def %cc-libc-do
+  (fn (_ name . args)
+    (def f (%cc-libc-fn name))
+    (match
+      ((null? args) (%cc-ptr-call f))
+      ((null? (rest args)) (%cc-ptr-call f (first args)))
+      ((null? (rest (rest args))) (%cc-ptr-call f (first args) (first (rest args))))
+      (#t (%cc-ptr-call f (first args) (first (rest args)) (first (rest (rest args))))))))
+
+; the C library's standard input, cleared of what it held and of its end:
+; fpurge on macOS, __fpurge on glibc
+(def %cc-stdin-reset!
+  (fn (_)
+    (def stdin (%cc-raw-ref (first (rest (%cc-libc-stream "stdin"))) 8))
+    (%cc-libc-do "clearerr" stdin)
+    (%cc-libc (if os-darwin? "fpurge" "__fpurge") stdin)))
+
+; TEXT as fd 0 for the program's run, from a temporary file the library
+; makes; answers the fd 0 it replaced, kept on another descriptor
+(def %cc-stdin-from!
+  (fn (_ text)
+    (def f (%cc-libc-do "tmpfile"))
+    (def fd (%cc-libc-do "fileno" f))
+    (%cc-libc-do "write" fd text (byte-len text))
+    (%cc-libc-do "lseek" fd 0 0)
+    (def saved (%cc-libc-do "dup" 0))
+    (%cc-libc-do "dup2" fd 0)
+    (%cc-libc-do "fclose" f)
+    (%cc-stdin-reset!)
+    saved))
+
+; fd 0 back from SAVED, as it was before the run
+(def %cc-stdin-back!
+  (fn (_ saved)
+    (%cc-libc-do "dup2" saved 0)
+    (%cc-libc-do "close" saved)
+    (%cc-stdin-reset!)))
 
 ; main's arguments: none when it takes none, else argc and argv, each of
 ; ARGV laid into memory as a C string and the pointers to them after, the
