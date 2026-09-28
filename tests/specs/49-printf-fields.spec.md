@@ -72,16 +72,16 @@ statuses; every expectation is what the same source prints through
 (68 68)
 ```
 
-### the 0 flag on a string and a character, and - over 0
+### - over 0, and - on a character
 
 ```cc
-(def src "#include <stdio.h>\nint main(void) { printf(\"[%05s] [%03c] [%-05d]\\n\", \"ab\", 'x', 3); return 0; }\n")
+(def src "#include <stdio.h>\nint main(void) { printf(\"[%-05d] [%-03x] [%-4c]\\n\", 3, 10, 'z'); return 0; }\n")
 (display (list (cc-run src) (cc-exe-run src)))
 ```
 ---
 ```output
-[000ab] [00x] [3    ]
-[000ab] [00x] [3    ]
+[3    ] [a  ] [z   ]
+[3    ] [a  ] [z   ]
 (0 0)
 ```
 
