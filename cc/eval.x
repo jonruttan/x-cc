@@ -16,8 +16,8 @@
 ; eight-aligned.
 (module cc/eval)
 
-(import cc/prims append byte-at byte-len integer->char length list->string
-  map mem-make mem-ptr mem-ref-at mem-set-at! reverse string-append
+(import cc/prims append byte-at byte-len file-read file-write integer->char length
+  list->string map mem-make mem-ptr mem-ref-at mem-set-at! reverse string-append
   string-concat string=? substring word-set! x-write)
 (import cc/lex cc-lex)
 (import cc/parse cc-parse kind-size round-up struct-entry struct-table)
@@ -48,7 +48,7 @@
                     "memcmp" "strncpy" "strchr" "atoi" "strrchr" "strstr" "memmove"
                     "calloc" "isdigit" "isalpha" "isalnum" "isspace" "isupper"
                     "islower" "isxdigit" "ispunct" "isprint" "iscntrl" "isgraph"
-                    "toupper" "tolower" "abs" "labs"))
+                    "toupper" "tolower" "abs" "labs" "getchar" "read" "write"))
 
 ; The C type each of the library's functions answers, as its header
 ; declares it, for those that do not answer an int: (NAME . C-TYPE).  run
@@ -67,6 +67,8 @@
         (pair "memset" (list (lit ptr) (lit void)))
         (pair "calloc" (list (lit ptr) (lit void)))
         (pair "labs" (lit long))
+        (pair "read" (lit long))
+        (pair "write" (lit long))
         (pair "free" (lit void))
         (pair "exit" (lit void))))
 
@@ -306,14 +308,19 @@
     (if (not (null? hit)) hit
       (let ((n (byte-len text)))
         (def base (%cc-heap (+ n 1)))
-        (def fill
-          (fn (self i)
-            (if (>= i n) (%cc-raw-set! (+ base i) 0 1)
-              (do (%cc-raw-set! (+ base i) (+ 0 (byte-at text i)) 1)
-                  (self (+ i 1))))))
-        (fill 0)
+        (%cc-put-text! base text n)
         (set! %cc-strtab (pair (pair text base) %cc-strtab))
         base))))
+
+; the first N bytes of TEXT at ADDR, and a NUL after them
+(def %cc-put-text!
+  (fn (_ addr text n)
+    (def go
+      (fn (self i)
+        (if (>= i n) (%cc-raw-set! (+ addr i) 0 1)
+          (do (%cc-raw-set! (+ addr i) (+ 0 (byte-at text i)) 1)
+              (self (+ i 1))))))
+    (go 0)))
 
 ; a C string out of memory (bytes to the NUL)
 (def %cc-cstr
@@ -324,6 +331,63 @@
           (if (= b 0) (list->string (reverse acc))
             (self (+ a 1) (pair (integer->char b) acc))))))
     (go addr ())))
+
+; Standard input under run: the text a caller hands over, or else fd 0,
+; read four kilobytes at a time as the program asks for bytes.
+(def %cc-in "")         ; the bytes waiting, a string
+(def %cc-in-at 0)       ; where the next one is in it
+(def %cc-in-len 0)      ; how many it holds
+(def %cc-in-fd? #f)     ; whether a read from fd 0 refills it
+
+; standard input starts as INPUT, or as fd 0 when INPUT is nil
+(def %cc-in-start!
+  (fn (_ input)
+    (do (set! %cc-in (if (null? input) (mem-make 4096) input))
+        (set! %cc-in-at 0)
+        (set! %cc-in-len (if (null? input) 0 (byte-len input)))
+        (set! %cc-in-fd? (null? input)))))
+
+; whether a read from fd 0 brought more bytes, which replace the used ones
+(def %cc-in-fill!
+  (fn (_)
+    (if (not %cc-in-fd?) #f
+      (let ((n (file-read 0 %cc-in 4096)))
+        (do (set! %cc-in-at 0)
+            (set! %cc-in-len (if (> n 0) n 0))
+            (> n 0))))))
+
+; getchar under run: the next byte of standard input, or -1 at its end
+(def %cc-in-byte
+  (fn (self)
+    (if (< %cc-in-at %cc-in-len)
+      (let ((b (byte-at %cc-in %cc-in-at)))
+        (do (set! %cc-in-at (+ %cc-in-at 1)) (& b 255)))
+      (if (%cc-in-fill!) (self) -1))))
+
+; read(0, BUF, N) under run: the bytes waiting, N at most, into BUF, after
+; a refill when none are; 0 at the end
+(def %cc-in-read!
+  (fn (_ buf n)
+    (if (< %cc-in-at %cc-in-len) () (%cc-in-fill!))
+    (def k (let ((w (- %cc-in-len %cc-in-at))) (if (< n w) (if (< n 0) 0 n) w)))
+    (def go
+      (fn (self i)
+        (if (>= i k) ()
+          (do (%cc-raw-set! (+ buf i) (& (byte-at %cc-in (+ %cc-in-at i)) 255) 1)
+              (self (+ i 1))))))
+    (go 0)
+    (set! %cc-in-at (+ %cc-in-at k))
+    k))
+
+; write(FD, BUF, N) under run: N bytes from BUF to standard output or
+; standard error; -1 for any other fd
+(def %cc-write
+  (fn (_ fd buf n)
+    (def text (list->string (map integer->char (%cc-read-bytes buf n))))
+    (match
+      ((= fd 1) (do (display text) n))
+      ((= fd 2) (do (file-write 2 text) n))
+      (#t -1))))
 
 ; N's digits in BASE, ten or sixteen, N read as unsigned: a number with
 ; the top bit set is the one 2^64 above it.  Each turn's quotient is taken
@@ -1128,6 +1192,13 @@
         ; the heap is zeros where nothing has been, and nothing is given back
         ((string=? name "calloc") (%cc-heap (* (first args) (first (rest args)))))
         ((string=? name "free") 0)
+        ((string=? name "getchar") (%cc-in-byte))
+        ((string=? name "read")
+          (if (= (first args) 0)
+            (%cc-in-read! (first (rest args)) (first (rest (rest args))))
+            -1))
+        ((string=? name "write")
+          (%cc-write (first args) (first (rest args)) (first (rest (rest args)))))
         ((string=? name "strlen") (%cc-strlen (first args)))
         ((string=? name "strcmp") (%cc-bytes-compare (first args) (first (rest args)) () #t))
         ((string=? name "strncmp")
@@ -1395,7 +1466,7 @@
           (self (+ i 8) end)))))
 
 (def %cc-run-core
-  (fn (_ src)
+  (fn (_ src input argv)
     ; one vector for the process, and only the dirty ranges cleared per
     ; run (a full clear of the buffer out-allocated the buffer itself; the
     ; replaced; the dirty ranges are hundreds of bytes)
@@ -1435,6 +1506,7 @@
                 (self (rest items)))))))
     (load! prog)
     (%cc-scan-program! prog)
+    (%cc-in-start! input)
     (guard (e
              (if (null? %cc-exit-code)
                ; a genuine failure: say it and answer 1, the loud way
@@ -1443,9 +1515,33 @@
                    (newline)
                    1)
                (& %cc-exit-code 255)))
-      (& (%cc-call "main" ()) 255))))
+      (& (%cc-call "main" (%cc-main-args argv)) 255))))
 
-(def cc-run (fn (_ src) (%cc-run-core src)))
+; main's arguments: none when it takes none, else argc and argv, each of
+; ARGV laid into memory as a C string and the pointers to them after, the
+; last one null
+(def %cc-main-args
+  (fn (_ argv)
+    (def f (%cc-fun "main"))
+    (if (if (null? f) #t (null? (first f))) ()
+      (let ((ptrs (map (fn (_ s)
+                         (let ((a (%cc-heap (+ (byte-len s) 1))))
+                           (do (%cc-put-text! a s (byte-len s)) a)))
+                    argv)))
+        (def table (%cc-heap (* 8 (+ (length argv) 1))))
+        (def go
+          (fn (self ps i)
+            (if (null? ps) (%cc-raw-set! (+ table (* 8 i)) 0 8)
+              (do (%cc-raw-set! (+ table (* 8 i)) (first ps) 8)
+                  (self (rest ps) (+ i 1))))))
+        (go ptrs 0)
+        (list (length argv) table)))))
 
-(provide cc/eval cc-run common-c-type ctype-ranges kind-elem library-c-type printf-conversion
-  printf-fit printf-pad promoted-c-type signed? unsigned-divide)
+; SRC's program with INPUT as its standard input and ARGV its arguments,
+; the program's name first; with INPUT nil, standard input is fd 0
+(def cc-run-with (fn (_ src input argv) (%cc-run-core src input argv)))
+
+(def cc-run (fn (_ src) (%cc-run-core src () (list "a.out"))))
+
+(provide cc/eval cc-run cc-run-with common-c-type ctype-ranges kind-elem library-c-type
+  printf-conversion printf-fit printf-pad promoted-c-type signed? unsigned-divide)

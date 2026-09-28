@@ -32,8 +32,9 @@
 ; format with %d %i %u %x %ld %li %lu %lx %c %s and %%, `exit`, `malloc`,
 ; `free`, `strlen`, `strcmp`, `strncmp`, `strcpy`, `strncpy`, `strcat`,
 ; `strchr`, `memcpy`, `memset`, `memcmp`, `atoi`, `isdigit`, `isalpha`,
-; `isalnum`, `isspace`, `isupper`, `islower`, `toupper`, `tolower` and
-; `abs`, unless the program defines its own; structs are
+; `isalnum`, `isspace`, `isupper`, `islower`, `toupper`, `tolower`,
+; `abs`, `getchar`, `read` and `write`, unless the program defines its own;
+; main with argc and argv; structs are
 ; passed and returned by value.  Everything else refuses by name: floating point,
 ; function pointers, and the rest of the runtime.
 ;
@@ -100,14 +101,20 @@
     (| 0x10000000
       (| (<< (& imm 3) 29) (| (<< (& (>> imm 2) 0x7FFFF) 5) rd)))))
 
-; The entry, and the one piece of runtime compiled code calls: a write.
-; Neither the system call nor a program-counter-relative address has a
-; portable mnemonic, so both are written out per target.  The entry puts the
-; helper's address in x21, where nothing the generator emits touches it, and
-; compiled code reaches the helper through it: fd in x0, the bytes in x1,
+; The entry, and the two pieces of runtime compiled code calls: a write and
+; a read.  Neither the system call nor a program-counter-relative address has
+; a portable mnemonic, so both are written out per target.  The entry puts
+; the write helper's address in x21, where nothing the generator emits
+; touches it, and compiled code reaches the helpers through it, the read
+; helper a fixed distance after the write one: fd in x0, the bytes in x1,
 ; how many in x2.  Those are already arm64's system-call registers, and
 ; x86-64's indirect call marshals x0 and x2 into the two its own convention
 ; wants, with x1 already in place.
+;
+; main is handed argc in x0 and argv in x1, as any call's first two
+; arguments: dyld calls a Mach-O's entry as it would main, with the two
+; already there, and the ELF's entry loads them from the stack the kernel
+; starts it on, argc on top and the pointers after it.
 ;
 ; x22 gets the address of the data, which the container puts on the page
 ; after the code.  DATAAT is how far that is from the entry's first byte,
@@ -117,40 +124,54 @@
   (fn (_ target dataat)
     (def exit-nr (syscall-id (lit exit)))
     (def write-nr (syscall-id (lit write)))
+    (def read-nr (syscall-id (lit read)))
     (if (eq? target (lit macho-arm64))
-      ; ten words: adr x21, write3; adr x22, the data; mov x20, sp;
-      ; sub sp, #4M; bl main (six words on); movz x16, #exit; svc #0x80;
-      ; then write3: movz x16, #write; svc #0x80; ret
+      ; thirteen words: adr x21, write3; adr x22, the data; mov x20, sp;
+      ; sub sp, #4M; bl main (nine words on); movz x16, #exit; svc #0x80;
+      ; then write3: movz x16, #write; svc #0x80; ret; and read3:
+      ; movz x16, #read; svc #0x80; ret
       (%cc-gen-cat
         (list (%cc-gen-le32 (%cc-gen-adr 21 28))
               (%cc-gen-le32 (%cc-gen-adr 22 (- dataat 4)))
               (%cc-gen-le32 0x910003F4)
               (%cc-gen-le32 (| 0xD14003FF (<< (/ %cc-gen-region 4096) 10)))
-              (%cc-gen-le32 0x94000006)
+              (%cc-gen-le32 0x94000009)
               (%cc-gen-le32 (| 0xD2800010 (<< exit-nr 5)))
               (%cc-gen-le32 0xD4001001)
               (%cc-gen-le32 (| 0xD2800010 (<< write-nr 5)))
               (%cc-gen-le32 0xD4001001)
+              (%cc-gen-le32 0xD65F03C0)
+              (%cc-gen-le32 (| 0xD2800010 (<< read-nr 5)))
+              (%cc-gen-le32 0xD4001001)
               (%cc-gen-le32 0xD65F03C0)))
-      ; forty-seven bytes: lea r13, [rip+32] (write3); lea r14, [rip+...]
-      ; (the data); mov r12, rsp; sub rsp, 4M; call main (eighteen bytes
-      ; on); mov rdi, rax; mov eax, exit; syscall; then write3:
-      ; mov eax, write; syscall; ret
+      ; sixty-four bytes: mov rax, [rsp] (argc); lea rsi, [rsp+8] (argv);
+      ; lea r13, [rip+32] (write3); lea r14, [rip+...] (the data);
+      ; mov r12, rsp; sub rsp, 4M; call main (twenty-six bytes on);
+      ; mov rdi, rax; mov eax, exit; syscall; then write3: mov eax, write;
+      ; syscall; ret; and read3: mov eax, read; syscall; ret
       (%cc-gen-cat
-        (list (list 0x4C 0x8D 0x2D) (%cc-gen-le32 32)
-              (list 0x4C 0x8D 0x35) (%cc-gen-le32 (- dataat 14))
+        (list (list 0x48 0x8B 0x04 0x24)
+              (list 0x48 0x8D 0x74 0x24 0x08)
+              (list 0x4C 0x8D 0x2D) (%cc-gen-le32 32)
+              (list 0x4C 0x8D 0x35) (%cc-gen-le32 (- dataat 23))
               (list 0x49 0x89 0xE4)
               (list 0x48 0x81 0xEC) (%cc-gen-le32 %cc-gen-region)
-              (list 0xE8) (%cc-gen-le32 18)
+              (list 0xE8) (%cc-gen-le32 26)
               (list 0x48 0x89 0xC7)
               (list 0xB8) (%cc-gen-le32 exit-nr)
               (list 0x0F 0x05)
               (list 0xB8) (%cc-gen-le32 write-nr)
+              (list 0x0F 0x05 0xC3)
+              (list 0xB8) (%cc-gen-le32 read-nr)
               (list 0x0F 0x05 0xC3))))))
 
 ; how long the entry is; the container lays the code out from here
 (def %cc-gen-entry-len
-  (fn (_ target) (if (eq? target (lit macho-arm64)) 40 47)))
+  (fn (_ target) (if (eq? target (lit macho-arm64)) 52 64)))
+
+; how far after the write helper the read helper starts
+(def %cc-gen-read-after
+  (fn (_ target) (if (eq? target (lit macho-arm64)) 12 8)))
 
 ; how far before the write helper the entry's exit starts: the instructions
 ; after the call to main, which exit with the status in x0.  exit() branches
@@ -552,6 +573,13 @@
     (let ((off (round-up %cc-gen-databytes align)))
       (do (set! %cc-gen-data (pair (pair off bytes) %cc-gen-data))
           (set! %cc-gen-databytes (+ off (length bytes)))
+          off))))
+
+; room for N bytes in the data, zeros, at a multiple of ALIGN; answers where
+(def %cc-gen-data-room!
+  (fn (_ n align)
+    (let ((off (round-up %cc-gen-databytes align)))
+      (do (set! %cc-gen-databytes (+ off n))
           off))))
 
 (def %cc-gen-string!
@@ -990,6 +1018,7 @@
 (def %cc-gen-callop ())
 
 (def %cc-gen-exit-at 0)     ; the entry's exit, this far before x21's helper
+(def %cc-gen-read-at 0)     ; the entry's read helper, this far after x21's
 
 (def %cc-gen-heap-bytes 0)  ; the heap the executable maps past the data
 (def %cc-gen-heap-size 67108864)   ; sixty-four megabytes of address space
@@ -1530,7 +1559,11 @@
     (if (not (= (length (first (rest (rest node)))) n))
       (%cc-gen-no
         (string-append name " with other than "
-          (match ((= n 1) "one argument") ((= n 2) "two arguments") (#t "three arguments")))))
+          (match
+            ((= n 0) "no arguments")
+            ((= n 1) "one argument")
+            ((= n 2) "two arguments")
+            (#t "three arguments")))))
     (if (null? (%cc-gen-fun-find name))
       (let ((l (%cc-gen-label)))
         (do (set! %cc-gen-funs (pair (pair name l) %cc-gen-funs))
@@ -2013,6 +2046,62 @@
     (asm-label! %cc-gen-asm done)
     (%cc-gen! (lit ret))))
 
+; read and write: a call to the helper the entry wrote for the system call,
+; OFF bytes past the write helper, with the three arguments already where
+; it takes them.  The link register waits on the stack across the call.
+(def %cc-gen-helper-body!
+  (fn (_ off)
+    (do (if (null? %cc-gen-link) () (asm-push! %cc-gen-asm %cc-gen-link))
+        (if (= off 0)
+          (%cc-gen! (lit blr) x21)
+          (do (%cc-gen! (lit add) x8 x21 (imm off))
+              (%cc-gen! (lit blr) x8)))
+        (if (null? %cc-gen-link) () (asm-pop! %cc-gen-asm %cc-gen-link))
+        (%cc-gen! (lit ret)))))
+
+; getchar: the next byte of standard input, as an unsigned char, or -1 once
+; a read gives nothing.  The bytes come through a buffer in the data, which
+; a read of up to 4096 of them refills when the ones in it are used: where
+; the next one is and how many there are, a word each, then the buffer.
+(def %cc-gen-getchar-body!
+  (fn (_)
+    (def at (%cc-gen-data-room! 4112 16))
+    (def have (%cc-gen-label))
+    (def none (%cc-gen-label))
+    (asm-load-imm64! %cc-gen-asm x8 at)
+    (%cc-gen! (lit add) x8 x8 x22)
+    (%cc-gen! (lit ldr) x0 (mem x8 0))
+    (%cc-gen! (lit ldr) x1 (mem x8 8))
+    (%cc-gen! (lit cmp) x0 x1)
+    (%cc-gen! (lit b/lt) (label have))
+    ; used up: a read into the buffer, with the link register and x8 kept
+    ; across it
+    (if (null? %cc-gen-link) () (asm-push! %cc-gen-asm %cc-gen-link))
+    (asm-push! %cc-gen-asm x8)
+    (%cc-gen! (lit mov) x0 (imm 0))
+    (%cc-gen! (lit add) x1 x8 (imm 16))
+    (%cc-gen! (lit mov) x2 (imm 4096))
+    (%cc-gen! (lit add) x8 x21 (imm %cc-gen-read-at))
+    (%cc-gen! (lit blr) x8)
+    (asm-pop! %cc-gen-asm x8)
+    (if (null? %cc-gen-link) () (asm-pop! %cc-gen-asm %cc-gen-link))
+    (%cc-gen! (lit cmp) x0 (imm 0))
+    (%cc-gen! (lit b/le) (label none))
+    (%cc-gen! (lit str) x0 (mem x8 8))
+    (%cc-gen! (lit mov) x0 (imm 0))
+    ; x0 is where the next byte is
+    (asm-label! %cc-gen-asm have)
+    (%cc-gen! (lit add) x1 x8 x0)
+    (%cc-gen! (lit ldrb) x2 (mem x1 16))
+    (%cc-gen! (lit add) x0 x0 (imm 1))
+    (%cc-gen! (lit str) x0 (mem x8 0))
+    (%cc-gen! (lit mov) x0 x2)
+    (%cc-gen! (lit ret))
+    (asm-label! %cc-gen-asm none)
+    (%cc-gen! (lit mov) x0 (imm 0))
+    (%cc-gen! (lit sub) x0 x0 (imm 1))
+    (%cc-gen! (lit ret))))
+
 ; The runtime's functions: each written after the program's last function
 ; when the program calls it and does not define its own.  An entry is
 ; (NAME ARGUMENTS C-TYPE . BODY): how many arguments it takes, the C type
@@ -2040,7 +2129,13 @@
           (pair "tolower" (pair 1 (pair (library-c-type "tolower") (fn (_) (%cc-gen-case-body! 65 90 (lit add))))))
           (pair "abs" (pair 1 (pair (library-c-type "abs") %cc-gen-abs-body!)))
           ; a negation of the whole register serves a long as well
-          (pair "labs" (pair 1 (pair (library-c-type "labs") %cc-gen-abs-body!))))
+          (pair "labs" (pair 1 (pair (library-c-type "labs") %cc-gen-abs-body!)))
+          (pair "getchar" (pair 0 (pair (library-c-type "getchar") %cc-gen-getchar-body!)))
+          (pair "read"
+            (pair 3 (pair (library-c-type "read")
+                      (fn (_) (%cc-gen-helper-body! %cc-gen-read-at)))))
+          (pair "write"
+            (pair 3 (pair (library-c-type "write") (fn (_) (%cc-gen-helper-body! 0))))))
     (let ((go (fn (self es)
                 (if (null? es) ()
                   (let ((ranges (rest (first es))))
@@ -2051,7 +2146,9 @@
 (def %cc-gen-runtime-live ())    ; the entries the program does not define
 (def %cc-gen-runtime-called ())  ; ((ENTRY . LABEL) ...), the ones it calls
 
-; each runtime function the program called, at its label
+; each runtime function the program called, at its label.  malloc's comes
+; last: its heap starts past everything the data holds, and another's body
+; can take room there (getchar's buffer).
 (def %cc-gen-runtime-emit!
   (fn (_)
     (def go
@@ -2060,7 +2157,9 @@
           (do (asm-label! %cc-gen-asm (rest (first cs)))
               ((rest (rest (rest (first (first cs))))))
               (self (rest cs))))))
-    (go (reverse %cc-gen-runtime-called))))
+    (def malloc? (fn (_ c) (string=? (first (first c)) "malloc")))
+    (def called (reverse %cc-gen-runtime-called))
+    (go (append (filter (fn (_ c) (not (malloc? c))) called) (filter malloc? called)))))
 
 ; exit: the status into x0, then the entry's own exit, the one main's
 ; return reaches
@@ -3150,7 +3249,10 @@
     (def mains (filter (fn (_ f) (string=? (first (rest f)) "main")) funs))
     (if (null? mains) (%cc-gen-no "a program without main"))
     (def main (first mains))
-    (if (not (null? (first (rest (rest main))))) (%cc-gen-no "parameters to main"))
+    ; main takes nothing, or argc and argv, which the entry hands it
+    (let ((n (length (first (rest (rest main))))))
+      (if (if (= n 0) #f (not (= n 2)))
+        (%cc-gen-no "main with parameters other than argc and argv")))
     (def others (filter (fn (_ f) (not (string=? (first (rest f)) "main"))) funs))
     ; the globals take the front of the data, before a body asks for one
     (set! %cc-gen-globals ())
@@ -3179,6 +3281,7 @@
     (set! %cc-gen-link (if (eq? target (lit macho-arm64)) %cc-gen-lr ()))
     (set! %cc-gen-callop (if (eq? target (lit macho-arm64)) (lit bl) (lit call)))
     (set! %cc-gen-exit-at (%cc-gen-exit-back target))
+    (set! %cc-gen-read-at (%cc-gen-read-after target))
     (set! %cc-gen-runtime-called ())
     (set! %cc-gen-heap-bytes 0)
     ; every function gets its label before any code, so a call can name one
@@ -3239,14 +3342,24 @@
       (macho-write! path (first image) (rest image) %cc-gen-heap-bytes)
       (elf-write! path (first image) (rest image) elf-machine-x86-64 %cc-gen-heap-bytes))))
 
-; compile SRC, run the executable, print what it wrote, answer its status
-(def cc-exe-run
-  (fn (_ src)
+; compile SRC and run the executable with INPUT as its standard input and
+; the rest of ARGV after its name, which is its path; print what it wrote,
+; answer its status.  With INPUT nil, it reads the caller's standard input.
+(def cc-exe-run-with
+  (fn (_ src input argv)
     (def path
       (string-append "/tmp/x-cc-exe-"
         (substring (sha256-hex-n src (byte-len src)) 0 16)))
     (cc-compile src path)
-    (let ((r (proc-capture (list path))))
+    (let ((r (proc-capture
+               (if (null? input)
+                 (pair path (rest argv))
+                 (append (list "/bin/sh" "-c" "i=$1; shift; printf %s \"$i\" | \"$@\""
+                           "sh" input path)
+                   (rest argv))))))
       (do (display (rest r)) (first r)))))
 
-(provide cc/gen cc-compile cc-compile-image cc-exe-run)
+; compile SRC, run the executable, print what it wrote, answer its status
+(def cc-exe-run (fn (_ src) (cc-exe-run-with src () (list "a.out"))))
+
+(provide cc/gen cc-compile cc-compile-image cc-exe-run cc-exe-run-with)
