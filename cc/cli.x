@@ -6,16 +6,17 @@
 ; @copyright 2026 Jon Ruttan
 ; @license MIT No Attribution (MIT-0)
 ;
-;   x -l cc -- run FILE.c
+;   x -l cc -- run FILE.c [ARG ...]
 ;   x -l cc -- build FILE.c [-o OUT]
 ;
-; `run` interprets the program and exits with its status.  `build` compiles
-; it to an executable at OUT, a.out when no -o is given.
+; `run` interprets the program, FILE.c its name and the ARGs after it in
+; its argv, and exits with its status.  `build` compiles it to an
+; executable at OUT, a.out when no -o is given.
 (module cc/cli)
 
 (import cc/prims file-exists? file-read-all file-write filter string-append
   string=? sys-exit x-write)
-(import cc/eval cc-run)
+(import cc/eval cc-run-with)
 (import cc/gen cc-compile)
 
 (def %cc-cli-engine-flag?
@@ -40,7 +41,7 @@
       (if (null? argv) ()
         (if (string=? (first argv) "run") (lit run)
           (if (string=? (first argv) "build") (lit build) ()))))
-    (def usage "usage: cc run FILE.c | cc build FILE.c [-o OUT]\n")
+    (def usage "usage: cc run FILE.c [ARG ...] | cc build FILE.c [-o OUT]\n")
     (if (null? mode)
       (do (file-write 2 usage) (sys-exit 2))
       (if (null? (rest argv))
@@ -59,7 +60,7 @@
                   (guard (e (do (display "cc: build failed: ") (x-write e)
                                 (newline) 1))
                     (do (cc-compile (file-read-all path) out) 0)))
-                (cc-run (file-read-all path))))
+                (cc-run-with (file-read-all path) () (pair path (rest (rest argv))))))
             (do (file-write 2
                   (string-append "cc: no such file: "
                     (string-append path "\n")))
