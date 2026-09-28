@@ -127,10 +127,12 @@ functions with recursion and prototypes; globals; static locals, made
 once on first reach; string literals (interned, and joined when side by
 side); character constants; C's escapes, octal and hex among them;
 `#include` (dropped -- the runtime provides the functions compiled
-programs have: putchar, puts, printf, exit, malloc, free, strlen,
-strcmp, strncmp, strcpy, strncpy, strcat, strchr, memcpy, memset,
-memcmp, atoi, isdigit, isalpha, isalnum, isspace, isupper, islower,
-toupper, tolower, abs), object-like `#define` spliced token-wise; //
+programs have: putchar, puts, printf, exit, malloc, calloc, free,
+strlen, strcmp, strncmp, strcpy, strncpy, strcat, strchr, strrchr,
+strstr, memcpy, memmove, memset, memcmp, atoi, isdigit, isalpha,
+isalnum, isspace, isupper, islower, isxdigit, ispunct, isprint,
+iscntrl, isgraph, toupper, tolower, abs, labs), object-like `#define`
+spliced token-wise; //
 and /* */ comments.
 
 Structs, too: `struct S { ... };`, `typedef struct { ... } T;`,

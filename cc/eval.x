@@ -45,9 +45,10 @@
 (def %cc-fun-ids ())    ; ((name . id) ...)
 (def %cc-builtins (list "putchar" "puts" "printf" "malloc" "free" "exit"
                     "strlen" "strcmp" "strcpy" "memcpy" "memset" "strcat" "strncmp"
-                    "memcmp" "strncpy" "strchr" "atoi"
-                    "isdigit" "isalpha" "isalnum" "isspace" "isupper" "islower"
-                    "toupper" "tolower" "abs"))
+                    "memcmp" "strncpy" "strchr" "atoi" "strrchr" "strstr" "memmove"
+                    "calloc" "isdigit" "isalpha" "isalnum" "isspace" "isupper"
+                    "islower" "isxdigit" "ispunct" "isprint" "iscntrl" "isgraph"
+                    "toupper" "tolower" "abs" "labs"))
 
 ; The C type each of the library's functions answers, as its header
 ; declares it, for those that do not answer an int: (NAME . C-TYPE).  run
@@ -59,8 +60,13 @@
         (pair "strcat" (list (lit ptr) (lit char)))
         (pair "strncpy" (list (lit ptr) (lit char)))
         (pair "strchr" (list (lit ptr) (lit char)))
+        (pair "strrchr" (list (lit ptr) (lit char)))
+        (pair "strstr" (list (lit ptr) (lit char)))
         (pair "memcpy" (list (lit ptr) (lit void)))
+        (pair "memmove" (list (lit ptr) (lit void)))
         (pair "memset" (list (lit ptr) (lit void)))
+        (pair "calloc" (list (lit ptr) (lit void)))
+        (pair "labs" (lit long))
         (pair "free" (lit void))
         (pair "exit" (lit void))))
 
@@ -82,7 +88,12 @@
         (list "isalnum" (pair 48 57) (pair 65 90) (pair 97 122))
         (list "isspace" (pair 9 13) (pair 32 32))
         (list "isupper" (pair 65 90))
-        (list "islower" (pair 97 122))))
+        (list "islower" (pair 97 122))
+        (list "isxdigit" (pair 48 57) (pair 65 70) (pair 97 102))
+        (list "ispunct" (pair 33 47) (pair 58 64) (pair 91 96) (pair 123 126))
+        (list "isprint" (pair 32 126))
+        (list "iscntrl" (pair 0 31) (pair 127 127))
+        (list "isgraph" (pair 33 126))))
 
 ; the ranges of the classification NAME, or nil
 (def %cc-ctype-find
@@ -718,6 +729,45 @@
                 (match ((= b ch) (+ s i)) ((= b 0) 0) (#t (self (+ i 1)))))))
     (go 0)))
 
+; the address of the last C, read as an unsigned char, in the string at S
+; -- its NUL included -- or 0
+(def %cc-strrchr
+  (fn (_ s c)
+    (def ch (& c 255))
+    (def go (fn (self i last)
+              (let ((b (%cc-raw-ref (+ s i) 1)))
+                (def at (if (= b ch) (+ s i) last))
+                (if (= b 0) at (self (+ i 1) at)))))
+    (go 0 0)))
+
+; the address of the first place the string at N starts in the one at H,
+; or 0; an empty N starts at H
+(def %cc-strstr
+  (fn (_ h n)
+    (def at? (fn (self p i)
+               (let ((b (%cc-raw-ref (+ n i) 1)))
+                 (match
+                   ((= b 0) #t)
+                   ((= (%cc-raw-ref (+ p i) 1) b) (self p (+ i 1)))
+                   (#t #f)))))
+    (def go (fn (self p)
+              (match
+                ((at? p 0) p)
+                ((= (%cc-raw-ref p 1) 0) 0)
+                (#t (self (+ p 1))))))
+    (go h)))
+
+; N bytes from SRC to DST, as memmove moves them: from the end back when
+; DST is past SRC, so an overlap copies what was there
+(def %cc-move-bytes!
+  (fn (_ dst src n)
+    (if (<= dst src) (%cc-copy-bytes! dst src n)
+      (let ((go (fn (self i)
+                  (if (< i 0) ()
+                    (do (%cc-raw-set! (+ dst i) (%cc-raw-ref (+ src i) 1) 1)
+                        (self (- i 1)))))))
+        (go (- n 1))))))
+
 ; the int the digits at S spell, after spaces and a sign
 (def %cc-atoi
   (fn (_ s)
@@ -1075,6 +1125,8 @@
           (do (display (string-append (%cc-cstr (first args)) "\n")) 0))
         ((string=? name "printf") (%cc-printf args))
         ((string=? name "malloc") (%cc-heap (first args)))
+        ; the heap is zeros where nothing has been, and nothing is given back
+        ((string=? name "calloc") (%cc-heap (* (first args) (first (rest args)))))
         ((string=? name "free") 0)
         ((string=? name "strlen") (%cc-strlen (first args)))
         ((string=? name "strcmp") (%cc-bytes-compare (first args) (first (rest args)) () #t))
@@ -1089,7 +1141,12 @@
         ((string=? name "strncpy")
           (%cc-strncpy! (first args) (first (rest args)) (first (rest (rest args)))))
         ((string=? name "strchr") (%cc-strchr (first args) (first (rest args))))
+        ((string=? name "strrchr") (%cc-strrchr (first args) (first (rest args))))
+        ((string=? name "strstr") (%cc-strstr (first args) (first (rest args))))
         ((string=? name "atoi") (%cc-atoi (first args)))
+        ((string=? name "memmove")
+          (do (%cc-move-bytes! (first args) (first (rest args)) (first (rest (rest args))))
+              (first args)))
         ((string=? name "strcpy")
           (do (%cc-copy-bytes! (first args) (first (rest args))
                 (+ (%cc-strlen (first (rest args))) 1))
@@ -1106,6 +1163,7 @@
         ((string=? name "tolower")
           (let ((c (first args))) (if (if (>= c 65) (<= c 90) #f) (+ c 32) c)))
         ((string=? name "abs") (let ((v (first args))) (if (< v 0) (- 0 v) v)))
+        ((string=? name "labs") (let ((v (first args))) (if (< v 0) (- 0 v) v)))
         ((string=? name "exit")
           (do (set! %cc-exit-code (first args))
               (Err raise (lit cc-exit) "exit" ())))
@@ -1115,7 +1173,7 @@
 (set! %cc-call %cc-call-interp)
 
 ; --- statements --------------------------------------------------------------
-; control: () | (return V) | (break) | (continue)
+; control: () | (return V) | (break) | (continue) | (goto NAME)
 
 (def %cc-ctrl?
   (fn (_ c k) (if (pair? c) (eq? (first c) k) #f)))

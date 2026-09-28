@@ -1,9 +1,11 @@
 # @weight 2
 # @timeout-scale 3
 
-`strcat`, `strncmp`, `strncpy`, `strchr`, `memcmp` and `atoi`, under `run`
-and compiled, where each is a runtime function written after the program
-when it is called.  Each case runs the program under `run`, then
+`strcat`, `strncmp`, `strncpy`, `strchr`, `strrchr`, `strstr`, `memcmp`,
+`memmove`, `atoi`, `calloc` and `labs`, under `run` and compiled, where
+each is a runtime function written after the program when it is called;
+`calloc` is `malloc` of the product, the heap being zeros where nothing
+has been.  Each case runs the program under `run`, then
 compiled, and shows both statuses, and both outputs where it prints;
 every expectation is what the same source prints through /usr/bin/cc.
 
@@ -68,3 +70,20 @@ foobar!
 ```
 ---
     (35 35)
+
+### strrchr, strstr, memmove both ways, calloc and labs
+
+```cc
+(def src "#include <stdio.h>\n#include <string.h>\n#include <stdlib.h>\nint main(void) { const char *path = \"/usr/local/bin/cc\"; const char *slash = strrchr(path, '/'); const char *hay = \"the cat sat on the mat\"; char buf[16] = \"abcdefghij\"; int *z = calloc(5, sizeof(int)); long big = labs(-5000000000L); memmove(buf + 2, buf, 5); printf(\"%s %d %d %d %s\\n\", slash + 1, (int)(strstr(hay, \"sat\") - hay), strstr(hay, \"dog\") == 0, strstr(hay, \"\") == hay, buf); printf(\"%d %d %ld %d %d\\n\", z[0] + z[4], (int)(strrchr(path, 0) - path), big, strrchr(path, 'z') == 0, abs(-7)); memmove(buf, buf + 3, 4); printf(\"%s\\n\", buf); return (int)(slash - path); }\n")
+(display (list (cc-run src) (cc-exe-run src)))
+```
+---
+```output
+cc 8 1 1 ababcdehij
+0 17 5000000000 1 7
+bcdecdehij
+cc 8 1 1 ababcdehij
+0 17 5000000000 1 7
+bcdecdehij
+(14 14)
+```
