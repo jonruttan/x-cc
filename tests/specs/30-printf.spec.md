@@ -129,31 +129,19 @@ hi 3
 0
 ```
 
-## the refusals
+## formats the library takes
 
-### a conversion that is not built yet
-
-```cc
-(display (guard (e (do (display "refused: ") (write e) ""))
-  (cc-exe-run "#include <stdio.h>\nint main(void) { printf(\"%o\\n\", 255); return 0; }")))
-```
----
-    refused: #<err:cc cc: compile: not built yet: printf's %o>
-
-### a format that is not a literal
+### a format that is not a literal, %o, %X, and a width and a precision from arguments
 
 ```cc
-(display (guard (e (do (display "refused: ") (write e) ""))
-  (cc-exe-run "#include <stdio.h>\nint main(void) { printf(1 ? \"a\\n\" : \"b\\n\"); return 0; }")))
+(def src "#include <stdio.h>\nint main(void) {\n  const char *f = 1 ? \"%o|%5X|%-3i|\\n\" : \"no\";\n  printf(f, 255, 255, 7);\n  printf(\"%*d|%-*d|%.*s|\\n\", 5, 1, 4, 2, 2, \"abcdef\");\n  return 0;\n}\n")
+(display (list (cc-run src) (cc-exe-run src)))
 ```
 ---
-    refused: #<err:cc cc: compile: not built yet: printf of a format that is not a literal>
-
-### fewer arguments than conversions
-
-```cc
-(display (guard (e (do (display "refused: ") (write e) ""))
-  (cc-exe-run "#include <stdio.h>\nint main(void) { printf(\"%d %d\\n\", 1); return 0; }")))
+```output
+377|   FF|7  |
+    1|2   |ab|
+377|   FF|7  |
+    1|2   |ab|
+(0 0)
 ```
----
-    refused: #<err:cc cc: compile: not built yet: printf with fewer arguments than conversions>

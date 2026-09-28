@@ -14,9 +14,9 @@ runs on.  No external assembler, linker or `codesign` is involved: the
 instructions are encoded by x/tool/asm, the container is laid out, and
 the Mach-O's ad-hoc code signature is hashed in x.
 
-The Mach-O is dynamic, naming dyld and libSystem as the macOS kernel
-requires of every executable; the ELF is static.  Both make system calls
-directly rather than calling into a C library.  The code generator
+Both are dynamic executables that the system's C library is loaded into:
+the Mach-O names dyld and libSystem, and the ELF names ld-linux and
+libc.so.6.  The code generator
 evaluates expressions on a stack machine, and keeps every value in a
 whole register in its kind's form -- an `int` sign-extended from bit
 31, an `unsigned int` zero-extended, a `long` or an `unsigned long` as
@@ -32,22 +32,22 @@ any of them, assignment, `++` and `--`,
 string literals, `+ - * / %`, `& | ^ << >>`, the six comparisons,
 `&&`, `||`, the ternary, the comma, unary `- ~ ! & *`, casts,
 subscripts, and `.` and `->`.
-A compiled program prints with `putchar`, `puts`, and `printf` of a
-literal format with `%d`, `%i`, `%u`, `%x`, `%ld`, `%li`, `%lu`, `%lx`,
-`%c`, `%s` and `%%`, each with the flags `-` and `0`, a field width and
-a precision: the entry writes out a helper that makes the write system
-call and hands compiled code its address, since neither the system
-call nor a program-counter-relative address has a portable mnemonic.
-A `printf` is laid out at compile time -- runs of text, a `%s` of a
-literal among them fitted to its field, become one write each -- and
-what is left for run time is a `%c`, an integer converted to decimal or
-hex in a buffer in the frame, a `%s` of any other string, walked to its
-NUL, and padding whose size waits on the value, written from a run of
-spaces or zeros in the data.  `sprintf` and `snprintf` are laid out the
-same way, and each write copies into the string instead, as many bytes
-as its size leaves room for before the NUL that ends it.  `exit`
-leaves through the entry's own exit, the one main's return reaches,
-which sits a fixed distance before the helper.
+A call to a function the program does not define goes to the C
+library, which the compiler asks, in its own process, whether it has
+the function, refusing the call by name when it does not.  Each such
+function is an import: a slot in the data that the loader fills with
+the function's address -- through chained fixups in the Mach-O, and a
+relocation against a symbol of libc.so.6 in the ELF.  The entry writes
+out a trampoline that takes the address and six arguments from the
+calling frame, loads the arguments where the C calling convention takes
+them, gives the stack the alignment the convention asks for, and makes
+the call.  A variadic function is called through its v- form --
+`printf` through `vprintf` -- with the arguments past its fixed ones
+laid out as a va_list: a pointer to eight-byte slots on arm64 macOS,
+and on x86-64 Linux a record whose offsets say the registers are used
+up.  The answer is put in the form of the C type the function's header
+declares.  main's answer goes to the library's `exit`, which writes out
+what the library's streams hold.
 
 A pointer is an eight-byte address: `&` takes one, `*` loads or stores
 through one at the width of what it points at, and `+` and `-` move one
@@ -60,25 +60,16 @@ bytes, and a braced initializer fills its fields and zeroes the rest.
 
 The executable has a data segment, mapped readable and writable on the
 page after the code -- `__DATA` in the Mach-O, a second `PT_LOAD` in the
-ELF.  The globals are at the front of it, each at its kind's size with
-the initializer's value already in place; the string literals follow,
-end to end and each stored once.  The entry hands compiled code the
-data's address the way it hands over the helper's.  The executable is
-loaded where the kernel chooses and nothing relocates it, so a global
+ELF.  The import slots are at the front of it, `exit`'s first; the
+globals follow, each at its kind's size with the initializer's value
+already in place; then the string literals, end to end and each stored
+once.  The entry hands compiled code the data's address the way it
+hands over the trampoline's.  The executable is loaded where the kernel
+chooses and nothing relocates the program's own data, so a global
 pointer that starts at an address -- a string literal, an array, what
 `&` takes of a global or of a static local in scope, any of these moved
 by a constant -- starts as zeros, and main writes the address before
-its body runs.  A program that
-calls `malloc` has a heap after the data: the segment runs on sixty-four
-megabytes past the file's bytes, and the kernel maps them zero-filled.
-The compiler writes the program's `malloc` after its last function, when
-the data's size is final; it takes sixteen-aligned blocks from the heap
-in order and answers the null pointer when there is no room, and `free`
-gives nothing back.  `strlen`, `strcmp`, `strncmp`, `strcpy`, `strncpy`,
-`strcat`, `strchr`, `memcpy`, `memset`, `memcmp` and `atoi` are written
-there too, and so are `<ctype.h>`'s classifications and case changes and
-`abs`, each only when the program calls it and does not define its own.  The classifications are ranges of codes in one table,
-which `run` reads as well.
+its body runs.
 
 The calling convention is the compiler's own, since nothing else links
 with what it writes: the first four arguments in registers, unless
@@ -96,10 +87,9 @@ conversions give its operands -- `int` for `char` and `short`, then
 `unsigned int`, `long` and `unsigned long` -- and a store converts the
 value to its place's kind.  An integer constant has the type its
 suffixes and its value give it.  Anything else refuses by name:
-floating point, function pointers, a global initialized by something
-other than a constant or an address,
-any other `printf` conversion or a format that is not a literal, and
-the rest of the runtime.
+floating point, function pointers, a call into the C library with more
+than six arguments, and a global initialized by something other than a
+constant or an address.
 
     x -l cc -- run prog.c
 

@@ -95,14 +95,3 @@ tick
 >go
 0
 ```
-
-## the refusal
-
-### an argument that is not a string
-
-```cc
-(display (guard (e (do (display "refused: ") (write e) ""))
-  (cc-exe-run "#include <stdio.h>\nint main(void) { puts(65); return 0; }")))
-```
----
-    refused: #<err:cc cc: compile: not built yet: puts of something that is not a string>

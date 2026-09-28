@@ -54,13 +54,15 @@ B
 0
 ```
 
-## the refusal
+## the rest of the library
 
-### the rest of the runtime is not compiled yet
+### fopen, which the C library has
 
 ```cc
-(display (guard (e (do (display "refused: ") (write e) ""))
-  (cc-exe-run "#include <stdio.h>\nint main(void) { return fopen(\"x\", \"r\") != 0; }")))
+(def src "#include <stdio.h>\nint main(void) {\n  return fopen(\"/nonexistent/x-cc\", \"r\") == 0;\n}\n")
+(display (list (cc-run src) (cc-exe-run src)))
 ```
 ---
-    refused: #<err:cc cc: compile: not built yet: a call to fopen>
+```output
+(1 1)
+```

@@ -80,6 +80,14 @@
                 (#t (self (rest es))))))
     (go library-c-types)))
 
+; The C library's variadic functions: (NAME V-NAME FIXED), each called
+; through its v- form with a va_list after its FIXED arguments.
+(def library-variadic
+  (list (list "printf" "vprintf" 1) (list "fprintf" "vfprintf" 2)
+        (list "sprintf" "vsprintf" 2) (list "snprintf" "vsnprintf" 3)
+        (list "dprintf" "vdprintf" 2) (list "scanf" "vscanf" 1)
+        (list "fscanf" "vfscanf" 2) (list "sscanf" "vsscanf" 2)))
+
 ; <ctype.h>'s classifications in the C locale, each the ranges of codes it
 ; takes in: (NAME (LOW . HIGH) ...).  run reads them here and the compiled
 ; runtime is written from them.
@@ -1468,5 +1476,6 @@
 
 (def cc-run (fn (_ src) (%cc-run-core src)))
 
-(provide cc/eval cc-run common-c-type ctype-ranges kind-elem library-c-type printf-conversion
-  printf-fit printf-pad promoted-c-type signed? unsigned-divide)
+(provide cc/eval cc-run common-c-type ctype-ranges kind-elem library-c-type
+  library-variadic printf-conversion printf-fit printf-pad promoted-c-type signed?
+  unsigned-divide)

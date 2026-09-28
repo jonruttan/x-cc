@@ -105,23 +105,3 @@ be        -22      be|
 69
 (0 0)
 ```
-
-## the refusals
-
-### a field width past 4095
-
-```cc
-(display (guard (e (do (display "refused: ") (write e) ""))
-  (cc-exe-run "#include <stdio.h>\nint main(void) { printf(\"%5000d\\n\", 1); return 0; }")))
-```
----
-    refused: #<err:cc cc: compile: not built yet: printf's field width past 4095>
-
-### a field width from an argument
-
-```cc
-(display (guard (e (do (display "refused: ") (write e) ""))
-  (cc-exe-run "#include <stdio.h>\nint main(void) { printf(\"%*d\\n\", 5, 1); return 0; }")))
-```
----
-    refused: #<err:cc cc: compile: not built yet: printf's %*>

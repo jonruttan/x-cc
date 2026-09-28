@@ -7,25 +7,24 @@
 ; @license MIT No Attribution (MIT-0)
 ;
 ; An arm64 Mach-O executable, ad-hoc signed, with the load commands `ld`
-; writes for a program that links nothing: dyld as the loader, libSystem
+; writes for a program that links libSystem: dyld as the loader, libSystem
 ; named as a dependency, LC_MAIN for the entry, and the link-edit data --
-; chained fixups with nothing to fix, an exports trie, a symbol table.  The
-; kernel refuses a static executable and dyld refuses one that names no
-; libSystem, although the program never calls into it: its runtime is
-; system calls.
+; chained fixups binding the program's imports, an exports trie, a symbol
+; table.  The program calls libSystem's functions through slots in its data
+; that dyld fills.
 ;
 ; Three segments carry it: __TEXT holds the header, the load commands and
 ; the code; __DATA follows on the next page, readable and writable, and
-; holds the globals and the string literals, then runs on zero-filled
-; through the heap when the program has one; __LINKEDIT holds the rest.
+; holds the imports' slots, the globals and the string literals;
+; __LINKEDIT holds the rest.
 ;
 ; The signature is a SuperBlob holding one CodeDirectory, big-endian, which
 ; hashes every 4096-byte page below the signature's own offset, the last one
 ; short.  Every byte in that range is final before the pages are hashed.
 (module cc/macho)
 
-(import cc/prims byte-at byte-len length sha256-hex-n sha256-jit! word-ref
-  word-set!)
+(import cc/prims append byte-at byte-len length reverse sha256-hex-n sha256-jit!
+  string-append word-ref word-set!)
 (import cc/image img-new img-u8! img-u16! img-u32! img-u64! img-be32! img-be64!
   img-bytes! img-ascii! img-write!)
 
@@ -64,6 +63,94 @@
         (img-u32! img (+ at 56) prot)
         (img-u32! img (+ at 60) prot)
         (img-u32! img (+ at 64) nsects))))
+
+; V's N low bytes, little-endian
+(def %cc-macho-le
+  (fn (self v n) (if (= n 0) () (pair (& v 255) (self (>> v 8) (- n 1))))))
+
+; the bytes of several pieces, in order
+(def %cc-macho-cat
+  (fn (self pieces)
+    (if (null? pieces) () (append (first pieces) (self (rest pieces))))))
+
+; N zeros
+(def %cc-macho-zeros
+  (fn (self n) (if (<= n 0) () (pair 0 (self (- n 1))))))
+
+; The chained fixups for IMPORTS, each (OFFSET . NAME): a slot at OFFSET
+; in the data that dyld fills with the address of libSystem's function
+; NAME.  The blob is a header, the starts of each segment's fixups -- only
+; __DATA has any, and only when there are imports -- the imports, each the
+; library (libSystem, the first dylib) and its name's place, and the names.
+; A slot starts as a bind of the 64-bit pointer format: bit 63 set, the
+; import's index low, and in bits 51 to 62 how many four-byte steps on the
+; next slot in its page is, 0 for the last.  Answers (BYTES . SLOTS),
+; SLOTS each (OFFSET LOW . HIGH), the slot's two words.
+(def %cc-macho-fixups
+  (fn (_ imports dataoff pages)
+    (def page 16384)
+    (def n (length imports))
+    (def seg (if (= n 0) 0 16))
+    (def segsize (+ 22 (* 2 pages)))
+    (def importsoff (if (= n 0) 48 (* 4 (/ (+ 48 segsize 3) 4))))
+    (def symbolsoff (+ importsoff (* 4 n)))
+    ; the names, a NUL first, and where each starts
+    (def names
+      (let ((go (fn (self is at acc offs)
+                  (if (null? is) (pair acc (reverse offs))
+                    (let ((s (string-append "_" (rest (first is)))))
+                      (self (rest is) (+ at (+ (byte-len s) 1))
+                        (append acc (append (%cc-macho-ascii s) (list 0)))
+                        (pair at offs)))))))
+        (go imports 1 (list 0) ())))
+    (def total (* 8 (/ (+ symbolsoff (length (first names)) 7) 8)))
+    ; the first slot in page P, as an offset in the page, or 0xFFFF
+    (def page-start
+      (fn (_ p)
+        (let ((go (fn (self is)
+                    (match
+                      ((null? is) 65535)
+                      ((= (/ (first (first is)) page) p) (- (first (first is)) (* p page)))
+                      (#t (self (rest is)))))))
+          (go imports))))
+    (def starts
+      (let ((go (fn (self p) (if (>= p pages) () (append (%cc-macho-le (page-start p) 2) (self (+ p 1)))))))
+        (go 0)))
+    (def slots
+      (let ((go (fn (self is i)
+                  (if (null? is) ()
+                    (let ((off (first (first is))))
+                      (def nxt
+                        (if (null? (rest is)) 0
+                          (let ((o2 (first (first (rest is)))))
+                            (if (= (/ o2 page) (/ off page)) (/ (- o2 off) 4) 0))))
+                      (pair (pair off (pair i (| (<< 1 31) (<< nxt 19))))
+                        (self (rest is) (+ i 1))))))))
+        (go imports 0)))
+    (def bytes
+      (%cc-macho-cat
+        (list (%cc-macho-le 0 4) (%cc-macho-le 32 4) (%cc-macho-le importsoff 4)
+              (%cc-macho-le symbolsoff 4) (%cc-macho-le n 4) (%cc-macho-le 1 4)
+              (%cc-macho-le 0 4) (%cc-macho-zeros 4)
+              ; the starts in the image: three segments, __DATA's third
+              (%cc-macho-le 3 4) (%cc-macho-le 0 4) (%cc-macho-le 0 4) (%cc-macho-le seg 4)
+              (if (= n 0) ()
+                (%cc-macho-cat
+                  (list (%cc-macho-le segsize 4) (%cc-macho-le page 2) (%cc-macho-le 2 2)
+                        (%cc-macho-le dataoff 8) (%cc-macho-le 0 4) (%cc-macho-le pages 2)
+                        starts (%cc-macho-zeros (- importsoff (+ 48 segsize))))))
+              (let ((go (fn (self os)
+                          (if (null? os) ()
+                            (append (%cc-macho-le (| 1 (<< (first os) 9)) 4) (self (rest os)))))))
+                (go (rest names)))
+              (first names))))
+    (pair (append bytes (%cc-macho-zeros (- total (length bytes)))) slots)))
+
+; the bytes of ASCII text S
+(def %cc-macho-ascii
+  (fn (_ s)
+    (let ((go (fn (self i) (if (>= i (byte-len s)) () (pair (+ 0 (byte-at s i)) (self (+ i 1)))))))
+      (go 0))))
 
 ; a load command whose body is an offset and a size in the file
 (def %cc-macho-data-cmd!
@@ -105,12 +192,12 @@
           ())
         %cc-macho-zero-hex)))
 
-; CODE is the code, entry first; DATA the bytes of the data segment; HEAP
-; how many bytes __DATA runs on past the data, at the data's next
-; sixteen-byte boundary, which the kernel maps zero-filled.
+; CODE is the code, entry first; DATA the bytes of the data segment;
+; IMPORTS the slots in the data dyld fills with libSystem's functions, each
+; (OFFSET . NAME), in the order of their offsets.
 ; Writes the executable to PATH and answers its size in bytes.
 (def macho-write!
-  (fn (_ path code data heap)
+  (fn (_ path code data imports)
     (def vmbase %cc-macho-vmbase)
     (def codeoff %cc-macho-codeoff)
     (def codelen (length code))
@@ -121,19 +208,17 @@
     (def textsize dataoff)
     (def datasize
       (%cc-macho-round-up (if (= datalen 0) 1 datalen) %cc-macho-segalign))
-    ; in memory the data runs on through the heap, so the link-edit data is
-    ; mapped past it, where its file offset alone would not put it
-    (def datavm
-      (if (= heap 0) datasize
-        (%cc-macho-round-up (+ (%cc-macho-round-up datalen 16) heap) %cc-macho-segalign)))
+    (def datavm datasize)
     (def linkedit (+ dataoff datasize))
+    (def fx (%cc-macho-fixups imports dataoff (/ datavm %cc-macho-segalign)))
+    (def fxlen (length (first fx)))
     ; the link-edit data, in the order ld writes it
     (def fixups linkedit)
-    (def trie (+ linkedit 56))
-    (def starts (+ linkedit 104))
-    (def symoff (+ linkedit 112))
-    (def stroff (+ linkedit 144))
-    (def sigoff (+ linkedit 176))
+    (def trie (+ linkedit fxlen))
+    (def starts (+ trie 48))
+    (def symoff (+ trie 56))
+    (def stroff (+ trie 88))
+    (def sigoff (+ trie 120))
     (def idlen (+ (byte-len %cc-macho-ident) 1))
     (def nslots (/ (+ sigoff 4095) 4096))
     (def hashoff (+ 88 idlen))
@@ -165,7 +250,7 @@
     (%cc-macho-segment! img 328 "__LINKEDIT" (+ vmbase (+ dataoff datavm))
       (%cc-macho-round-up (- total linkedit) %cc-macho-segalign)
       linkedit (- total linkedit) 1 0)
-    (%cc-macho-data-cmd! img 400 0x80000034 fixups 56)   ; LC_DYLD_CHAINED_FIXUPS
+    (%cc-macho-data-cmd! img 400 0x80000034 fixups fxlen) ; LC_DYLD_CHAINED_FIXUPS
     (%cc-macho-data-cmd! img 416 0x80000033 trie 48)     ; LC_DYLD_EXPORTS_TRIE
     (img-u32! img 432 0x02)            ; LC_SYMTAB
     (img-u32! img 436 24)
@@ -208,13 +293,15 @@
     (img-bytes! img codeoff code)
     (img-bytes! img dataoff data)
 
-    ; chained fixups: the header, and a start table for three segments
-    ; with no fixups in any of them
-    (img-u32! img (+ fixups 4) 0x20)   ; starts
-    (img-u32! img (+ fixups 8) 0x30)   ; imports
-    (img-u32! img (+ fixups 12) 0x30)  ; symbols
-    (img-u32! img (+ fixups 20) 1)     ; DYLD_CHAINED_IMPORT
-    (img-u32! img (+ fixups 32) 3)
+    ; the chained fixups, and each import's slot in the data as a bind
+    (img-bytes! img fixups (first fx))
+    (let ((go (fn (self ss)
+                (if (null? ss) ()
+                  (let ((s (first ss)))
+                    (do (img-u32! img (+ dataoff (first s)) (first (rest s)))
+                        (img-u32! img (+ dataoff (+ (first s) 4)) (rest (rest s)))
+                        (self (rest ss))))))))
+      (go (rest fx)))
 
     ; the exports trie: __mh_execute_header at 0, _start at the entry
     (img-bytes! img trie (list 0 1 0x5F 0 18 0 0 0 0 2 0 0 0 3 0))

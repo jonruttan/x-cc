@@ -112,22 +112,17 @@ same source prints through /usr/bin/cc.
 (3 3)
 ```
 
-## refused
+## a format the library takes
 
 ### a format that is not a literal
 
 ```cc
-(display (guard (e (do (display "refused: ") (write e) ""))
-  (cc-exe-run "#include <stdio.h>\nint main(void) { char b[8]; sprintf(b, 1 ? \"a\" : \"b\"); return 0; }")))
+(def src "#include <stdio.h>\nint main(void) {\n  char b[16];\n  const char *f = 1 ? \"<%s>\" : \"no\";\n  int n = sprintf(b, f, \"ok\");\n  puts(b);\n  return n;\n}\n")
+(display (list (cc-run src) (cc-exe-run src)))
 ```
 ---
-    refused: #<err:cc cc: compile: not built yet: sprintf of a format that is not a literal>
-
-### fewer arguments than conversions
-
-```cc
-(display (guard (e (do (display "refused: ") (write e) ""))
-  (cc-exe-run "#include <stdio.h>\nint main(void) { char b[8]; snprintf(b, 8, \"%d %d\", 1); return 0; }")))
+```output
+<ok>
+<ok>
+(4 4)
 ```
----
-    refused: #<err:cc cc: compile: not built yet: snprintf with fewer arguments than conversions>
