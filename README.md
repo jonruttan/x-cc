@@ -112,8 +112,11 @@ MEMORY IS BYTES: one buffer, an address is a byte offset into it (0 is
 NULL and guarded), and every read and write takes the width of its
 type -- `char` 1, `short` 2, `int` 4, `long` and pointers 8, with
 signed types sign-extending.  `sizeof`, a field's offset and a
-struct's padding are what /usr/bin/cc counts.  Locals live in memory
-so &local works, the stack grows down and the heap up.
+struct's padding are what /usr/bin/cc counts.  Arithmetic is C's: an
+operand narrower than an int promotes to one, a binary operator's
+operands meet in the C type the usual conversions give them, and the
+result wraps in it.  Locals live in memory so &local works, the stack
+grows down and the heap up.
 
 Working: int/char/void/pointer/array declarations (specifier soup
 accepted, erased, but for `static` on a local); all C89 operators with
@@ -172,8 +175,7 @@ text as a string literal and `A ## B` pastes, the rescan lexing the
 joined token.
 
 Refused loudly, each a recorded pending: goto, floats, casts to
-function-pointer types.  Unsigned types take their own width and read
-zero-extended, and unsigned arithmetic is the recorded pending.
+function-pointer types.
 
 Paired with x-lang v0.16.0 (`lang.xon` is the checkable row).
 

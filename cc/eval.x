@@ -49,6 +49,30 @@
                     "isdigit" "isalpha" "isalnum" "isspace" "isupper" "islower"
                     "toupper" "tolower" "abs"))
 
+; The C type each of the library's functions answers, as its header
+; declares it, for those that do not answer an int: (NAME . C-TYPE).  run
+; reads them here and the compiled runtime is written from them.
+(def library-c-types
+  (list (pair "malloc" (list (lit ptr) (lit void)))
+        (pair "strlen" (lit ulong))
+        (pair "strcpy" (list (lit ptr) (lit char)))
+        (pair "strcat" (list (lit ptr) (lit char)))
+        (pair "strncpy" (list (lit ptr) (lit char)))
+        (pair "strchr" (list (lit ptr) (lit char)))
+        (pair "memcpy" (list (lit ptr) (lit void)))
+        (pair "memset" (list (lit ptr) (lit void)))
+        (pair "free" (lit void))
+        (pair "exit" (lit void))))
+
+(def library-c-type
+  (fn (_ name)
+    (def go (fn (self es)
+              (match
+                ((null? es) (lit int))
+                ((string=? (first (first es)) name) (rest (first es)))
+                (#t (self (rest es))))))
+    (go library-c-types)))
+
 ; <ctype.h>'s classifications in the C locale, each the ranges of codes it
 ; takes in: (NAME (LOW . HIGH) ...).  run reads them here and the compiled
 ; runtime is written from them.
@@ -408,15 +432,15 @@
 (def %cc-exec ())
 (def %cc-exec-block ())
 
+; The C type of what NODE computes, worked out without computing it.
 (set! %cc-kind-of
   (fn (self node env)
     (def t (first node))
-    (def address?
-      (fn (_ k) (if (pair? k) (if (eq? (first k) (lit ptr)) #t (eq? (first k) (lit array))) #f)))
     (match
       ((eq? t (lit var))
         (let ((e (%cc-find (first (rest node)) env)))
           (if (null? e) (lit int) (rest (rest e)))))
+      ((eq? t (lit num)) (if (null? (rest (rest node))) (lit int) (first (rest (rest node)))))
       ((eq? t (lit str)) (list (lit array) (+ (byte-len (first (rest node))) 1) (lit char)))
       ((eq? t (lit dot))
         (let ((f (%cc-field (%cc-struct-name (self (first (rest node)) env)
@@ -431,30 +455,162 @@
       ; A[I] is what A + I points at
       ((eq? t (lit idx))
         (kind-elem (self (list (lit bin) "+" (first (rest node)) (first (rest (rest node)))) env)))
-      ((if (eq? t (lit un)) (string=? (first (rest node)) "*") #f)
-        (kind-elem (self (first (rest (rest node))) env)))
-      ((if (eq? t (lit un)) (string=? (first (rest node)) "&") #f)
-        (list (lit ptr) (self (first (rest (rest node))) env)))
+      ((eq? t (lit un))
+        (let ((op (first (rest node))))
+          (match
+            ((string=? op "*") (kind-elem (self (first (rest (rest node))) env)))
+            ((string=? op "&") (list (lit ptr) (self (first (rest (rest node))) env)))
+            ((string=? op "!") (lit int))
+            ; - and ~ answer their operand's C type, promoted
+            (#t (promoted-c-type (self (first (rest (rest node))) env))))))
       ((eq? t (lit call))
-        ; a named call's C type is the one its function declares it returns
+        ; a named call's C type is the one its function declares it returns,
+        ; or the library's when the program has no function of that name
         (let ((f (if (null? (%cc-find (first (rest node)) env)) (%cc-fun (first (rest node))) ())))
-          (if (null? f) (lit int)
+          (if (null? f) (library-c-type (first (rest node)))
             (let ((r (rest (rest (rest f))))) (if (null? r) (lit int) (first r))))))
-      ; + and - with an address on either side of + or the left of -
-      ; answer a pointer to what it points at; two addresses subtract to
-      ; the count between them, a long
-      ((if (eq? t (lit bin)) (if (string=? (first (rest node)) "+") #t (string=? (first (rest node)) "-")) #f)
+      ((eq? t (lit bin))
+        (%cc-bin-c-type (first (rest node))
+          (self (first (rest (rest node))) env)
+          (self (first (rest (rest (rest node)))) env)))
+      ; a comparison, && and || answer an int, 1 or 0
+      ((eq? t (lit cmp)) (lit int))
+      ((eq? t (lit and)) (lit int))
+      ((eq? t (lit or)) (lit int))
+      ; an assignment, ++ and -- answer their place's C type
+      ((eq? t (lit assign)) (self (first (rest node)) env))
+      ((eq? t (lit preinc)) (self (first (rest node)) env))
+      ((eq? t (lit predec)) (self (first (rest node)) env))
+      ((eq? t (lit postinc)) (self (first (rest node)) env))
+      ((eq? t (lit postdec)) (self (first (rest node)) env))
+      ((eq? t (lit comma)) (self (first (rest (rest node))) env))
+      ; the arms meet as a pointer when either is an address, else in the
+      ; C type their values meet in
+      ((eq? t (lit ternary))
         (let ((ka (self (first (rest (rest node))) env))
               (kb (self (first (rest (rest (rest node)))) env)))
-          (def minus? (string=? (first (rest node)) "-"))
-          (def pointer (fn (_ k) (if (eq? (first k) (lit ptr)) k (list (lit ptr) (kind-elem k)))))
           (match
-            ((if minus? (if (address? ka) (address? kb) #f) #f) (lit long))
-            ((address? ka) (pointer ka))
-            ((if minus? #f (address? kb)) (pointer kb))
-            (#t (lit int)))))
+            ((%cc-address? ka) (%cc-decay ka))
+            ((%cc-address? kb) (%cc-decay kb))
+            ((%cc-kind-decays? ka) ka)
+            (#t (common-c-type ka kb)))))
+      ((eq? t (lit szof)) (lit ulong))
       ((eq? t (lit cast)) (first (rest node)))
       (#t (lit int)))))
+
+; an address: a pointer's value, or an array's, which stands for its first
+; element's
+(def %cc-address?
+  (fn (_ k) (if (pair? k) (if (eq? (first k) (lit ptr)) #t (eq? (first k) (lit array))) #f)))
+
+; the pointer an address K is, to what it points at
+(def %cc-decay (fn (_ k) (if (eq? (first k) (lit ptr)) k (list (lit ptr) (kind-elem k)))))
+
+; The C type a binary operator answers on operands of KA and KB: + and -
+; with an address on either side of + or the left of - a pointer to what
+; it points at, and two addresses subtracted the count between them, a
+; long; a shift its left operand's C type, promoted; anything else the C
+; type its operands meet in.
+(def %cc-bin-c-type
+  (fn (_ op ka kb)
+    (def minus? (string=? op "-"))
+    (match
+      ((if minus? #t (string=? op "+"))
+        (match
+          ((if minus? (if (%cc-address? ka) (%cc-address? kb) #f) #f) (lit long))
+          ((%cc-address? ka) (%cc-decay ka))
+          ((if minus? #f (%cc-address? kb)) (%cc-decay kb))
+          (#t (common-c-type ka kb))))
+      ((if (string=? op "<<") #t (string=? op ">>")) (promoted-c-type ka))
+      (#t (common-c-type ka kb)))))
+
+; C's integer promotions and usual arithmetic conversions, on LP64: an
+; operand narrower than an int -- a char, a short, a bit-field an int
+; holds every value of -- is an int, and two operands meet in an unsigned
+; long if either is one, else a long, which holds every unsigned int, else
+; an unsigned int, else an int.  The compiled code works in the same C
+; types (cc/gen.x).
+(def promoted-c-type
+  (fn (_ k)
+    (match
+      ((eq? k (lit uint)) k)
+      ((eq? k (lit long)) k)
+      ((eq? k (lit ulong)) k)
+      ((%cc-bits? k)
+        (if (if (= (first (rest (rest (rest k)))) 32) (eq? (first (rest k)) (lit uint)) #f)
+          (lit uint)
+          (lit int)))
+      (#t (lit int)))))
+
+(def common-c-type
+  (fn (_ ka kb)
+    (def a (promoted-c-type ka))
+    (def b (promoted-c-type kb))
+    (match
+      ((if (eq? a (lit ulong)) #t (eq? b (lit ulong))) (lit ulong))
+      ((if (eq? a (lit long)) #t (eq? b (lit long))) (lit long))
+      ((if (eq? a (lit uint)) #t (eq? b (lit uint))) (lit uint))
+      (#t (lit int)))))
+
+; N / D, or N % D when REM?, both read as unsigned 64-bit values: halved,
+; N is not negative, so a signed division gives all but the last bit of
+; the quotient, and one comparison in unsigned order settles that
+(def unsigned-divide
+  (fn (_ n d rem?)
+    (def top (<< 1 63))
+    ; unsigned order is signed order with the top bit flipped
+    (def at-least? (fn (_ a b) (>= (^ a top) (^ b top))))
+    (def q
+      (if (< d 0)
+        (if (at-least? n d) 1 0)
+        (let ((q0 (<< (/ (& (>> n 1) (- top 1)) d) 1)))
+          (if (at-least? (- n (* q0 d)) d) (+ q0 1) q0))))
+    (if rem? (- n (* q d)) q)))
+
+; OP on A and B, of the C types KA and KB, as C does it: both converted to
+; the C type they meet in -- a shift's count keeps its own, and the shift
+; its left operand's C type -- the operation in that C type, and its
+; result in it.  An unsigned long divides, and shifts right, as unsigned.
+(def %cc-arith
+  (fn (_ op a b ka kb)
+    (def shift? (if (string=? op "<<") #t (string=? op ">>")))
+    (def k (if shift? (promoted-c-type ka) (common-c-type ka kb)))
+    (def x (%cc-convert a k))
+    (def y (if shift? b (%cc-convert b k)))
+    (def wide? (eq? k (lit ulong)))
+    (%cc-convert
+      (match
+        ((string=? op "+") (+ x y))
+        ((string=? op "-") (- x y))
+        ((string=? op "*") (* x y))
+        ((string=? op "/") (if wide? (%cc-udiv x y #f) (%cc-div x y)))
+        ((string=? op "%") (if wide? (%cc-udiv x y #t) (%cc-mod x y)))
+        ((string=? op "&") (& x y))
+        ((string=? op "|") (| x y))
+        ((string=? op "^") (^ x y))
+        ((string=? op "<<") (<< x y))
+        ((string=? op ">>")
+          (if (if wide? (if (< x 0) (> y 0) #f) #f)
+            (& (>> x y) (- (<< 1 (- 64 y)) 1))
+            (>> x y)))
+        (#t (%cc-oops "unknown operator")))
+      k)))
+
+(def %cc-udiv
+  (fn (_ a b rem?) (if (= b 0) (%cc-oops "division by zero") (unsigned-divide a b rem?))))
+
+; + and - with an address among the operands: the count beside an address
+; moves it by that many of what it points at, and two addresses subtract to
+; the count of those between them
+(def %cc-address-arith
+  (fn (_ op a b ka kb)
+    (match
+      ((if (string=? op "-") (if (%cc-address? ka) (%cc-address? kb) #f) #f)
+        (%cc-div (- a b) (kind-size (kind-elem ka))))
+      ((if (string=? op "-") (%cc-address? ka) #f) (- a (* b (kind-size (kind-elem ka)))))
+      ((if (string=? op "+") (%cc-address? ka) #f) (+ a (* b (kind-size (kind-elem ka)))))
+      ((string=? op "+") (+ (* a (kind-size (kind-elem kb))) b))
+      (#t (%cc-oops (string-append "the operator " op " on an address"))))))
 
 ; What `+ 1` moves an expression by: a pointer or an array steps by its
 ; element's size, and everything else by one.  Only an address scales.
@@ -649,33 +805,32 @@
         (let ((op (first (rest node))))
           (let ((a (%cc-eval (first (rest (rest node))) env)))
             (let ((b (%cc-eval (first (rest (rest (rest node)))) env)))
-              (def sa (%cc-step-of (first (rest (rest node))) env))
-              (def sb (%cc-step-of (first (rest (rest (rest node)))) env))
-              (if (string=? op "+") (if (> sa 1) (+ a (* b sa)) (if (> sb 1) (+ (* a sb) b) (+ a b)))
-              (if (string=? op "-")
-                (if (> sa 1)
-                  (if (> sb 1) (%cc-div (- a b) sa) (- a (* b sa)))
-                  (- a b))
-              (if (string=? op "*") (* a b)
-              (if (string=? op "/") (%cc-div a b)
-              (if (string=? op "%") (%cc-mod a b)
-              (if (string=? op "&") (& a b)
-              (if (string=? op "|") (| a b)
-              (if (string=? op "^") (^ a b)
-              (if (string=? op "<<") (<< a b)
-              (if (string=? op ">>") (>> a b)
-                (%cc-oops "unknown operator"))))))))))))))
+              (def ka (%cc-kind-of (first (rest (rest node))) env))
+              (def kb (%cc-kind-of (first (rest (rest (rest node)))) env))
+              (if (if (%cc-address? ka) #t (%cc-address? kb))
+                (%cc-address-arith op a b ka kb)
+                (%cc-arith op a b ka kb)))))
       (if (eq? t (lit cmp))
         (let ((op (first (rest node))))
           (let ((a (%cc-eval (first (rest (rest node))) env)))
             (let ((b (%cc-eval (first (rest (rest (rest node)))) env)))
+              (def ka (%cc-kind-of (first (rest (rest node))) env))
+              (def kb (%cc-kind-of (first (rest (rest (rest node)))) env))
+              ; the operands in the C type they meet in, an address as it
+              ; is; an unsigned long compares with its top bit flipped,
+              ; which is unsigned order
+              (def k (if (if (%cc-address? ka) #t (%cc-address? kb)) (lit long) (common-c-type ka kb)))
+              (def flip (if (eq? k (lit ulong)) (<< 1 63) 0))
+              (def x (^ (%cc-convert a k) flip))
+              (def y (^ (%cc-convert b k) flip))
               (%cc-b
-                (if (string=? op "<") (< a b)
-                  (if (string=? op "<=") (<= a b)
-                    (if (string=? op ">") (> a b)
-                      (if (string=? op ">=") (>= a b)
-                        (if (string=? op "==") (= a b)
-                          (not (= a b)))))))))))
+                (match
+                  ((string=? op "<") (< x y))
+                  ((string=? op "<=") (<= x y))
+                  ((string=? op ">") (> x y))
+                  ((string=? op ">=") (>= x y))
+                  ((string=? op "==") (= x y))
+                  (#t (not (= x y))))))))
       (if (eq? t (lit and))
         (%cc-b (if (%cc-tru (%cc-eval (first (rest node)) env))
                  (%cc-tru (%cc-eval (first (rest (rest node))) env))
@@ -697,10 +852,11 @@
                 (if (if (eq? (first sub) (lit var)) (null? (%cc-find (first (rest sub)) env)) #f)
                   (%cc-fun-id (first (rest sub)))
                   (%cc-lval sub env)))
+              ; - and ~ in the operand's C type, promoted; ~v is -v-1
               (let ((v (%cc-eval (first (rest (rest node))) env)))
-                (if (string=? op "-") (- 0 v)
-                  (if (string=? op "!") (%cc-b (= v 0))
-                    (- (- 0 v) 1)))))))         ; ~v = -v-1
+                (if (string=? op "!") (%cc-b (= v 0))
+                  (%cc-convert (if (string=? op "-") (- 0 v) (- (- 0 v) 1))
+                    (promoted-c-type (%cc-kind-of (first (rest (rest node))) env))))))))
       (if (eq? t (lit idx))
         (let ((addr (%cc-lval node env)))
           (let ((k (%cc-kind-of node env)))
@@ -1152,5 +1308,5 @@
 
 (def cc-run (fn (_ src) (%cc-run-core src)))
 
-(provide cc/eval cc-run ctype-ranges kind-elem printf-conversion printf-fit printf-pad
-  signed?)
+(provide cc/eval cc-run common-c-type ctype-ranges kind-elem library-c-type printf-conversion
+  printf-fit printf-pad promoted-c-type signed? unsigned-divide)
