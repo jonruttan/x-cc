@@ -104,22 +104,6 @@
         (list "dprintf" "vdprintf" 2) (list "scanf" "vscanf" 1)
         (list "fscanf" "vfscanf" 2) (list "sscanf" "vsscanf" 2)))
 
-; <ctype.h>'s classifications in the C locale, each the ranges of codes it
-; takes in: (NAME (LOW . HIGH) ...).  run reads them here and the compiled
-; runtime is written from them.
-(def ctype-ranges
-  (list (list "isdigit" (pair 48 57))
-        (list "isalpha" (pair 65 90) (pair 97 122))
-        (list "isalnum" (pair 48 57) (pair 65 90) (pair 97 122))
-        (list "isspace" (pair 9 13) (pair 32 32))
-        (list "isupper" (pair 65 90))
-        (list "islower" (pair 97 122))
-        (list "isxdigit" (pair 48 57) (pair 65 70) (pair 97 102))
-        (list "ispunct" (pair 33 47) (pair 58 64) (pair 91 96) (pair 123 126))
-        (list "isprint" (pair 32 126))
-        (list "iscntrl" (pair 0 31) (pair 127 127))
-        (list "isgraph" (pair 33 126))))
-
 ; is the string S one of the strings in L
 (def %cc-member-str?
   (fn (_ s l)
@@ -454,14 +438,6 @@
           (#t (self (rest es))))))
     (go %cc-libc-syms)))
 
-; the variadic functions: (NAME V-NAME FIXED), FIXED the arguments before
-; the variable ones
-(def %cc-libc-variadic
-  (list (list "printf" "vprintf" 1) (list "fprintf" "vfprintf" 2)
-        (list "sprintf" "vsprintf" 2) (list "snprintf" "vsnprintf" 3)
-        (list "dprintf" "vdprintf" 2) (list "scanf" "vscanf" 1)
-        (list "fscanf" "vfscanf" 2) (list "sscanf" "vsscanf" 2)))
-
 ; ARGS as a va_list on the stack; answers its address
 (def %cc-va-list
   (fn (_ args)
@@ -494,7 +470,7 @@
                     ((null? es) ())
                     ((string=? (first (first es)) name) (rest (first es)))
                     (#t (self (rest es)))))))
-        (go %cc-libc-variadic)))
+        (go library-variadic)))
     (def saved %cc-sp)
     (def all
       (if (null? v) args
@@ -991,68 +967,6 @@
 
 ; --- calls and builtins ------------------------------------------------------
 
-; The conversion specification after the % at I in FMT, as printf reads
-; it: (NEXT LETTER L? LEFT? ZERO? WIDTH PRECISION), NEXT past the letter.
-; The flags - and 0 come first, then a field width (0 when none), a
-; precision after a . (() when none; a . alone is 0) and an l for a long.
-; () when FMT ends before the letter.
-(def printf-conversion
-  (fn (_ fmt i)
-    (def end (byte-len fmt))
-    (def byte (fn (_ j) (if (< j end) (byte-at fmt j) 0)))
-    ; (NEXT . VALUE) for the decimal digits from J
-    (def number
-      (fn (self j v)
-        (if (if (>= (byte j) 48) (<= (byte j) 57) #f)
-          (self (+ j 1) (+ (* v 10) (- (byte j) 48)))
-          (pair j v))))
-    (def flags
-      (fn (self j left? zero?)
-        (match
-          ((= (byte j) 45) (self (+ j 1) #t zero?))
-          ((= (byte j) 48) (self (+ j 1) left? #t))
-          (#t (list j left? zero?)))))
-    (def f (flags (+ i 1) #f #f))
-    (def w (number (first f) 0))
-    (def p (if (= (byte (first w)) 46) (number (+ (first w) 1) 0) (pair (first w) ())))
-    (def l? (= (byte (first p)) 108))
-    (def at (if l? (+ (first p) 1) (first p)))
-    (if (>= at end) ()
-      (list (+ at 1) (byte at) l? (first (rest f)) (first (rest (rest f))) (rest w) (rest p)))))
-
-; N bytes of padding, zeros for ZERO? and spaces otherwise
-(def printf-pad
-  (fn (_ zero? n)
-    (def go (fn (self k acc) (if (<= k 0) acc (self (- k 1) (pair (if zero? "0" " ") acc)))))
-    (string-concat (go n ()))))
-
-; TEXT, the conversion C's, fitted to FIELD (LEFT? ZERO? WIDTH PRECISION):
-; a number's digits made up to the precision with zeros, and none for a
-; zero at precision 0; a string cut to the precision; then padded to the
-; field width with spaces before, or after for LEFT?, or zeros after the
-; sign for ZERO? -- which a number with a precision ignores
-(def printf-fit
-  (fn (_ c text field)
-    (def left? (first field))
-    (def width (first (rest (rest field))))
-    (def precision (first (rest (rest (rest field)))))
-    (def number? (not (if (= c 99) #t (= c 115))))
-    (def zero? (if (first (rest field)) (if number? (null? precision) #t) #f))
-    (def sign (if number? (if (= (byte-at text 0) 45) "-" "") ""))
-    (def digits (substring text (byte-len sign) (byte-len text)))
-    (def body
-      (match
-        ((null? precision) digits)
-        ((= c 115) (if (< precision (byte-len digits)) (substring digits 0 precision) digits))
-        ((not number?) digits)
-        ((if (= precision 0) (string=? digits "0") #f) "")
-        (#t (string-append (printf-pad #t (- precision (byte-len digits))) digits))))
-    (def pad (- width (+ (byte-len sign) (byte-len body))))
-    (match
-      (left? (string-append sign body (printf-pad #f pad)))
-      (zero? (string-append sign (printf-pad #t pad) body))
-      (#t (string-append (printf-pad #f pad) sign body)))))
-
 (def %cc-call-interp
   (fn (_ name args)
     (def f (%cc-fun name))
@@ -1445,6 +1359,5 @@
 
 (def cc-run (fn (_ src) (%cc-run-core src () (list "a.out"))))
 
-(provide cc/eval cc-run cc-run-with common-c-type ctype-ranges kind-elem library-c-type
-  library-variadic printf-conversion printf-fit printf-pad promoted-c-type signed?
-  unsigned-divide)
+(provide cc/eval cc-run cc-run-with common-c-type kind-elem library-c-type library-variadic
+  promoted-c-type signed? unsigned-divide)
