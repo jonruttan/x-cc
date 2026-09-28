@@ -203,7 +203,6 @@
         ((eq? k (lit ushort)) #f)
         ((eq? k (lit uint)) #f)
         ((eq? k (lit ulong)) #f)
-        ((eq? k (lit fnptr)) #f)
         (#t #t)))))
 
 ; a W-byte read comes back zero-extended; a signed type takes its top bit
@@ -450,7 +449,7 @@
     (match
       ((eq? t (lit var))
         (let ((e (%cc-find (first (rest node)) env)))
-          (if (null? e) (lit int) (rest (rest e)))))
+          (if (null? e) (%cc-function-c-type (first (rest node))) (rest (rest e)))))
       ((eq? t (lit num)) (if (null? (rest (rest node))) (lit int) (first (rest (rest node)))))
       ((eq? t (lit str)) (list (lit array) (+ (byte-len (first (rest node))) 1) (lit char)))
       ((eq? t (lit dot))
@@ -474,12 +473,17 @@
             ((string=? op "!") (lit int))
             ; - and ~ answer their operand's C type, promoted
             (#t (promoted-c-type (self (first (rest (rest node))) env))))))
+      ; a call through a variable answers what its pointer says the function
+      ; answers
+      ((if (eq? t (lit call)) (not (null? (%cc-find (first (rest node)) env))) #f)
+        (%cc-called-c-type (self (list (lit var) (first (rest node))) env)))
       ((eq? t (lit call))
         ; a named call's C type is the one its function declares it returns,
         ; or the library's when the program has no function of that name
-        (let ((f (if (null? (%cc-find (first (rest node)) env)) (%cc-fun (first (rest node))) ())))
+        (let ((f (%cc-fun (first (rest node)))))
           (if (null? f) (library-c-type (first (rest node)))
             (let ((r (rest (rest (rest f))))) (if (null? r) (lit int) (first r))))))
+      ((eq? t (lit callx)) (%cc-called-c-type (self (first (rest node)) env)))
       ((eq? t (lit bin))
         (%cc-bin-c-type (first (rest node))
           (self (first (rest (rest node))) env)
@@ -508,6 +512,20 @@
       ((eq? t (lit szof)) (lit ulong))
       ((eq? t (lit cast)) (first (rest node)))
       (#t (lit int)))))
+
+; the C type of the function NAME's name as a value, a pointer to it,
+; (fnptr RET); an int for a name nothing declares
+(def %cc-function-c-type
+  (fn (_ name)
+    (let ((f (%cc-fun name)))
+      (if (null? f) (lit int)
+        (list (lit fnptr)
+          (let ((r (rest (rest (rest f))))) (if (null? r) (lit int) (first r))))))))
+
+; what a call through a value of the C type K answers: the RET of a
+; pointer to a function, else an int
+(def %cc-called-c-type
+  (fn (_ k) (if (if (pair? k) (eq? (first k) (lit fnptr)) #f) (first (rest k)) (lit int))))
 
 ; an address: a pointer's value, or an array's, which stands for its first
 ; element's

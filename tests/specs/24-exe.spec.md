@@ -61,11 +61,11 @@ eight bits of what main returns.
 
 ## the refusal
 
-### a function pointer is not compiled yet
+### the address of a function that answers a struct
 
 ```cc
 (display (guard (e (do (display "refused: ") (write e) ""))
-  (cc-exe-run "int one(void) { return 1; }\nint main(void) { int (*f)(void) = one; return f(); }")))
+  (cc-exe-run "struct P { int x; };\nstruct P mk(void) { struct P p = {1}; return p; }\nint main(void) { struct P (*f)(void) = mk; return 0; }")))
 ```
 ---
-    refused: #<err:cc cc: compile: not built yet: a local that is not an integer, a pointer, an array or a struct>
+    refused: #<err:cc cc: compile: not built yet: the address of mk, which takes a struct or more than three arguments, or answers a struct>

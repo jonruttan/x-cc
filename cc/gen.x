@@ -101,8 +101,9 @@
       (| (<< (& imm 3) 29) (| (<< (& (>> imm 2) 0x7FFFF) 5) rd)))))
 
 ; The entry, and the one piece of runtime compiled code calls: a write.
-; Neither the system call nor a program-counter-relative address has a
-; portable mnemonic, so both are written out per target.  The entry puts the
+; The system call has no portable mnemonic, so both are written out per
+; target, bytes and all, and the entry takes its two addresses from where
+; it stands with its own encoding of adr.  The entry puts the
 ; helper's address in x21, where nothing the generator emits touches it, and
 ; compiled code reaches the helper through it: fd in x0, the bytes in x1,
 ; how many in x2.  Those are already arm64's system-call registers, and
@@ -439,6 +440,7 @@
       ((eq? kind (lit uint)) kind)
       ((eq? kind (lit ulong)) kind)
       ((%cc-gen-ptr? kind) kind)
+      ((%cc-gen-fnptr? kind) kind)
       ((%cc-gen-bits? kind) (do (self (first (rest kind)) what) kind))
       ((%cc-gen-array? kind) (do (self (kind-elem kind) "an array's element") kind))
       ((%cc-gen-struct? kind)
@@ -488,7 +490,16 @@
 ; the kinds held in all 64 bits: an address, a long, an unsigned long
 (def %cc-gen-wide?
   (fn (_ k)
-    (match ((%cc-gen-ptr? k) #t) ((eq? k (lit long)) #t) ((eq? k (lit ulong)) #t) (#t #f))))
+    (match
+      ((%cc-gen-ptr? k) #t)
+      ((%cc-gen-fnptr? k) #t)
+      ((eq? k (lit long)) #t)
+      ((eq? k (lit ulong)) #t)
+      (#t #f))))
+
+; a pointer to a function, (fnptr RET): the function's address, which a
+; call through it answers a RET from (parse.x)
+(def %cc-gen-fnptr? (fn (_ k) (if (pair? k) (eq? (first k) (lit fnptr)) #f)))
 
 ; x0 as a value of KIND: shifted to the top of the register and back down,
 ; arithmetically for a signed kind
@@ -697,11 +708,33 @@
             (set! %cc-gen-static-scope (rest (rest f)))
             (%cc-gen-address! x22 (first f))
             (%cc-gen! (lit mov) x1 x0)
-            (%cc-gen-address! x22 (%cc-gen-address-constant (first (rest f))))
+            (def fname (%cc-gen-function-named (first (rest f))))
+            (if (null? fname)
+              (%cc-gen-address! x22 (%cc-gen-address-constant (first (rest f))))
+              (%cc-gen-function-address! fname))
             (%cc-gen! (lit str) x0 (mem x1 0))
             (self (rest fs))))))
     (go (reverse %cc-gen-fixups))
     (set! %cc-gen-static-scope ())))
+
+; the name NODE gives when it is NAME or &NAME, or ()
+(def %cc-gen-function-form
+  (fn (_ node)
+    (match
+      ((eq? (first node) (lit var)) (first (rest node)))
+      ((if (eq? (first node) (lit un))
+         (if (string=? (first (rest node)) "&") (eq? (first (first (rest (rest node)))) (lit var)) #f)
+         #f)
+        (first (rest (first (rest (rest node))))))
+      (#t ()))))
+
+; the function a constant initializer NODE names -- NAME or &NAME, when
+; no static local in scope there or global has the name -- or ()
+(def %cc-gen-function-named
+  (fn (_ node)
+    (def n (%cc-gen-function-form node))
+    (if (null? n) ()
+      (if (if (null? (%cc-gen-constant-find n)) (not (null? (%cc-gen-fun-find n))) #f) n ()))))
 
 ; A static local is kept once for the program, as a global is: room in the
 ; data with its initializer's bytes in place, laid out with the globals
@@ -867,8 +900,11 @@
                               (append (self fk (first is) (+ at foff))
                                 (go (rest fs) (rest is) (+ foff (kind-size fk)))))))))))
               (go fields items 0))))
-      ; a pointer that starts at an address
+      ; a pointer that starts at an address, a function's included
       ((if (%cc-gen-ptr? kind) (%cc-gen-address-form? init) #f)
+        (do (set! %cc-gen-pending (pair (pair at init) %cc-gen-pending))
+            (zeros 8 ())))
+      ((if (%cc-gen-fnptr? kind) (not (null? (%cc-gen-function-form init))) #f)
         (do (set! %cc-gen-pending (pair (pair at init) %cc-gen-pending))
             (zeros 8 ())))
       ((eq? (first init) (lit initlist))
@@ -1178,9 +1214,7 @@
 ; a kind whose values are held in an int's form: int, and the kinds C
 ; promotes to it
 (def %cc-gen-int-form?
-  (fn (_ k)
-    (if (pair? k) #f
-      (if (eq? k (lit fnptr)) #f (eq? (promoted-c-type k) (lit int))))))
+  (fn (_ k) (if (pair? k) #f (eq? (promoted-c-type k) (lit int)))))
 
 ; x0, a value of kind FROM, converted to KIND: narrowed to a char or short,
 ; and into an int's or an unsigned int's form from any other kind, an
@@ -1217,6 +1251,9 @@
   (fn (self node)
     (let ((t (first node)))
       (match
+        ; a function's name is a pointer to it
+        ((if (eq? t (lit var)) (%cc-gen-function-name? (first (rest node))) #f)
+          (list (lit fnptr) (%cc-gen-ret-find (first (rest node)))))
         ((eq? t (lit var)) (%cc-gen-place-kind (%cc-gen-place-of (first (rest node)))))
         ((eq? t (lit num)) (%cc-gen-num-kind node))
         ((eq? t (lit szof)) (lit ulong))
@@ -1229,7 +1266,10 @@
           (let ((op (first (rest node))))
             (match
               ((string=? op "*") (kind-elem (self (first (rest (rest node))))))
-              ((string=? op "&") (list (lit ptr) (self (first (rest (rest node))))))
+              ; & of a function is the same pointer its name is
+              ((string=? op "&")
+                (let ((x (self (first (rest (rest node))))))
+                  (if (%cc-gen-fnptr? x) x (list (lit ptr) x))))
               ((string=? op "!") (lit int))
               (#t (promoted-c-type (self (first (rest (rest node)))))))))
         ((eq? t (lit bin))
@@ -1249,11 +1289,24 @@
         ((eq? t (lit arrow))
           (rest (%cc-gen-field (kind-elem (self (first (rest node))))
                   (first (rest (rest node))))))
+        ; a call through a pointer answers what the pointer says its function
+        ; answers
+        ((if (eq? t (lit call)) (%cc-gen-variable? (first (rest node))) #f)
+          (let ((k (self (list (lit var) (first (rest node))))))
+            (if (%cc-gen-fnptr? k) (first (rest k)) (lit int))))
         ((eq? t (lit call))
           (let ((r (%cc-gen-ret-find (first (rest node)))))
             (if (null? r) (library-c-type (first (rest node))) r)))
+        ((eq? t (lit callx))
+          (let ((k (self (first (rest node)))))
+            (if (%cc-gen-fnptr? k) (first (rest k)) (lit int))))
         ((eq? t (lit cast)) (first (rest node)))
         (#t (lit int))))))
+
+; is NAME a local's or a global's, not only a function's
+(def %cc-gen-variable?
+  (fn (_ name)
+    (if (null? (%cc-gen-find name)) (not (null? (%cc-gen-global-find name))) #t)))
 
 ; The kind a binary operator answers: + and - keep an address one and make
 ; two of them a count (a long, as ptrdiff_t is); a shift answers its left
@@ -1334,6 +1387,15 @@
         ((eq? t (lit str)) (%cc-gen-string-at! (first (rest node))))
         ((eq? t (lit szof))
           (%cc-gen-const-kind! (kind-size (%cc-gen-kind-of (first (rest node)))) (lit ulong)))
+        ; a function's name, or & of it, is its address
+        ((if (eq? t (lit var)) (%cc-gen-function-name? (first (rest node))) #f)
+          (%cc-gen-function-address! (first (rest node))))
+        ((if (if (eq? t (lit un)) (string=? (first (rest node)) "&") #f)
+           (if (eq? (first (first (rest (rest node)))) (lit var))
+             (%cc-gen-function-name? (first (rest (first (rest (rest node))))))
+             #f)
+           #f)
+          (%cc-gen-function-address! (first (rest (first (rest (rest node)))))))
         ((if (eq? t (lit un)) (string=? (first (rest node)) "&") #f)
           (%cc-gen-addr! (first (rest (rest node)))))
         ((if (eq? t (lit un)) (string=? (first (rest node)) "*") #f)
@@ -1360,7 +1422,12 @@
             (def kb (%cc-gen-kind-of (first (rest (rest (rest node))))))
             (if (if (%cc-gen-struct? ka) #t (%cc-gen-struct? kb))
               (%cc-gen-no (string-append "the operator " op " on a struct")))
-            (def addr? (if (%cc-gen-addr-kind? ka) #t (%cc-gen-addr-kind? kb)))
+            ; a pointer to a function compares as the address it is, and
+            ; takes no arithmetic
+            (def fn? (if (%cc-gen-fnptr? ka) #t (%cc-gen-fnptr? kb)))
+            (if (if fn? (eq? t (lit bin)) #f)
+              (%cc-gen-no "arithmetic on a pointer to a function"))
+            (def addr? (if (%cc-gen-addr-kind? ka) #t (if (%cc-gen-addr-kind? kb) #t fn?)))
             ; a shift works in its left operand's kind, anything else in the
             ; kind its two operands meet in
             (def k (if (if (string=? op "<<") #t (string=? op ">>"))
@@ -1441,6 +1508,7 @@
         ((eq? t (lit comma))
           (do (self (first (rest node))) (self (first (rest (rest node))))))
         ((eq? t (lit call)) (%cc-gen-call! node))
+        ((eq? t (lit callx)) (%cc-gen-call-through! (first (rest node)) (first (rest (rest node)))))
         ((eq? t (lit cast))
           (let ((k (first (rest node))) (e (first (rest (rest node)))))
             (def from (%cc-gen-kind-of e))
@@ -1493,6 +1561,8 @@
     (def args (first (rest (rest node))))
     (def entry (%cc-gen-runtime-find name))
     (match
+      ; a name that is a local's or a global's holds a pointer to a function
+      ((%cc-gen-variable? name) (%cc-gen-call-through! (list (lit var) name) args))
       ((not (null? entry)) (%cc-gen-runtime-call! node entry))
       ((not (null? (%cc-gen-fun-find name))) (%cc-gen-call-fun! node))
       ; calloc is malloc of the product: the heap is zeros where nothing has
@@ -2167,6 +2237,61 @@
 ; their registers.  A call that answers a struct first says where the
 ; struct goes: the slot the scan set aside for this call (%cc-gen-rslots),
 ; whose address is what the call answers.
+; does NAME, used as a value, name one of the program's functions: no local
+; or global has the name, and a function does
+(def %cc-gen-function-name?
+  (fn (_ name)
+    (match
+      ((not (null? (%cc-gen-find name))) #f)
+      ((not (null? (%cc-gen-global-find name))) #f)
+      (#t (not (null? (%cc-gen-fun-find name)))))))
+
+; The function NAME's address, into x0, taken from where the instruction
+; is.  A call through a pointer hands over the arguments in the first
+; registers (%cc-gen-call-through!), so a function whose address is taken
+; takes at most three, none of them a struct, and answers no struct.
+(def %cc-gen-function-address!
+  (fn (_ name)
+    (if (not (null? (%cc-gen-runtime-find name)))
+      (%cc-gen-no (string-append "the address of the library's " name)))
+    (def params (%cc-gen-params-find name))
+    (if (if (> (length params) 3) #t
+          (if (%cc-gen-struct? (%cc-gen-ret-find name)) #t
+            (not (null? (filter %cc-gen-struct? params)))))
+      (%cc-gen-no (string-append "the address of " name
+                    ", which takes a struct or more than three arguments, or answers a struct")))
+    (%cc-gen! (lit adr) x0 (label (%cc-gen-fun-label name)))))
+
+; A call through TARGET, a pointer to a function, with ARGS: the address,
+; then each argument in its own C type's promoted form, wait on the stack;
+; the arguments go into the first registers and the address into x8,
+; which three arguments leave free.  It answers what the pointer's RET says.
+(def %cc-gen-call-through!
+  (fn (_ target args)
+    (if (not (%cc-gen-fnptr? (%cc-gen-kind-of target)))
+      (%cc-gen-no "a call through something that is not a pointer to a function"))
+    (if (> (length args) 3)
+      (%cc-gen-no "a call through a pointer with more than three arguments"))
+    (def push-all
+      (fn (self as)
+        (if (null? as) ()
+          (do (if (%cc-gen-struct? (%cc-gen-kind-of (first as)))
+                (%cc-gen-no "a struct handed to a function through a pointer"))
+              (%cc-gen-expr! (first as))
+              (asm-push! %cc-gen-asm x0)
+              (self (rest as))))))
+    ; the last one pushed is on top, so the registers fill from the last back
+    (def pop-all
+      (fn (self rs)
+        (if (null? rs) ()
+          (do (asm-pop! %cc-gen-asm (first rs)) (self (rest rs))))))
+    (do (%cc-gen-expr! target)
+        (asm-push! %cc-gen-asm x0)
+        (push-all args)
+        (pop-all (reverse (%cc-gen-take (length args) (list x0 x1 x2))))
+        (asm-pop! %cc-gen-asm x8)
+        (%cc-gen! (lit blr) x8))))
+
 (def %cc-gen-call-fun!
   (fn (_ node)
     (def name (first (rest node)))

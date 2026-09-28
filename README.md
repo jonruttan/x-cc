@@ -31,13 +31,15 @@ any of them, assignment, `++` and `--`,
 `goto`, `return` and calls, recursion included, over integer constants and
 string literals, `+ - * / %`, `& | ^ << >>`, the six comparisons,
 `&&`, `||`, the ternary, the comma, unary `- ~ ! & *`, casts,
-subscripts, and `.` and `->`.
+subscripts, and `.` and `->`.  A pointer to a function is the function's
+address, and a call through one hands over up to three arguments, none
+of them a struct, in the first registers.
 A compiled program prints with `putchar`, `puts`, and `printf` of a
 literal format with `%d`, `%i`, `%u`, `%x`, `%ld`, `%li`, `%lu`, `%lx`,
 `%c`, `%s` and `%%`, each with the flags `-` and `0`, a field width and
 a precision: the entry writes out a helper that makes the write system
-call and hands compiled code its address, since neither the system
-call nor a program-counter-relative address has a portable mnemonic.
+call, which has no portable mnemonic, and hands compiled code its
+address.
 A `printf` is laid out at compile time -- runs of text, a `%s` of a
 literal among them fitted to its field, become one write each -- and
 what is left for run time is a `%c`, an integer converted to decimal or
@@ -94,7 +96,7 @@ conversions give its operands -- `int` for `char` and `short`, then
 `unsigned int`, `long` and `unsigned long` -- and a store converts the
 value to its place's kind.  An integer constant has the type its
 suffixes and its value give it.  Anything else refuses by name:
-floating point, function pointers, a global initialized by something
+floating point, a global initialized by something
 other than a constant or an address,
 any other `printf` conversion or a format that is not a literal, and
 the rest of the runtime.
