@@ -43,7 +43,8 @@
 ; runtime's builtins take ids too.
 (def %cc-fun-base 1048576)
 (def %cc-fun-ids ())    ; ((name . id) ...)
-(def %cc-builtins (list "putchar" "puts" "printf" "malloc" "free" "exit"
+(def %cc-builtins (list "putchar" "puts" "printf" "sprintf" "snprintf" "malloc"
+                    "free" "exit"
                     "strlen" "strcmp" "strcpy" "memcpy" "memset" "strcat" "strncmp"
                     "memcmp" "strncpy" "strchr" "atoi" "strrchr" "strstr" "memmove"
                     "calloc" "isdigit" "isalpha" "isalnum" "isspace" "isupper"
@@ -1105,13 +1106,14 @@
       (zero? (string-append sign (printf-pad #t pad) body))
       (#t (string-append (printf-pad #f pad) sign body)))))
 
-; printf: %d %i %u %x %c %s and %%, and %ld %li %lu %lx, each with the
-; flags - and 0, a field width and a precision; an int's conversion reads
-; the argument's low 32 bits, as the compiled one does.  It answers the
-; count of bytes written, as C's does.
-(def %cc-printf
-  (fn (_ args)
-    (def fmt (%cc-cstr (first args)))
+; The text printf writes for the format at FMT-AT and ARGS: %d %i %u %x
+; %c %s and %%, and %ld %li %lu %lx, each with the flags - and 0, a field
+; width and a precision; an int's conversion reads the argument's low 32
+; bits, as the compiled one does.  A refusal names NAME, the function
+; whose format it is.
+(def %cc-format
+  (fn (_ name fmt-at args)
+    (def fmt (%cc-cstr fmt-at))
     (def end (byte-len fmt))
     (def low32 (fn (_ v) (& v 4294967295)))
     ; one conversion's text: its letter C, after an l when L?, of V
@@ -1124,26 +1126,25 @@
           ((= c 120) (%cc-unsigned->str (if l? v (low32 v)) 16))       ; x
           ((if l? #f (= c 99)) (list->string (list (integer->char (& v 255)))))  ; c
           ((if l? #f (= c 115)) (%cc-cstr v))            ; s
-          (#t (%cc-oops "printf: only %d %i %u %x %c %s %% and %ld %li %lu %lx")))))
+          (#t (%cc-oops (string-append name ": only %d %i %u %x %c %s %% and %ld %li %lu %lx"))))))
     (def go
       (fn (self i as acc)
         (match
-          ((>= i end)
-            (let ((s (string-concat (reverse acc))))
-              (do (display s) (byte-len s))))
+          ((>= i end) (string-concat (reverse acc)))
           ((not (= (byte-at fmt i) 37)) (self (+ i 1) as (pair (substring fmt i (+ i 1)) acc)))
-          ((>= (+ i 1) end) (%cc-oops "printf's % at the end of its format"))
+          ((>= (+ i 1) end) (%cc-oops (string-append name "'s % at the end of its format")))
           ((= (byte-at fmt (+ i 1)) 37) (self (+ i 2) as (pair "%" acc)))
           (#t
             (let ((spec (printf-conversion fmt i)))
-              (if (null? spec) (%cc-oops "printf's % at the end of its format"))
-              (if (null? as) (%cc-oops "printf with fewer arguments than conversions"))
+              (if (null? spec) (%cc-oops (string-append name "'s % at the end of its format")))
+              (if (null? as)
+                (%cc-oops (string-append name " with fewer arguments than conversions")))
               (def c (first (rest spec)))
               (self (first spec) (rest as)
                 (pair (printf-fit c (convert-one c (first (rest (rest spec))) (first as))
                         (rest (rest (rest spec))))
                   acc)))))))
-    (go 0 (rest args) ())))
+    (go 0 args ())))
 
 (def %cc-call-interp
   (fn (_ name args)
@@ -1187,7 +1188,22 @@
               (first args)))
         ((string=? name "puts")
           (do (display (string-append (%cc-cstr (first args)) "\n")) 0))
-        ((string=? name "printf") (%cc-printf args))
+        ((string=? name "printf")
+          (let ((s (%cc-format name (first args) (rest args))))
+            (do (display s) (byte-len s))))
+        ; sprintf and snprintf answer the count printf would write, and
+        ; snprintf keeps to its size, a NUL included
+        ((string=? name "sprintf")
+          (let ((s (%cc-format name (first (rest args)) (rest (rest args)))))
+            (do (%cc-put-text! (first args) s (byte-len s)) (byte-len s))))
+        ((string=? name "snprintf")
+          (let ((s (%cc-format name (first (rest (rest args))) (rest (rest (rest args)))))
+                (size (first (rest args))))
+            (do (if (> size 0)
+                  (%cc-put-text! (first args) s
+                    (if (< (byte-len s) size) (byte-len s) (- size 1)))
+                  ())
+                (byte-len s))))
         ((string=? name "malloc") (%cc-heap (first args)))
         ; the heap is zeros where nothing has been, and nothing is given back
         ((string=? name "calloc") (%cc-heap (* (first args) (first (rest args)))))
