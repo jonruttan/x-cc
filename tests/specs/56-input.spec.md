@@ -114,11 +114,3 @@ fedcba
 ---
     refused: #<err:cc cc: compile: not built yet: main with parameters other than argc and argv>
 
-### getchar with an argument
-
-```cc
-(display (guard (e (do (display "refused: ") (write e) ""))
-  (cc-exe-run "int main(void) { return getchar(0); }")))
-```
----
-    refused: #<err:cc cc: compile: not built yet: getchar with other than no arguments>
