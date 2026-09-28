@@ -43,7 +43,9 @@ literal among them fitted to its field, become one write each -- and
 what is left for run time is a `%c`, an integer converted to decimal or
 hex in a buffer in the frame, a `%s` of any other string, walked to its
 NUL, and padding whose size waits on the value, written from a run of
-spaces or zeros in the data.  `exit`
+spaces or zeros in the data.  `sprintf` and `snprintf` are laid out the
+same way, and each write copies into the string instead, as many bytes
+as its size leaves room for before the NUL that ends it.  `exit`
 leaves through the entry's own exit, the one main's return reaches,
 which sits a fixed distance before the helper.
 
@@ -127,13 +129,12 @@ functions with recursion and prototypes; globals; static locals, made
 once on first reach; string literals (interned, and joined when side by
 side); character constants; C's escapes, octal and hex among them;
 `#include` (dropped -- the runtime provides the functions compiled
-programs have: putchar, puts, printf, exit, malloc, calloc, free,
-strlen, strcmp, strncmp, strcpy, strncpy, strcat, strchr, strrchr,
-strstr, memcpy, memmove, memset, memcmp, atoi, isdigit, isalpha,
-isalnum, isspace, isupper, islower, isxdigit, ispunct, isprint,
-iscntrl, isgraph, toupper, tolower, abs, labs), object-like `#define`
-spliced token-wise; //
-and /* */ comments.
+programs have: putchar, puts, printf, sprintf, snprintf, exit, malloc,
+calloc, free, strlen, strcmp, strncmp, strcpy, strncpy, strcat, strchr,
+strrchr, strstr, memcpy, memmove, memset, memcmp, atoi, isdigit,
+isalpha, isalnum, isspace, isupper, islower, isxdigit, ispunct,
+isprint, iscntrl, isgraph, toupper, tolower, abs, labs), object-like
+`#define` spliced token-wise; // and /* */ comments.
 
 Structs, too: `struct S { ... };`, `typedef struct { ... } T;`,
 fields by `.` and `->`, nested structs, arrays of structs, pointers to
