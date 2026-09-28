@@ -104,15 +104,27 @@ and run.  Under `run`, fib recurses, pointers write through, arrays
 decay into functions, bubble sort sorts, and the output matches the
 real binary byte for byte.
 
-MEMORY IS BYTES: one buffer, an address is a byte offset into it (0 is
-NULL and guarded), and every read and write takes the width of its
-type -- `char` 1, `short` 2, `int` 4, `long` and pointers 8, with
-signed types sign-extending.  `sizeof`, a field's offset and a
-struct's padding are what /usr/bin/cc counts.  Arithmetic is C's: an
-operand narrower than an int promotes to one, a binary operator's
-operands meet in the C type the usual conversions give them, and the
-result wraps in it.  Locals live in memory so &local works, the stack
-grows down and the heap up.
+MEMORY IS BYTES, at real addresses: the globals, string literals and
+stack are in one buffer, anything else is wherever the C library put
+it, and every read and write takes the width of its type -- `char` 1,
+`short` 2, `int` 4, `long` and pointers 8, with signed types
+sign-extending.  An address below 4096 is a null pointer and refuses.
+`sizeof`, a field's offset and a struct's padding are what /usr/bin/cc
+counts.  Arithmetic is C's: an operand narrower than an int promotes
+to one, a binary operator's operands meet in the C type the usual
+conversions give them, and the result wraps in it.  Locals live in
+memory so &local works, and the stack grows down.
+
+THE C LIBRARY IS THE SYSTEM'S: a call to a function the program does
+not define goes to libc, opened in the process and searched by name,
+with the arguments as the C calling convention passes them -- seven at
+most.  A variadic function goes through its v- form (`printf` through
+`vprintf`), the arguments after its fixed ones laid out as a va_list.
+The answer is converted to the C type the function's header declares,
+and `stdin`, `stdout` and `stderr` are the library's own variables.
+What the library holds for its streams is flushed when the program
+ends, and `exit` flushes before it leaves.  A pointer to one of the
+program's own functions cannot be handed to the library, and refuses.
 
 Working: int/char/void/pointer/array declarations (specifier soup
 accepted, erased, but for `static` on a local); all C89 operators with
@@ -122,16 +134,11 @@ truncating division; if/else, while, do, for, break, continue, return;
 functions with recursion and prototypes; globals; static locals, made
 once on first reach; string literals (interned, and joined when side by
 side); character constants; C's escapes, octal and hex among them;
-`#include` (dropped -- the runtime provides the functions compiled
-programs have: putchar, puts, printf, sprintf, snprintf, exit, malloc,
-calloc, free, strlen, strcmp, strncmp, strcpy, strncpy, strcat, strchr,
-strrchr, strstr, memcpy, memmove, memset, memcmp, atoi, isdigit,
-isalpha, isalnum, isspace, isupper, islower, isxdigit, ispunct,
-isprint, iscntrl, isgraph, toupper, tolower, abs, labs, getchar, read,
-write; one of a standard header defines `EOF`, `NULL`, `EXIT_SUCCESS`
-and `EXIT_FAILURE`), object-like `#define` spliced token-wise; // and
-/* */ comments.  `x -l cc -- run prog.c ARG ...` hands main the file's
-name and the ARGs as its argv, and fd 0 as its standard input.
+`#include` (dropped -- the C library provides the functions -- and one
+of a standard header defines `EOF`, `NULL`, `EXIT_SUCCESS` and
+`EXIT_FAILURE`), object-like `#define` spliced token-wise; // and /* */
+comments.  `x -l cc -- run prog.c ARG ...` hands main the file's name
+and the ARGs as its argv, and fd 0 as its standard input.
 
 Structs, too: `struct S { ... };`, `typedef struct { ... } T;`,
 fields by `.` and `->`, nested structs, arrays of structs, pointers to
