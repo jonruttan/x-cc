@@ -28,8 +28,8 @@
 ; evaluator's), initializer lists (INIT may be (initlist ITEMS); an
 ; unsized array takes its size from one) and function pointers (the
 ; `(*NAME)(params)` declarator is a pointer-wide value; a call whose callee is
-; any expression but a bare name is (callx E ARGS)) parse.  Refused
-; loudly: goto, floats -- each a recorded pending.
+; any expression but a bare name is (callx E ARGS)) and goto parse.
+; Refused loudly: floats, a recorded pending.
 (module cc/parse)
 
 (import cc/prims append byte-len convert length map reverse string-append
@@ -69,7 +69,7 @@
 
 ; the unimplemented keywords refuse by name
 (def %cc-p-hard
-  (list (lit goto) (lit float) (lit double)))
+  (list (lit float) (lit double)))
 
 (def %cc-p-hard?
   (fn (_ toks)
@@ -865,6 +865,18 @@
   (fn (_ toks)
     (if (%cc-p-op? toks "{")
       (%cc-p-block (rest toks))
+      ; goto NAME; and NAME: STATEMENT -- (goto NAME), (label NAME STMT).  A
+      ; label before a declaration labels an empty statement in front of it.
+      (if (%cc-p-kw? toks (lit goto))
+        (if (not (%cc-p-id? (rest toks))) (%cc-p-err "expected a label after goto")
+          (pair (list (lit goto) (first (rest (first (rest toks)))))
+            (%cc-p-eat (rest (rest toks)) ";")))
+      (if (if (%cc-p-id? toks) (%cc-p-op? (rest toks) ":") #f)
+        (let ((name (first (rest (first toks)))) (s (%cc-p-stmt (rest (rest toks)))))
+          (if (eq? (first (first s)) (lit decls))
+            (pair (pair (lit decls) (pair (list (lit label) name (list (lit block) ())) (rest (first s))))
+              (rest s))
+            (pair (list (lit label) name (first s)) (rest s))))
       (if (%cc-p-kw? toks (lit if))
         (let ((c (%cc-e-comma (%cc-p-eat (rest toks) "("))))
           (def t (%cc-p-stmt (%cc-p-eat (rest c) ")")))
@@ -933,7 +945,7 @@
                               (rest r)))
                           (let ((r (%cc-e-comma toks)))
                             (pair (list (lit expr) (first r))
-                              (%cc-p-eat (rest r) ";"))))))))))))))))))
+                              (%cc-p-eat (rest r) ";"))))))))))))))))))))
 
 ; switch (E) { case V: ... default: ... } -> (switch E CLAUSES), each
 ; clause (VALUE stmt...) in order, VALUE () for default; fallthrough is

@@ -28,7 +28,7 @@ every width, signed and unsigned,
 pointers, arrays, pointers to arrays, structs and unions, typedefs of
 any of them, assignment, `++` and `--`,
 `if`/`else`, `while`, `do`, `for`, `switch`, `break`, `continue`,
-`return` and calls, recursion included, over integer constants and
+`goto`, `return` and calls, recursion included, over integer constants and
 string literals, `+ - * / %`, `& | ^ << >>`, the six comparisons,
 `&&`, `||`, the ternary, the comma, unary `- ~ ! & *`, casts,
 subscripts, and `.` and `->`.
@@ -174,7 +174,7 @@ value moves out of the popped frame into a fresh slot in the caller's
 text as a string literal and `A ## B` pastes, the rescan lexing the
 joined token.
 
-Refused loudly, each a recorded pending: goto, floats, casts to
+Refused loudly, each a recorded pending: floats, casts to
 function-pointer types.
 
 Paired with x-lang v0.16.0 (`lang.xon` is the checkable row).

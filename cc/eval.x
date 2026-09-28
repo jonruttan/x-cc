@@ -1057,6 +1057,9 @@
         (def env (bind (first f) (first (rest (rest f))) args ()))
         (def ret (let ((r (rest (rest (rest f))))) (if (null? r) (lit int) (first r))))
         (def c (%cc-exec-block (first (rest f)) env))
+        (if (%cc-ctrl? c (lit goto))
+          (%cc-oops (string-append "a goto to a label the function does not have: "
+                      (first (rest c)))))
         (def v (if (if (pair? c) (eq? (first c) (lit return)) #f) (first (rest c)) 0))
         (if (%cc-struct-kind? ret)
           (let ((vals (%cc-read-bytes v (kind-size ret))))
@@ -1130,42 +1133,19 @@
           (let ((e (first (rest (rest (rest stmt))))))
             (if (null? e) () (%cc-exec e env))))
       (if (eq? t (lit while))
-        (let ((loop (fn (self)
-                      (if (%cc-tru (%cc-eval (first (rest stmt)) env))
-                        (let ((c (%cc-exec (first (rest (rest stmt))) env)))
-                          (if (null? c) (self)
-                            (if (%cc-ctrl? c (lit break)) ()
-                              (if (%cc-ctrl? c (lit continue)) (self)
-                                c))))
-                        ()))))
-          (loop))
+        (if (%cc-tru (%cc-eval (first (rest stmt)) env))
+          (%cc-while-on stmt env (%cc-exec (first (rest (rest stmt))) env))
+          ())
       (if (eq? t (lit do))
-        (let ((loop (fn (self)
-                      (let ((c (%cc-exec (first (rest stmt)) env)))
-                        (if (%cc-ctrl? c (lit break)) ()
-                          (if (if (null? c) #t (%cc-ctrl? c (lit continue)))
-                            (if (%cc-tru
-                                  (%cc-eval (first (rest (rest stmt))) env))
-                              (self) ())
-                            c))))))
-          (loop))
+        (%cc-do-on stmt env (%cc-exec (first (rest stmt)) env))
       (if (eq? t (lit for))
-        (let ((i-n (first (rest stmt))))
-          (def c-n (first (rest (rest stmt))))
-          (def u-n (first (rest (rest (rest stmt)))))
-          (def body (first (rest (rest (rest (rest stmt))))))
-          (def loop
-            (fn (self)
-              (if (if (null? c-n) #t (%cc-tru (%cc-eval c-n env)))
-                (let ((c (%cc-exec body env)))
-                  (if (%cc-ctrl? c (lit break)) ()
-                    (if (if (null? c) #t (%cc-ctrl? c (lit continue)))
-                      (do (if (null? u-n) () (%cc-eval u-n env))
-                          (self))
-                      c)))
-                ())))
+        (let ((i-n (first (rest stmt))) (c-n (first (rest (rest stmt)))))
           (do (if (null? i-n) () (%cc-eval i-n env))
-              (loop)))
+              (if (if (null? c-n) #t (%cc-tru (%cc-eval c-n env)))
+                (%cc-for-on stmt env (%cc-exec (first (rest (rest (rest (rest stmt))))) env))
+                ())))
+      (if (eq? t (lit goto)) (list (lit goto) (first (rest stmt)))
+      (if (eq? t (lit label)) (%cc-exec (first (rest (rest stmt))) env)
       (if (eq? t (lit return))
         (list (lit return)
           (if (null? (first (rest stmt))) 0
@@ -1198,7 +1178,128 @@
             (if (%cc-ctrl? c (lit break)) () c)))
       (if (eq? t (lit break)) (list (lit break))
       (if (eq? t (lit continue)) (list (lit continue))
-        (%cc-oops "unknown statement"))))))))))))))
+        (%cc-oops "unknown statement"))))))))))))))))
+
+; The rest of a loop after a pass over its body answered C: a break ends
+; it, nothing or a continue goes on to the next pass, as the loop's own
+; test and step say, and anything else -- a return, a goto -- leaves it.
+(def %cc-while-on
+  (fn (self stmt env c)
+    (match
+      ((%cc-ctrl? c (lit break)) ())
+      ((if (null? c) #t (%cc-ctrl? c (lit continue)))
+        (if (%cc-tru (%cc-eval (first (rest stmt)) env))
+          (self stmt env (%cc-exec (first (rest (rest stmt))) env))
+          ()))
+      (#t c))))
+
+(def %cc-do-on
+  (fn (self stmt env c)
+    (match
+      ((%cc-ctrl? c (lit break)) ())
+      ((if (null? c) #t (%cc-ctrl? c (lit continue)))
+        (if (%cc-tru (%cc-eval (first (rest (rest stmt))) env))
+          (self stmt env (%cc-exec (first (rest stmt)) env))
+          ()))
+      (#t c))))
+
+(def %cc-for-on
+  (fn (self stmt env c)
+    (def c-n (first (rest (rest stmt))))
+    (def u-n (first (rest (rest (rest stmt)))))
+    (match
+      ((%cc-ctrl? c (lit break)) ())
+      ((if (null? c) #t (%cc-ctrl? c (lit continue)))
+        (do (if (null? u-n) () (%cc-eval u-n env))
+            (if (if (null? c-n) #t (%cc-tru (%cc-eval c-n env)))
+              (self stmt env (%cc-exec (first (rest (rest (rest (rest stmt))))) env))
+              ())))
+      (#t c))))
+
+; --- goto ----------------------------------------------------------------------
+; A goto answers (goto NAME), which passes up out of the statements it is
+; in, as a return does, to the block whose statements hold the label.  That
+; block goes on from the statement holding it, entered at the label: the
+; statements before it in the block are passed over, their declarations
+; bound but not initialized, as C leaves them.  A label behind the goto is
+; gone back to with the block's names as they are.
+
+; does NODE, a statement or a list of them, hold the label NAME at any depth
+(def %cc-has-label?
+  (fn (self node name)
+    (if (not (pair? node)) #f
+      (if (if (eq? (first node) (lit label)) (string=? (first (rest node)) name) #f) #t
+        (let ((go (fn (go xs) (if (pair? xs) (if (self (first xs) name) #t (go (rest xs))) #f))))
+          (go node))))))
+
+; the tail of ITEMS whose first statement holds the label NAME
+(def %cc-label-tail
+  (fn (self items name) (if (%cc-has-label? (first items) name) items (self (rest items) name))))
+
+; STMT, entered at the label NAME inside it: its statements before the
+; label are passed over, and a loop goes on as its own test and step say
+; once the pass that began at the label is done
+(def %cc-exec-seek
+  (fn (self stmt env name)
+    (def t (first stmt))
+    (match
+      ((eq? t (lit label))
+        (if (string=? (first (rest stmt)) name)
+          (%cc-exec (first (rest (rest stmt))) env)
+          (self (first (rest (rest stmt))) env name)))
+      ((eq? t (lit block)) (%cc-exec-items (first (rest stmt)) (first (rest stmt)) env name))
+      ((eq? t (lit if))
+        (if (%cc-has-label? (first (rest (rest stmt))) name)
+          (self (first (rest (rest stmt))) env name)
+          (self (first (rest (rest (rest stmt)))) env name)))
+      ((eq? t (lit while)) (%cc-while-on stmt env (self (first (rest (rest stmt))) env name)))
+      ((eq? t (lit do)) (%cc-do-on stmt env (self (first (rest stmt)) env name)))
+      ((eq? t (lit for))
+        (%cc-for-on stmt env (self (first (rest (rest (rest (rest stmt))))) env name)))
+      ; every clause's statements, as one block
+      ((eq? t (lit switch))
+        (let ((all (let ((go (fn (go cs) (if (null? cs) () (append (rest (first cs)) (go (rest cs)))))))
+                     (go (first (rest (rest stmt)))))))
+          (let ((c (%cc-exec-items all all env name)))
+            (if (%cc-ctrl? c (lit break)) () c))))
+      (#t (%cc-oops "a goto into a statement that holds no label")))))
+
+; A block's statements from ITEMS on, ALL being every one of them.  SEEK,
+; when not (), is a label being gone to, in ITEMS; a goto a statement
+; answers goes on here when its label is one of the block's.
+(def %cc-exec-items
+  (fn (self all items env seek)
+    (if (null? items) ()
+      (let ((item (first items)))
+        (match
+          ((eq? (first item) (lit decl))
+            (self all (rest items) (%cc-declare item env (null? seek)) seek))
+          ((if (null? seek) #f (not (%cc-has-label? item seek)))
+            (self all (rest items) env seek))
+          (#t
+            (let ((c (if (null? seek) (%cc-exec item env) (%cc-exec-seek item env seek))))
+              (match
+                ((null? c) (self all (rest items) env ()))
+                ((not (%cc-ctrl? c (lit goto))) c)
+                ((%cc-has-label? (rest items) (first (rest c)))
+                  (self all (rest items) env (first (rest c))))
+                ((%cc-has-label? all (first (rest c)))
+                  (self all (%cc-label-tail all (first (rest c))) env (first (rest c))))
+                (#t c)))))))))
+
+; ENV with the declaration ITEM's name bound to its storage, initialized
+; when INIT?.  The name is in scope in its own initializer:
+; struct node *n = malloc(sizeof *n);
+(def %cc-declare
+  (fn (_ item env init?)
+    (def name (first (rest item)))
+    (def kind (first (rest (rest item))))
+    (def init (first (rest (rest (rest item)))))
+    (def static? (not (null? (rest (rest (rest (rest item)))))))
+    (def a (if static? (%cc-static-address item kind init env) (%cc-alloca (kind-size kind))))
+    (def inner (pair (pair name (pair a kind)) env))
+    (do (if (if init? (if static? #f (not (null? init))) #f) (%cc-init-into! a kind init inner) ())
+        inner)))
 
 ; a block: declarations extend the env as they pass
 ; A static local's storage, made the first time its declaration is reached
@@ -1223,27 +1324,7 @@
             a)))))
 
 (set! %cc-exec-block
-  (fn (_ blk env0)
-    (def go
-      (fn (self items env)
-        (if (null? items) ()
-          (let ((item (first items)))
-            (if (eq? (first item) (lit decl))
-              (let ((name (first (rest item))))
-                (def kind (first (rest (rest item))))
-                (def init (first (rest (rest (rest item)))))
-                (def static? (not (null? (rest (rest (rest (rest item)))))))
-                (def a (if static? (%cc-static-address item kind init env)
-                         (%cc-alloca (kind-size kind))))
-                ; the name is in scope in its own initializer:
-                ; struct node *n = malloc(sizeof *n);
-                (def inner (pair (pair name (pair a kind)) env))
-                (do (if (if static? #t (null? init)) ()
-                      (%cc-init-into! a kind init inner))
-                    (self (rest items) inner)))
-              (let ((c (%cc-exec item env)))
-                (if (null? c) (self (rest items) env) c)))))))
-    (go (first (rest blk)) env0)))
+  (fn (_ blk env0) (%cc-exec-items (first (rest blk)) (first (rest blk)) env0 ())))
 
 ; --- the program -------------------------------------------------------------
 

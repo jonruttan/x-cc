@@ -70,13 +70,13 @@ Every expectation is an oracle row from /usr/bin/cc.
 
 ## the refusals
 
-### goto stays pending
+### float stays pending
 
 ```cc
-(display (guard (e (do (display "refused: ") (write e) "")) (cc-run "int main() { goto out; out: return 0; }")))
+(display (guard (e (do (display "refused: ") (write e) "")) (cc-run "int main() { float f = 1; return 0; }")))
 ```
 ---
-    refused: #<err:cc cc: parse: not built yet: goto>
+    refused: #<err:cc cc: parse: not built yet: float>
 
 ### an initialized local array
 

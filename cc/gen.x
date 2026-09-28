@@ -2820,7 +2820,53 @@
             (bodies clauses)
             (set! %cc-gen-loops (rest %cc-gen-loops))
             (asm-label! %cc-gen-asm out)))
+        ; every local has its slot for the whole function, so a goto is a
+        ; branch, into a block or out of one
+        ((eq? t (lit goto)) (%cc-gen! (lit b) (label (%cc-gen-label-find! (first (rest node))))))
+        ((eq? t (lit label))
+          (let ((name (first (rest node))))
+            (if (%cc-gen-name-in? name %cc-gen-placed) (%cc-gen-no (string-append "a second label " name)))
+            (set! %cc-gen-placed (pair name %cc-gen-placed))
+            (asm-label! %cc-gen-asm (%cc-gen-label-find! name))
+            (self (first (rest (rest node))))))
         (#t (%cc-gen-no (string-append "the statement " (convert t %string))))))))
+
+; The function's labels, ((NAME . LABEL) ...): a goto branches to its
+; label's, which the first goto or the label itself makes, since a goto can
+; come before its label.  The names of the ones placed so far are in
+; %cc-gen-placed.
+(def %cc-gen-labels ())
+(def %cc-gen-placed ())
+
+(def %cc-gen-name-in?
+  (fn (_ name names)
+    (def go (fn (self ns) (if (null? ns) #f (if (string=? (first ns) name) #t (self (rest ns))))))
+    (go names)))
+
+(def %cc-gen-label-find!
+  (fn (_ name)
+    (def go (fn (self es)
+              (match
+                ((null? es) ())
+                ((string=? (first (first es)) name) (rest (first es)))
+                (#t (self (rest es))))))
+    (def hit (go %cc-gen-labels))
+    (if (not (null? hit)) hit
+      (let ((l (%cc-gen-label)))
+        (do (set! %cc-gen-labels (pair (pair name l) %cc-gen-labels)) l)))))
+
+; every label a goto names was placed; C refuses a goto to a label the
+; function does not have
+(def %cc-gen-labels-placed!
+  (fn (_)
+    (def go (fn (self es)
+              (match
+                ((null? es) ())
+                ((%cc-gen-name-in? (first (first es)) %cc-gen-placed) (self (rest es)))
+                (#t (%cc-gen-no
+                      (string-append "a goto to a label the function does not have: "
+                        (first (first es))))))))
+    (go %cc-gen-labels)))
 
 ; the bytes at P from offset 0 through I, as a list
 (def %cc-gen-read
@@ -2867,6 +2913,7 @@
                           (do (self (list (lit block) (rest (first cs))) aggregates?)
                               (self2 (rest cs)))))))
               (go (first (rest (rest node))))))
+          ((eq? t (lit label)) (self (first (rest (rest node))) aggregates?))
           (#t ()))))))
 
 (def %cc-gen-fun!
@@ -2884,6 +2931,8 @@
     (set! %cc-gen-frame-bytes 0)
     (set! %cc-gen-loops ())
     (set! %cc-gen-rslots ())
+    (set! %cc-gen-labels ())
+    (set! %cc-gen-placed ())
     (set! %cc-gen-epilogue (%cc-gen-label))
     ; The frame, from its base in x19 up: the slot the runtime writes a byte
     ; from; the parameters, the declarations that are not arrays or structs,
@@ -2964,6 +3013,7 @@
     ; main writes the addresses the data's pointers start at
     (if (string=? (first (rest f)) "main") (%cc-gen-fixups!) ())
     (%cc-gen-stmt! body)
+    (%cc-gen-labels-placed!)
     ; falling off the end answers 0, which is what C says of main
     (%cc-gen-const! 0)
     (asm-label! %cc-gen-asm %cc-gen-epilogue)
