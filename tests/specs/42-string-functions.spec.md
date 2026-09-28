@@ -76,13 +76,3 @@ xxx
 ```
 ---
     (7 7)
-
-## the refusals
-
-### strcmp with one argument
-
-```cc
-(write (guard (e (e msg)) (cc-exe-run "#include <string.h>\nint main(void) { return strcmp(\"a\"); }")))
-```
----
-    "cc: compile: not built yet: strcmp with other than two arguments"
