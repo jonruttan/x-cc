@@ -3,7 +3,8 @@
 
 `<ctype.h>`'s classifications and case changes, and `abs`, under `run`
 and compiled.  The classifications -- `isdigit`, `isalpha`, `isalnum`,
-`isspace`, `isupper`, `islower` -- are ranges of codes in one table, which
+`isspace`, `isupper`, `islower`, `isxdigit`, `ispunct`, `isprint`,
+`iscntrl`, `isgraph` -- are ranges of codes in one table, which
 `run` reads and the compiled runtime is written from; each answers 1 or 0.
 `toupper` and `tolower` move a letter thirty-two.  Each case runs the
 program under `run`, then compiled, and shows both statuses, and both
@@ -39,6 +40,19 @@ true, so the programs compare them with 0.
 ```
 ---
     (131 131)
+
+### hex digits, punctuation, printing, control and graphic codes
+
+```cc
+(def src "#include <stdio.h>\n#include <ctype.h>\nint main(void) { const char *s = \"Hex 0x1F, ok!\\t~\"; int x = 0, p = 0, pr = 0, c = 0, g = 0; const char *q; for (q = s; *q; q++) { x += isxdigit(*q) != 0; p += ispunct(*q) != 0; pr += isprint(*q) != 0; c += iscntrl(*q) != 0; g += isgraph(*q) != 0; } printf(\"%d %d %d %d %d %d\\n\", x, p, pr, c, g, iscntrl(127) != 0); return x * 10 + p; }\n")
+(display (list (cc-run src) (cc-exe-run src)))
+```
+---
+```output
+4 3 14 1 12 1
+4 3 14 1 12 1
+(43 43)
+```
 
 ## case and abs
 
