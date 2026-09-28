@@ -113,6 +113,11 @@
 ; convention asks for, and calls the function, whose answer comes back in
 ; x0.  x86-64's indirect call puts x0 in rdi on the way in.
 ;
+; main is handed argc in x0 and argv in x1, as any call's first two
+; arguments: dyld calls a Mach-O's entry as it would main, with the two
+; already there, and the ELF's entry loads them from the stack the kernel
+; starts it on, argc on top and the pointers after it.
+;
 ; x22 gets the address of the data, which the container puts on the page
 ; after the code.  DATAAT is how far that is from the entry's first byte,
 ; which the container works out; the entry is a fixed length per target, so
@@ -136,16 +141,19 @@
                 0xF94002D0 0xD61F0200
                 0xA9BF7BFD 0xAA0003E9 0xA9400520 0xA9410D22 0xA9421524
                 0xA9431D26 0xD63F0100 0xA8C17BFD 0xD65F03C0)))
-      ; eighty-six bytes: lea r13, [rip+35] (the trampoline); lea r14,
-      ; [rip+...] (the data); mov r12, rsp; sub rsp, 4M; call main
-      ; (fifty-seven bytes on); mov rdi, rax; mov r11, [r14]; and rsp, -16;
-      ; call r11 -- exit; then the trampoline: push rbp; mov rbp, rsp;
-      ; and rsp, -16; mov r11, rdi; mov rdi, [r11]; mov rsi, [r11+8];
-      ; mov rdx, [r11+16]; mov rcx, [r11+24]; mov r8, [r11+32];
-      ; mov r9, [r11+40]; xor eax, eax; call r10; mov rsp, rbp; pop rbp; ret
+      ; ninety-five bytes: mov rax, [rsp] (argc); lea rsi, [rsp+8] (argv);
+      ; lea r13, [rip+35] (the trampoline); lea r14, [rip+...] (the data);
+      ; mov r12, rsp; sub rsp, 4M; call main (fifty-seven bytes on);
+      ; mov rdi, rax; mov r11, [r14]; and rsp, -16; call r11 -- exit; then
+      ; the trampoline: push rbp; mov rbp, rsp; and rsp, -16; mov r11, rdi;
+      ; mov rdi, [r11]; mov rsi, [r11+8]; mov rdx, [r11+16];
+      ; mov rcx, [r11+24]; mov r8, [r11+32]; mov r9, [r11+40];
+      ; xor eax, eax; call r10; mov rsp, rbp; pop rbp; ret
       (%cc-gen-cat
-        (list (list 0x4C 0x8D 0x2D) (%cc-gen-le32 35)
-              (list 0x4C 0x8D 0x35) (%cc-gen-le32 (- dataat 14))
+        (list (list 0x48 0x8B 0x04 0x24)
+              (list 0x48 0x8D 0x74 0x24 0x08)
+              (list 0x4C 0x8D 0x2D) (%cc-gen-le32 35)
+              (list 0x4C 0x8D 0x35) (%cc-gen-le32 (- dataat 23))
               (list 0x49 0x89 0xE4)
               (list 0x48 0x81 0xEC) (%cc-gen-le32 %cc-gen-region)
               (list 0xE8) (%cc-gen-le32 57)
@@ -157,7 +165,7 @@
 
 ; how long the entry is; the container lays the code out from here
 (def %cc-gen-entry-len
-  (fn (_ target) (if (eq? target (lit macho-arm64)) 64 86)))
+  (fn (_ target) (if (eq? target (lit macho-arm64)) 64 95)))
 
 ; where the container puts the data, as a distance from the entry's start
 (def %cc-gen-data-at
@@ -2256,7 +2264,10 @@
     (def mains (filter (fn (_ f) (string=? (first (rest f)) "main")) funs))
     (if (null? mains) (%cc-gen-no "a program without main"))
     (def main (first mains))
-    (if (not (null? (first (rest (rest main))))) (%cc-gen-no "parameters to main"))
+    ; main takes nothing, or argc and argv, which the entry hands it
+    (let ((n (length (first (rest (rest main))))))
+      (if (if (= n 0) #f (not (= n 2)))
+        (%cc-gen-no "main with parameters other than argc and argv")))
     (def others (filter (fn (_ f) (not (string=? (first (rest f)) "main"))) funs))
     ; the globals take the front of the data, before a body asks for one
     (set! %cc-gen-globals ())
@@ -2336,14 +2347,24 @@
       (macho-write! path (first image) (rest image) imports)
       (elf-write! path (first image) (rest image) elf-machine-x86-64 imports))))
 
-; compile SRC, run the executable, print what it wrote, answer its status
-(def cc-exe-run
-  (fn (_ src)
+; compile SRC and run the executable with INPUT as its standard input and
+; the rest of ARGV after its name, which is its path; print what it wrote,
+; answer its status.  With INPUT nil, it reads the caller's standard input.
+(def cc-exe-run-with
+  (fn (_ src input argv)
     (def path
       (string-append "/tmp/x-cc-exe-"
         (substring (sha256-hex-n src (byte-len src)) 0 16)))
     (cc-compile src path)
-    (let ((r (proc-capture (list path))))
+    (let ((r (proc-capture
+               (if (null? input)
+                 (pair path (rest argv))
+                 (append (list "/bin/sh" "-c" "i=$1; shift; printf %s \"$i\" | \"$@\""
+                           "sh" input path)
+                   (rest argv))))))
       (do (display (rest r)) (first r)))))
 
-(provide cc/gen cc-compile cc-compile-image cc-exe-run)
+; compile SRC, run the executable, print what it wrote, answer its status
+(def cc-exe-run (fn (_ src) (cc-exe-run-with src () (list "a.out"))))
+
+(provide cc/gen cc-compile cc-compile-image cc-exe-run cc-exe-run-with)

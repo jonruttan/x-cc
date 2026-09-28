@@ -7,7 +7,8 @@
 ; @license MIT No Attribution (MIT-0)
 ;
 ; Comments strip first (string- and char-aware), then the # lines:
-; #include drops (the runtime provides the library the tests use),
+; #include drops (the runtime provides the library the tests use), and
+; one of a standard header defines the few macros programs use with it,
 ; object-like #define records a macro the lexer splices token-wise --
 ; substitution never touches text, so strings are safe by construction.
 ; Function-like macros are collected here as (NAME %fn (PARAMS) . BODY)
@@ -16,8 +17,8 @@
 ; Any other directive refuses loudly.
 (module cc/pp)
 
-(import cc/prims byte-at byte-len filter reverse string-append string-concat
-  string=? substring)
+(import cc/prims append byte-at byte-len filter reverse string-append
+  string-concat string=? substring)
 
 ; comments to spaces; strings and char constants pass untouched
 (def %cc-strip-comments
@@ -100,7 +101,7 @@
     (def dname (substring line d0 d1))
     (def arg (%cc-trim-ws (substring line (skip d1) end)))
     (match
-      ((string=? dname "include") (list (lit include)))
+      ((string=? dname "include") (pair (lit include) arg))
       ((string=? dname "ifdef")   (pair (lit ifdef) arg))
       ((string=? dname "ifndef")  (pair (lit ifndef) arg))
       ((string=? dname "else")    (list (lit else)))
@@ -138,7 +139,7 @@
                 (pair (substring line n0 n1)
                   (substring line (skip n1) end))))))
         (Err raise (lit cc)
-          (string-append "cc: unsupported directive #" dname) ())))))))
+          (string-append "cc: unsupported directive #" dname) ()))))))
 
 (def %cc-trim-ws
   (fn (_ s)
@@ -258,12 +259,42 @@
                     (self (rest ls) macros (rest stack) (pair "" acc)))
                 (if (not on)
                   (self (rest ls) macros stack (pair "" acc))
+                (if (eq? k (lit include))
+                  (self (rest ls) (append (%cc-header-macros (rest m)) macros) stack
+                    (pair "" acc))
                 (if (eq? k (lit define))
                   (self (rest ls) (pair (rest m) macros) stack (pair "" acc))
                 (if (eq? k (lit undef))
                   (self (rest ls) (undef (rest m) macros) stack (pair "" acc))
-                  (self (rest ls) macros stack (pair "" acc)))))))))))))))))
+                  (self (rest ls) macros stack (pair "" acc))))))))))))))))))
     (go lines () () ())))
+
+; The macros a standard header gives that programs use with the runtime's
+; functions: (HEADER (NAME . BODY) ...).  The header itself is dropped, and
+; an #include of one defines these.
+(def %cc-headers
+  (list (list "stdio.h" (pair "EOF" "(-1)") (pair "NULL" "((void *)0)"))
+        (list "stdlib.h" (pair "NULL" "((void *)0)")
+          (pair "EXIT_SUCCESS" "0") (pair "EXIT_FAILURE" "1"))
+        (list "string.h" (pair "NULL" "((void *)0)"))
+        (list "stddef.h" (pair "NULL" "((void *)0)"))))
+
+; the macros #include ARG defines: those of the standard header it names in
+; <...>, none for any other
+(def %cc-header-macros
+  (fn (_ arg)
+    (def n (byte-len arg))
+    (def name
+      (if (if (> n 1) (if (= (byte-at arg 0) 60) (= (byte-at arg (- n 1)) 62) #f) #f)
+        (substring arg 1 (- n 1))
+        ""))
+    (def go
+      (fn (self hs)
+        (match
+          ((null? hs) ())
+          ((string=? (first (first hs)) name) (rest (first hs)))
+          (#t (self (rest hs))))))
+    (go %cc-headers)))
 
 (def %cc-join-nl
   (fn (self ls)

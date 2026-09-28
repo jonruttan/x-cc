@@ -49,6 +49,10 @@ up.  The answer is put in the form of the C type the function's header
 declares.  main's answer goes to the library's `exit`, which writes out
 what the library's streams hold.
 
+main takes argc and argv as the kernel hands them to the entry: dyld
+calls a Mach-O's entry with both in place, and the ELF's entry loads
+them from the stack the kernel starts it on.
+
 A pointer is an eight-byte address: `&` takes one, `*` loads or stores
 through one at the width of what it points at, and `+` and `-` move one
 by whole elements.  An array is its elements end to end, and where it is
@@ -123,8 +127,11 @@ programs have: putchar, puts, printf, sprintf, snprintf, exit, malloc,
 calloc, free, strlen, strcmp, strncmp, strcpy, strncpy, strcat, strchr,
 strrchr, strstr, memcpy, memmove, memset, memcmp, atoi, isdigit,
 isalpha, isalnum, isspace, isupper, islower, isxdigit, ispunct,
-isprint, iscntrl, isgraph, toupper, tolower, abs, labs), object-like
-`#define` spliced token-wise; // and /* */ comments.
+isprint, iscntrl, isgraph, toupper, tolower, abs, labs, getchar, read,
+write; one of a standard header defines `EOF`, `NULL`, `EXIT_SUCCESS`
+and `EXIT_FAILURE`), object-like `#define` spliced token-wise; // and
+/* */ comments.  `x -l cc -- run prog.c ARG ...` hands main the file's
+name and the ARGs as its argv, and fd 0 as its standard input.
 
 Structs, too: `struct S { ... };`, `typedef struct { ... } T;`,
 fields by `.` and `->`, nested structs, arrays of structs, pointers to
