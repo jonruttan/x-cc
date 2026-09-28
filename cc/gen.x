@@ -28,34 +28,30 @@
 ; constants typed by their suffixes and string literals, + - * / %,
 ; & | ^ << >>, the six comparisons, &&, ||, the ternary, the comma,
 ; unary - ~ ! & *, casts, subscripts, `.` and `->`, each in the kind C's
-; usual conversions give it, `putchar`, `puts`, `printf`, `sprintf` and
-; `snprintf` of a literal format with %d %i %u %x %ld %li %lu %lx %c %s
-; and %%, `exit`, `malloc`,
-; `free`, `strlen`, `strcmp`, `strncmp`, `strcpy`, `strncpy`, `strcat`,
-; `strchr`, `memcpy`, `memset`, `memcmp`, `atoi`, `isdigit`, `isalpha`,
-; `isalnum`, `isspace`, `isupper`, `islower`, `toupper`, `tolower`,
-; `abs`, `getchar`, `read` and `write`, unless the program defines its own;
-; main with argc and argv; structs are
-; passed and returned by value.  Everything else refuses by name: floating point,
-; function pointers, and the rest of the runtime.
+; usual conversions give it, and calls into the C library -- six arguments
+; at most, a variadic function's through its v- form; structs are passed
+; and returned by value.  Everything else refuses by name: floating point
+; and function pointers.
 ;
 ; The convention is this compiler's own, since nothing else links with what
 ; it writes: of the first four arguments, the ones that are not structs in
 ; x0, x1, x2 and x8, and the rest -- structs whole -- at the top of the
 ; callee's frame, under the word that says where a struct it answers goes;
 ; the answer in x0, frames off x20 in a region below the machine stack,
-; x19 the frame's base, x21 the runtime helper and x22 the data.
+; x19 the frame's base, x21 the trampoline into the C library and x22 the
+; data.  A call to a function the program does not define goes to the C
+; library, through a slot in the data the loader fills.
 (module cc/gen)
 
 (import x/tool/asm)
 (import x/platform/syscall)
-(import cc/prims append byte-at byte-len convert filter length mem-ref-byte
+(import cc/prims append byte-at byte-len convert filter length map mem-ref-byte
   proc-capture reverse sha256-hex-n string-append string-concat string=?
   substring)
 (import cc/lex cc-lex)
 (import cc/parse cc-parse kind-size kind-align round-up struct-entry)
-(import cc/eval common-c-type ctype-ranges kind-elem library-c-type printf-conversion
-  printf-fit printf-pad promoted-c-type signed? unsigned-divide)
+(import cc/eval common-c-type kind-elem library-c-type library-variadic
+  promoted-c-type signed? unsigned-divide)
 (import cc/macho macho-write! macho-data-at)
 (import cc/elf elf-write! elf-data-at elf-machine-x86-64)
 
@@ -102,15 +98,20 @@
     (| 0x10000000
       (| (<< (& imm 3) 29) (| (<< (& (>> imm 2) 0x7FFFF) 5) rd)))))
 
-; The entry, and the two pieces of runtime compiled code calls: a write and
-; a read.  Neither the system call nor a program-counter-relative address has
-; a portable mnemonic, so both are written out per target.  The entry puts
-; the write helper's address in x21, where nothing the generator emits
-; touches it, and compiled code reaches the helpers through it, the read
-; helper a fixed distance after the write one: fd in x0, the bytes in x1,
-; how many in x2.  Those are already arm64's system-call registers, and
-; x86-64's indirect call marshals x0 and x2 into the two its own convention
-; wants, with x1 already in place.
+; The entry, and the one piece of it compiled code calls: a trampoline into
+; the C library.  Neither is made of portable mnemonics -- the trampoline
+; takes more argument registers than the portable call does -- so both are
+; written out per target.
+;
+; The entry calls main and hands what it answers to the C library's exit,
+; whose slot is the data's first eight bytes, so exit writes out what the
+; library's streams hold.  It puts the trampoline's address in x21, where
+; nothing the generator emits touches it.  Compiled code calls the
+; trampoline with x0 the address of six eight-byte arguments and x8 the
+; function; the trampoline loads the arguments where the C calling
+; convention takes them, gives the stack the sixteen-byte alignment the
+; convention asks for, and calls the function, whose answer comes back in
+; x0.  x86-64's indirect call puts x0 in rdi on the way in.
 ;
 ; main is handed argc in x0 and argv in x1, as any call's first two
 ; arguments: dyld calls a Mach-O's entry as it would main, with the two
@@ -123,62 +124,48 @@
 ; the two instructions that take the address know where they stand.
 (def %cc-gen-entry
   (fn (_ target dataat)
-    (def exit-nr (syscall-id (lit exit)))
-    (def write-nr (syscall-id (lit write)))
-    (def read-nr (syscall-id (lit read)))
     (if (eq? target (lit macho-arm64))
-      ; thirteen words: adr x21, write3; adr x22, the data; mov x20, sp;
-      ; sub sp, #4M; bl main (nine words on); movz x16, #exit; svc #0x80;
-      ; then write3: movz x16, #write; svc #0x80; ret; and read3:
-      ; movz x16, #read; svc #0x80; ret
+      ; sixteen words: adr x21, the trampoline; adr x22, the data;
+      ; mov x20, sp; sub sp, #4M; bl main (twelve words on);
+      ; ldr x16, [x22]; br x16 -- exit, with main's answer in x0; then the
+      ; trampoline: stp x29, x30, [sp, #-16]!; mov x9, x0; ldp x0, x1,
+      ; [x9]; ldp x2, x3, [x9, #16]; ldp x4, x5, [x9, #32]; ldp x6, x7,
+      ; [x9, #48]; blr x8; ldp x29, x30, [sp], #16; ret
       (%cc-gen-cat
-        (list (%cc-gen-le32 (%cc-gen-adr 21 28))
-              (%cc-gen-le32 (%cc-gen-adr 22 (- dataat 4)))
-              (%cc-gen-le32 0x910003F4)
-              (%cc-gen-le32 (| 0xD14003FF (<< (/ %cc-gen-region 4096) 10)))
-              (%cc-gen-le32 0x94000009)
-              (%cc-gen-le32 (| 0xD2800010 (<< exit-nr 5)))
-              (%cc-gen-le32 0xD4001001)
-              (%cc-gen-le32 (| 0xD2800010 (<< write-nr 5)))
-              (%cc-gen-le32 0xD4001001)
-              (%cc-gen-le32 0xD65F03C0)
-              (%cc-gen-le32 (| 0xD2800010 (<< read-nr 5)))
-              (%cc-gen-le32 0xD4001001)
-              (%cc-gen-le32 0xD65F03C0)))
-      ; sixty-four bytes: mov rax, [rsp] (argc); lea rsi, [rsp+8] (argv);
-      ; lea r13, [rip+32] (write3); lea r14, [rip+...] (the data);
-      ; mov r12, rsp; sub rsp, 4M; call main (twenty-six bytes on);
-      ; mov rdi, rax; mov eax, exit; syscall; then write3: mov eax, write;
-      ; syscall; ret; and read3: mov eax, read; syscall; ret
+        (map %cc-gen-le32
+          (list (%cc-gen-adr 21 28)
+                (%cc-gen-adr 22 (- dataat 4))
+                0x910003F4
+                (| 0xD14003FF (<< (/ %cc-gen-region 4096) 10))
+                0x9400000C
+                0xF94002D0 0xD61F0200
+                0xA9BF7BFD 0xAA0003E9 0xA9400520 0xA9410D22 0xA9421524
+                0xA9431D26 0xD63F0100 0xA8C17BFD 0xD65F03C0)))
+      ; ninety-five bytes: mov rax, [rsp] (argc); lea rsi, [rsp+8] (argv);
+      ; lea r13, [rip+35] (the trampoline); lea r14, [rip+...] (the data);
+      ; mov r12, rsp; sub rsp, 4M; call main (fifty-seven bytes on);
+      ; mov rdi, rax; mov r11, [r14]; and rsp, -16; call r11 -- exit; then
+      ; the trampoline: push rbp; mov rbp, rsp; and rsp, -16; mov r11, rdi;
+      ; mov rdi, [r11]; mov rsi, [r11+8]; mov rdx, [r11+16];
+      ; mov rcx, [r11+24]; mov r8, [r11+32]; mov r9, [r11+40];
+      ; xor eax, eax; call r10; mov rsp, rbp; pop rbp; ret
       (%cc-gen-cat
         (list (list 0x48 0x8B 0x04 0x24)
               (list 0x48 0x8D 0x74 0x24 0x08)
-              (list 0x4C 0x8D 0x2D) (%cc-gen-le32 32)
+              (list 0x4C 0x8D 0x2D) (%cc-gen-le32 35)
               (list 0x4C 0x8D 0x35) (%cc-gen-le32 (- dataat 23))
               (list 0x49 0x89 0xE4)
               (list 0x48 0x81 0xEC) (%cc-gen-le32 %cc-gen-region)
-              (list 0xE8) (%cc-gen-le32 26)
-              (list 0x48 0x89 0xC7)
-              (list 0xB8) (%cc-gen-le32 exit-nr)
-              (list 0x0F 0x05)
-              (list 0xB8) (%cc-gen-le32 write-nr)
-              (list 0x0F 0x05 0xC3)
-              (list 0xB8) (%cc-gen-le32 read-nr)
-              (list 0x0F 0x05 0xC3))))))
+              (list 0xE8) (%cc-gen-le32 57)
+              (list 0x48 0x89 0xC7 0x4D 0x8B 0x1E 0x48 0x83 0xE4 0xF0 0x41 0xFF 0xD3)
+              (list 0x55 0x48 0x89 0xE5 0x48 0x83 0xE4 0xF0 0x49 0x89 0xFB
+                    0x49 0x8B 0x3B 0x49 0x8B 0x73 0x08 0x49 0x8B 0x53 0x10
+                    0x49 0x8B 0x4B 0x18 0x4D 0x8B 0x43 0x20 0x4D 0x8B 0x4B 0x28
+                    0x31 0xC0 0x41 0xFF 0xD2 0x48 0x89 0xEC 0x5D 0xC3))))))
 
 ; how long the entry is; the container lays the code out from here
 (def %cc-gen-entry-len
-  (fn (_ target) (if (eq? target (lit macho-arm64)) 52 64)))
-
-; how far after the write helper the read helper starts
-(def %cc-gen-read-after
-  (fn (_ target) (if (eq? target (lit macho-arm64)) 12 8)))
-
-; how far before the write helper the entry's exit starts: the instructions
-; after the call to main, which exit with the status in x0.  exit() branches
-; there from anywhere, since nothing is left to unwind.
-(def %cc-gen-exit-back
-  (fn (_ target) (if (eq? target (lit macho-arm64)) 8 10)))
+  (fn (_ target) (if (eq? target (lit macho-arm64)) 64 95)))
 
 ; where the container puts the data, as a distance from the entry's start
 (def %cc-gen-data-at
@@ -542,23 +529,19 @@
                   (self (rest es))))))
     (go %cc-gen-params)))
 (def %cc-gen-epilogue ())   ; where `return` goes in the function being compiled
-(def %cc-gen-scratch 0)     ; the slot past the named ones, which the runtime writes from
 
-; A function that calls printf has an area past the scratch slot for it:
-; the count of bytes written so far, the cursor into the digits, a slot a
-; conversion keeps a number in across a write, twenty-four bytes the
-; digits are built in -- an unsigned long has twenty -- then one slot for
-; each argument after the format.  It is in the frame, so a printf
-; reached from another's arguments, or from a recursive call, has its own.
-; sprintf and snprintf use it too, their first two slots holding the
-; string's address and the last byte it may take.
-(def %cc-gen-pf 0)          ; where the area starts
-(def %cc-gen-pf-count 0)
-(def %cc-gen-pf-cursor 8)
-(def %cc-gen-pf-held 16)
-(def %cc-gen-pf-end 48)     ; the digits end here, and the arguments start
-(def %cc-gen-pf-string? #f) ; while a sprintf is laid out: its writes fill the string
-(def %cc-gen-sprintf-copy ()) ; the label of sprintf's copy, once one is written
+; A function that calls into the C library has an area in its frame for the
+; calls: six eight-byte arguments, which the trampoline loads where the C
+; calling convention takes them; then x86-64's va_list record, whose
+; offsets say the argument registers are used up; then a slot for each
+; argument a variadic call passes past its fixed ones, which the va_list
+; points at -- directly on arm64 macOS, through the record on x86-64.  The
+; arguments are all evaluated before any goes into the area, so a call
+; among another's arguments does not disturb it.
+(def %cc-gen-ca 0)          ; where the area starts
+(def %cc-gen-ca-record 48)  ; x86-64's va_list record
+(def %cc-gen-ca-vars 72)    ; the variable arguments
+(def %cc-gen-sysv? #f)      ; whether the target takes x86-64's va_list
 
 ; The data a program carries, in the segment the container maps readable and
 ; writable on the page after the code: the globals first, each at the size
@@ -578,13 +561,6 @@
     (let ((off (round-up %cc-gen-databytes align)))
       (do (set! %cc-gen-data (pair (pair off bytes) %cc-gen-data))
           (set! %cc-gen-databytes (+ off (length bytes)))
-          off))))
-
-; room for N bytes in the data, zeros, at a multiple of ALIGN; answers where
-(def %cc-gen-data-room!
-  (fn (_ n align)
-    (let ((off (round-up %cc-gen-databytes align)))
-      (do (set! %cc-gen-databytes (+ off n))
           off))))
 
 (def %cc-gen-string!
@@ -1021,12 +997,6 @@
 ; The two backends spell the call apart -- arm64 `bl`, x86-64 `call` -- where
 ; they share `b` for the plain branch.
 (def %cc-gen-callop ())
-
-(def %cc-gen-exit-at 0)     ; the entry's exit, this far before x21's helper
-(def %cc-gen-read-at 0)     ; the entry's read helper, this far after x21's
-
-(def %cc-gen-heap-bytes 0)  ; the heap the executable maps past the data
-(def %cc-gen-heap-size 67108864)   ; sixty-four megabytes of address space
 
 (def %cc-gen-find
   (fn (_ name)
@@ -1517,726 +1487,104 @@
         (%cc-gen-store! at k)
         (if after () (%cc-gen! (lit mov) x0 x8)))))
 
-; A call: to one of the runtime's functions the program does not define
-; itself, to one of the program's own, or to a piece of the runtime the
-; generator writes out where the call is (putchar, puts, printf, sprintf,
-; snprintf, exit, free).  The answer comes back in x0.
+; A call: to one of the program's own functions, or else into the C
+; library.  The answer comes back in x0.
 (def %cc-gen-call!
   (fn (_ node)
     (def name (first (rest node)))
     (def args (first (rest (rest node))))
-    (def entry (%cc-gen-runtime-find name))
-    (match
-      ((not (null? entry)) (%cc-gen-runtime-call! node entry))
-      ((not (null? (%cc-gen-fun-find name))) (%cc-gen-call-fun! node))
-      ; calloc is malloc of the product: the heap is zeros where nothing has
-      ; been, and nothing is given back
-      ((string=? name "calloc")
-        (do (if (not (null? (%cc-gen-fun-find "malloc")))
-              (%cc-gen-no "calloc beside a malloc of the program's own"))
-            (%cc-gen-call!
-              (list (lit call) "malloc"
-                (list (list (lit bin) "*" (first args) (first (rest args))))))))
-      ((string=? name "putchar") (%cc-gen-putchar! args))
-      ((string=? name "puts") (%cc-gen-puts! args))
-      ((string=? name "printf") (%cc-gen-printf! name args))
-      ((string=? name "sprintf") (%cc-gen-printf! name args))
-      ((string=? name "snprintf") (%cc-gen-printf! name args))
-      ((string=? name "exit") (%cc-gen-exit! args))
-      ((string=? name "free") (%cc-gen-free! args))
-      (#t (%cc-gen-call-fun! node)))))
+    (if (null? (%cc-gen-fun-find name))
+      (%cc-gen-libc-call! name args)
+      (%cc-gen-call-fun! node))))
 
-; the runtime function's entry (%cc-gen-runtime) for NAME, unless the
-; program defines one of that name; nil otherwise
-(def %cc-gen-runtime-find
+(def %cc-gen-imports ())    ; ((name . offset) ...), the C library's functions called
+
+; the offset in the data of the slot the loader fills with the C library's
+; function NAME, taken the first time a call names it
+(def %cc-gen-import-slot
   (fn (_ name)
     (def go (fn (self es)
               (match
                 ((null? es) ())
-                ((string=? (first (first es)) name) (first es))
+                ((string=? (first (first es)) name) (rest (first es)))
                 (#t (self (rest es))))))
-    (go %cc-gen-runtime-live)))
+    (def hit (go %cc-gen-imports))
+    (if (not (null? hit)) hit
+      (let ((off (%cc-gen-data! (list 0 0 0 0 0 0 0 0) 8)))
+        (do (set! %cc-gen-imports (pair (pair name off) %cc-gen-imports))
+            off)))))
 
-; A call to one of the runtime's functions: the first makes its label, and
-; each is a call like any other (%cc-gen-call-fun!).
-(def %cc-gen-runtime-call!
-  (fn (_ node entry)
-    (def name (first entry))
-    (def n (first (rest entry)))
-    (if (not (= (length (first (rest (rest node)))) n))
-      (%cc-gen-no
-        (string-append name " with other than "
-          (match
-            ((= n 0) "no arguments")
-            ((= n 1) "one argument")
-            ((= n 2) "two arguments")
-            (#t "three arguments")))))
-    (if (null? (%cc-gen-fun-find name))
-      (let ((l (%cc-gen-label)))
-        (do (set! %cc-gen-funs (pair (pair name l) %cc-gen-funs))
-            (set! %cc-gen-runtime-called (pair (pair entry l) %cc-gen-runtime-called))))
-      ())
-    (%cc-gen-call-fun! node)))
+; whether the C library has a function NAME: asked of the library this
+; process has, which is the one the program will load
+(def %cc-gen-libc ())
+(def %cc-gen-libc-has?
+  (fn (_ name)
+    (if (null? %cc-gen-libc) (set! %cc-gen-libc ((prim-ref (lit ffi) (lit dlopen)) () 1)) ())
+    (not (null? ((prim-ref (lit ffi) (lit dlsym)) %cc-gen-libc name)))))
 
-; free: the heap is only ever taken from, so nothing goes back; the
-; argument is still worked out, for whatever else it does
-(def %cc-gen-free!
-  (fn (_ args)
-    (if (not (= (length args) 1))
-      (%cc-gen-no "free with other than one argument"))
-    (%cc-gen-expr! (first args))))
+; (V-NAME FIXED) for a variadic function of the C library, else nil
+(def %cc-gen-variadic
+  (fn (_ name)
+    (def go (fn (self es)
+              (match
+                ((null? es) ())
+                ((string=? (first (first es)) name) (rest (first es)))
+                (#t (self (rest es))))))
+    (go library-variadic)))
 
-; The runtime's malloc, written after the program, when the data's size is
-; final.  The heap follows the data at its next sixteen-byte boundary, and
-; the kernel maps it zero-filled; eight bytes at the data's end count what
-; is taken.  A block is the size asked for, rounded up to sixteen; a size
-; past the heap's, a negative one (a size_t past 2^63), and one the heap has
-; no room left for answer the null pointer.  x86-64 spells a three-operand
-; op as a move and a two-operand one, so no destination here is also its
-; second source.
-(def %cc-gen-malloc-body!
-  (fn (_)
-    (def taken (%cc-gen-data! (list 0 0 0 0 0 0 0 0) 8))
-    (def base (round-up %cc-gen-databytes 16))
-    (def full (%cc-gen-label))
-    (set! %cc-gen-heap-bytes %cc-gen-heap-size)
-    (%cc-gen! (lit cmp) x0 (imm 0))
-    (%cc-gen! (lit b/lt) (label full))
-    (asm-load-imm64! %cc-gen-asm x2 %cc-gen-heap-size)
-    (%cc-gen! (lit cmp) x0 x2)
-    (%cc-gen! (lit b/gt) (label full))
-    ; x0 = the size rounded up to sixteen
-    (%cc-gen! (lit add) x0 x0 (imm 15))
-    (%cc-gen! (lit mov) x2 (imm 4))
-    (%cc-gen! (lit lsrv) x0 x0 x2)
-    (%cc-gen! (lit lslv) x0 x0 x2)
-    ; x8 = where the count is, x1 = the count, x0 = the count with this block
-    (asm-load-imm64! %cc-gen-asm x8 taken)
-    (%cc-gen! (lit add) x8 x8 x22)
-    (%cc-gen! (lit ldr) x1 (mem x8 0))
-    (%cc-gen! (lit add) x0 x0 x1)
-    (asm-load-imm64! %cc-gen-asm x2 %cc-gen-heap-size)
-    (%cc-gen! (lit cmp) x0 x2)
-    (%cc-gen! (lit b/gt) (label full))
-    (%cc-gen! (lit str) x0 (mem x8 0))
-    ; the block: the heap's start, past what was taken before
-    (asm-load-imm64! %cc-gen-asm x0 base)
-    (%cc-gen! (lit add) x0 x0 x22)
-    (%cc-gen! (lit add) x0 x0 x1)
-    (%cc-gen! (lit ret))
-    (asm-label! %cc-gen-asm full)
-    (%cc-gen! (lit mov) x0 (imm 0))
-    (%cc-gen! (lit ret))))
-
-; strlen: the bytes before the NUL at x0
-(def %cc-gen-strlen-body!
-  (fn (_)
-    (def next (%cc-gen-label))
-    (def done (%cc-gen-label))
-    (%cc-gen! (lit mov) x1 x0)
-    (asm-label! %cc-gen-asm next)
-    (%cc-gen! (lit ldrb) x2 (mem x0 0))
-    (%cc-gen! (lit cmp) x2 (imm 0))
-    (%cc-gen! (lit b/eq) (label done))
-    (%cc-gen! (lit add) x0 x0 (imm 1))
-    (%cc-gen! (lit b) (label next))
-    (asm-label! %cc-gen-asm done)
-    (%cc-gen! (lit sub) x0 x0 x1)
-    (%cc-gen! (lit ret))))
-
-; strcmp: the first difference between the strings at x0 and x1, each byte
-; read as an unsigned char; 0 when they are the same
-(def %cc-gen-strcmp-body!
-  (fn (_)
-    (def next (%cc-gen-label))
-    (def differ (%cc-gen-label))
-    (def same (%cc-gen-label))
-    (asm-label! %cc-gen-asm next)
-    (%cc-gen! (lit ldrb) x2 (mem x0 0))
-    (%cc-gen! (lit ldrb) x8 (mem x1 0))
-    (%cc-gen! (lit cmp) x2 x8)
-    (%cc-gen! (lit b/ne) (label differ))
-    (%cc-gen! (lit cmp) x2 (imm 0))
-    (%cc-gen! (lit b/eq) (label same))
-    (%cc-gen! (lit add) x0 x0 (imm 1))
-    (%cc-gen! (lit add) x1 x1 (imm 1))
-    (%cc-gen! (lit b) (label next))
-    (asm-label! %cc-gen-asm differ)
-    (%cc-gen! (lit sub) x2 x2 x8)
-    (%cc-gen! (lit mov) x0 x2)
-    (%cc-gen! (lit ret))
-    (asm-label! %cc-gen-asm same)
-    (%cc-gen! (lit mov) x0 (imm 0))
-    (%cc-gen! (lit ret))))
-
-; strcpy: the string at x1, its NUL included, to x0; answers x0
-(def %cc-gen-strcpy-body!
-  (fn (_)
-    (def next (%cc-gen-label))
-    (def done (%cc-gen-label))
-    (%cc-gen! (lit mov) x8 x0)
-    (asm-label! %cc-gen-asm next)
-    (%cc-gen! (lit ldrb) x2 (mem x1 0))
-    (%cc-gen! (lit strb) x2 (mem x0 0))
-    (%cc-gen! (lit cmp) x2 (imm 0))
-    (%cc-gen! (lit b/eq) (label done))
-    (%cc-gen! (lit add) x0 x0 (imm 1))
-    (%cc-gen! (lit add) x1 x1 (imm 1))
-    (%cc-gen! (lit b) (label next))
-    (asm-label! %cc-gen-asm done)
-    (%cc-gen! (lit mov) x0 x8)
-    (%cc-gen! (lit ret))))
-
-; memcpy: x2 bytes from x1 to x0, a byte at a time; answers x0, which
-; waits on the stack since the four registers are all in use
-(def %cc-gen-memcpy-body!
-  (fn (_)
-    (def next (%cc-gen-label))
-    (def done (%cc-gen-label))
-    (asm-push! %cc-gen-asm x0)
-    (asm-label! %cc-gen-asm next)
-    (%cc-gen! (lit cmp) x2 (imm 0))
-    (%cc-gen! (lit b/eq) (label done))
-    (%cc-gen! (lit ldrb) x8 (mem x1 0))
-    (%cc-gen! (lit strb) x8 (mem x0 0))
-    (%cc-gen! (lit add) x0 x0 (imm 1))
-    (%cc-gen! (lit add) x1 x1 (imm 1))
-    (%cc-gen! (lit sub) x2 x2 (imm 1))
-    (%cc-gen! (lit b) (label next))
-    (asm-label! %cc-gen-asm done)
-    (asm-pop! %cc-gen-asm x0)
-    (%cc-gen! (lit ret))))
-
-; memmove: x2 bytes from x1 to x0, from the end back when x0 is past x1, so
-; an overlap copies what was there; answers x0
-(def %cc-gen-memmove-body!
-  (fn (_)
-    (def back (%cc-gen-label))
-    (def fore (%cc-gen-label))
-    (def done (%cc-gen-label))
-    (asm-push! %cc-gen-asm x0)
-    (%cc-gen! (lit cmp) x0 x1)
-    (%cc-gen! (lit b/le) (label fore))
-    (%cc-gen! (lit add) x0 x0 x2)
-    (%cc-gen! (lit add) x1 x1 x2)
-    (asm-label! %cc-gen-asm back)
-    (%cc-gen! (lit cmp) x2 (imm 0))
-    (%cc-gen! (lit b/eq) (label done))
-    (%cc-gen! (lit sub) x0 x0 (imm 1))
-    (%cc-gen! (lit sub) x1 x1 (imm 1))
-    (%cc-gen! (lit ldrb) x8 (mem x1 0))
-    (%cc-gen! (lit strb) x8 (mem x0 0))
-    (%cc-gen! (lit sub) x2 x2 (imm 1))
-    (%cc-gen! (lit b) (label back))
-    (asm-label! %cc-gen-asm fore)
-    (%cc-gen! (lit cmp) x2 (imm 0))
-    (%cc-gen! (lit b/eq) (label done))
-    (%cc-gen! (lit ldrb) x8 (mem x1 0))
-    (%cc-gen! (lit strb) x8 (mem x0 0))
-    (%cc-gen! (lit add) x0 x0 (imm 1))
-    (%cc-gen! (lit add) x1 x1 (imm 1))
-    (%cc-gen! (lit sub) x2 x2 (imm 1))
-    (%cc-gen! (lit b) (label fore))
-    (asm-label! %cc-gen-asm done)
-    (asm-pop! %cc-gen-asm x0)
-    (%cc-gen! (lit ret))))
-
-; memset: x2 bytes at x0, each the low byte of x1; answers x0
-(def %cc-gen-memset-body!
-  (fn (_)
-    (def next (%cc-gen-label))
-    (def done (%cc-gen-label))
-    (asm-push! %cc-gen-asm x0)
-    (asm-label! %cc-gen-asm next)
-    (%cc-gen! (lit cmp) x2 (imm 0))
-    (%cc-gen! (lit b/eq) (label done))
-    (%cc-gen! (lit strb) x1 (mem x0 0))
-    (%cc-gen! (lit add) x0 x0 (imm 1))
-    (%cc-gen! (lit sub) x2 x2 (imm 1))
-    (%cc-gen! (lit b) (label next))
-    (asm-label! %cc-gen-asm done)
-    (asm-pop! %cc-gen-asm x0)
-    (%cc-gen! (lit ret))))
-
-; strcat: the string at x1, its NUL included, onto the end of the one at
-; x0; answers x0
-(def %cc-gen-strcat-body!
-  (fn (_)
-    (def seek (%cc-gen-label))
-    (def copy (%cc-gen-label))
-    (def done (%cc-gen-label))
-    (%cc-gen! (lit mov) x8 x0)
-    (asm-label! %cc-gen-asm seek)
-    (%cc-gen! (lit ldrb) x2 (mem x0 0))
-    (%cc-gen! (lit cmp) x2 (imm 0))
-    (%cc-gen! (lit b/eq) (label copy))
-    (%cc-gen! (lit add) x0 x0 (imm 1))
-    (%cc-gen! (lit b) (label seek))
-    (asm-label! %cc-gen-asm copy)
-    (%cc-gen! (lit ldrb) x2 (mem x1 0))
-    (%cc-gen! (lit strb) x2 (mem x0 0))
-    (%cc-gen! (lit cmp) x2 (imm 0))
-    (%cc-gen! (lit b/eq) (label done))
-    (%cc-gen! (lit add) x0 x0 (imm 1))
-    (%cc-gen! (lit add) x1 x1 (imm 1))
-    (%cc-gen! (lit b) (label copy))
-    (asm-label! %cc-gen-asm done)
-    (%cc-gen! (lit mov) x0 x8)
-    (%cc-gen! (lit ret))))
-
-; strncmp, NUL? true, and memcmp: the first difference among the x2 bytes
-; at x0 and x1, each read as an unsigned char, stopping at a NUL for
-; strncmp; 0 when there is none.  Two bytes, two addresses and the count
-; are one more than the registers, so the count waits in a frame of its
-; own, taken off x20 as a function's is.
-(def %cc-gen-compare-body!
-  (fn (_ nul?)
-    (def next (%cc-gen-label))
-    (def differ (%cc-gen-label))
-    (def same (%cc-gen-label))
-    (def out (%cc-gen-label))
-    (%cc-gen! (lit sub) x20 x20 (imm 16))
-    (%cc-gen! (lit str) x2 (mem x20 0))
-    (asm-label! %cc-gen-asm next)
-    (%cc-gen! (lit ldr) x2 (mem x20 0))
-    (%cc-gen! (lit cmp) x2 (imm 0))
-    (%cc-gen! (lit b/eq) (label same))
-    (%cc-gen! (lit sub) x2 x2 (imm 1))
-    (%cc-gen! (lit str) x2 (mem x20 0))
-    (%cc-gen! (lit ldrb) x2 (mem x0 0))
-    (%cc-gen! (lit ldrb) x8 (mem x1 0))
-    (%cc-gen! (lit cmp) x2 x8)
-    (%cc-gen! (lit b/ne) (label differ))
-    (if nul?
-      (do (%cc-gen! (lit cmp) x2 (imm 0))
-          (%cc-gen! (lit b/eq) (label same)))
-      ())
-    (%cc-gen! (lit add) x0 x0 (imm 1))
-    (%cc-gen! (lit add) x1 x1 (imm 1))
-    (%cc-gen! (lit b) (label next))
-    (asm-label! %cc-gen-asm differ)
-    (%cc-gen! (lit sub) x2 x2 x8)
-    (%cc-gen! (lit mov) x0 x2)
-    (%cc-gen! (lit b) (label out))
-    (asm-label! %cc-gen-asm same)
-    (%cc-gen! (lit mov) x0 (imm 0))
-    (asm-label! %cc-gen-asm out)
-    (%cc-gen! (lit add) x20 x20 (imm 16))
-    (%cc-gen! (lit ret))))
-
-; strncpy: x2 bytes to x0 -- the string at x1, then NULs to the end of the
-; count; answers x0, which waits in a frame of its own
-(def %cc-gen-strncpy-body!
-  (fn (_)
-    (def next (%cc-gen-label))
-    (def pad (%cc-gen-label))
-    (def done (%cc-gen-label))
-    (%cc-gen! (lit sub) x20 x20 (imm 16))
-    (%cc-gen! (lit str) x0 (mem x20 0))
-    (asm-label! %cc-gen-asm next)
-    (%cc-gen! (lit cmp) x2 (imm 0))
-    (%cc-gen! (lit b/eq) (label done))
-    (%cc-gen! (lit ldrb) x8 (mem x1 0))
-    (%cc-gen! (lit strb) x8 (mem x0 0))
-    (%cc-gen! (lit add) x0 x0 (imm 1))
-    (%cc-gen! (lit sub) x2 x2 (imm 1))
-    (%cc-gen! (lit cmp) x8 (imm 0))
-    (%cc-gen! (lit b/eq) (label pad))
-    (%cc-gen! (lit add) x1 x1 (imm 1))
-    (%cc-gen! (lit b) (label next))
-    ; x8 is the NUL just copied
-    (asm-label! %cc-gen-asm pad)
-    (%cc-gen! (lit cmp) x2 (imm 0))
-    (%cc-gen! (lit b/eq) (label done))
-    (%cc-gen! (lit strb) x8 (mem x0 0))
-    (%cc-gen! (lit add) x0 x0 (imm 1))
-    (%cc-gen! (lit sub) x2 x2 (imm 1))
-    (%cc-gen! (lit b) (label pad))
-    (asm-label! %cc-gen-asm done)
-    (%cc-gen! (lit ldr) x0 (mem x20 0))
-    (%cc-gen! (lit add) x20 x20 (imm 16))
-    (%cc-gen! (lit ret))))
-
-; strchr: the address of the first x1, read as an unsigned char, in the
-; string at x0 -- its NUL included -- or 0
-(def %cc-gen-strchr-body!
-  (fn (_)
-    (def next (%cc-gen-label))
-    (def found (%cc-gen-label))
-    (def none (%cc-gen-label))
-    (%cc-gen! (lit mov) x2 (imm 255))
-    (%cc-gen! (lit and) x1 x1 x2)
-    (asm-label! %cc-gen-asm next)
-    (%cc-gen! (lit ldrb) x2 (mem x0 0))
-    (%cc-gen! (lit cmp) x2 x1)
-    (%cc-gen! (lit b/eq) (label found))
-    (%cc-gen! (lit cmp) x2 (imm 0))
-    (%cc-gen! (lit b/eq) (label none))
-    (%cc-gen! (lit add) x0 x0 (imm 1))
-    (%cc-gen! (lit b) (label next))
-    (asm-label! %cc-gen-asm none)
-    (%cc-gen! (lit mov) x0 (imm 0))
-    (asm-label! %cc-gen-asm found)
-    (%cc-gen! (lit ret))))
-
-; strrchr: the address of the last x1, read as an unsigned char, in the
-; string at x0 -- its NUL included -- or 0; the last one seen is in x8
-(def %cc-gen-strrchr-body!
-  (fn (_)
-    (def next (%cc-gen-label))
-    (def miss (%cc-gen-label))
-    (def done (%cc-gen-label))
-    (%cc-gen! (lit mov) x2 (imm 255))
-    (%cc-gen! (lit and) x1 x1 x2)
-    (%cc-gen! (lit mov) x8 (imm 0))
-    (asm-label! %cc-gen-asm next)
-    (%cc-gen! (lit ldrb) x2 (mem x0 0))
-    (%cc-gen! (lit cmp) x2 x1)
-    (%cc-gen! (lit b/ne) (label miss))
-    (%cc-gen! (lit mov) x8 x0)
-    (asm-label! %cc-gen-asm miss)
-    (%cc-gen! (lit cmp) x2 (imm 0))
-    (%cc-gen! (lit b/eq) (label done))
-    (%cc-gen! (lit add) x0 x0 (imm 1))
-    (%cc-gen! (lit b) (label next))
-    (asm-label! %cc-gen-asm done)
-    (%cc-gen! (lit mov) x0 x8)
-    (%cc-gen! (lit ret))))
-
-; strstr: the address of the first place the string at x1 starts in the
-; one at x0, or 0; an empty one starts at x0.  Where the search is and the
-; string sought wait in a frame of their own while x0 and x1 walk the two
-; and x2 and x8 hold their bytes.
-(def %cc-gen-strstr-body!
-  (fn (_)
-    (def outer (%cc-gen-label))
-    (def inner (%cc-gen-label))
-    (def next (%cc-gen-label))
-    (def found (%cc-gen-label))
-    (def none (%cc-gen-label))
-    (def out (%cc-gen-label))
-    (%cc-gen! (lit sub) x20 x20 (imm 16))
-    (%cc-gen! (lit str) x0 (mem x20 0))
-    (%cc-gen! (lit str) x1 (mem x20 8))
-    (asm-label! %cc-gen-asm outer)
-    (%cc-gen! (lit ldr) x0 (mem x20 0))
-    (%cc-gen! (lit ldr) x1 (mem x20 8))
-    (asm-label! %cc-gen-asm inner)
-    (%cc-gen! (lit ldrb) x8 (mem x1 0))
-    (%cc-gen! (lit cmp) x8 (imm 0))
-    (%cc-gen! (lit b/eq) (label found))
-    (%cc-gen! (lit ldrb) x2 (mem x0 0))
-    ; the string searched ended first: it holds no more places to start
-    (%cc-gen! (lit cmp) x2 (imm 0))
-    (%cc-gen! (lit b/eq) (label none))
-    (%cc-gen! (lit cmp) x2 x8)
-    (%cc-gen! (lit b/ne) (label next))
-    (%cc-gen! (lit add) x0 x0 (imm 1))
-    (%cc-gen! (lit add) x1 x1 (imm 1))
-    (%cc-gen! (lit b) (label inner))
-    (asm-label! %cc-gen-asm next)
-    (%cc-gen! (lit ldr) x0 (mem x20 0))
-    (%cc-gen! (lit add) x0 x0 (imm 1))
-    (%cc-gen! (lit str) x0 (mem x20 0))
-    (%cc-gen! (lit b) (label outer))
-    (asm-label! %cc-gen-asm found)
-    (%cc-gen! (lit ldr) x0 (mem x20 0))
-    (%cc-gen! (lit b) (label out))
-    (asm-label! %cc-gen-asm none)
-    (%cc-gen! (lit mov) x0 (imm 0))
-    (asm-label! %cc-gen-asm out)
-    (%cc-gen! (lit add) x20 x20 (imm 16))
-    (%cc-gen! (lit ret))))
-
-; atoi: the int the digits at x0 spell, after spaces and a sign; the sign
-; waits in a frame of its own while x1 gathers the digits
-(def %cc-gen-atoi-body!
-  (fn (_)
-    (def skip (%cc-gen-label))
-    (def over (%cc-gen-label))
-    (def sign (%cc-gen-label))
-    (def plus (%cc-gen-label))
-    (def digits (%cc-gen-label))
-    (def next (%cc-gen-label))
-    (def end (%cc-gen-label))
-    (def positive (%cc-gen-label))
-    (%cc-gen! (lit sub) x20 x20 (imm 16))
-    (asm-label! %cc-gen-asm skip)
-    (%cc-gen! (lit ldrb) x2 (mem x0 0))
-    (%cc-gen! (lit cmp) x2 (imm 32))
-    (%cc-gen! (lit b/eq) (label over))
-    (%cc-gen! (lit cmp) x2 (imm 9))
-    (%cc-gen! (lit b/lt) (label sign))
-    (%cc-gen! (lit cmp) x2 (imm 13))
-    (%cc-gen! (lit b/gt) (label sign))
-    (asm-label! %cc-gen-asm over)
-    (%cc-gen! (lit add) x0 x0 (imm 1))
-    (%cc-gen! (lit b) (label skip))
-    ; x8 = 1 for a minus sign, else 0
-    (asm-label! %cc-gen-asm sign)
-    (%cc-gen! (lit mov) x8 (imm 0))
-    (%cc-gen! (lit cmp) x2 (imm 45))
-    (%cc-gen! (lit b/ne) (label plus))
-    (%cc-gen! (lit mov) x8 (imm 1))
-    (%cc-gen! (lit add) x0 x0 (imm 1))
-    (%cc-gen! (lit b) (label digits))
-    (asm-label! %cc-gen-asm plus)
-    (%cc-gen! (lit cmp) x2 (imm 43))
-    (%cc-gen! (lit b/ne) (label digits))
-    (%cc-gen! (lit add) x0 x0 (imm 1))
-    (asm-label! %cc-gen-asm digits)
-    (%cc-gen! (lit str) x8 (mem x20 0))
-    (%cc-gen! (lit mov) x1 (imm 0))
-    (asm-label! %cc-gen-asm next)
-    (%cc-gen! (lit ldrb) x2 (mem x0 0))
-    (%cc-gen! (lit cmp) x2 (imm 48))
-    (%cc-gen! (lit b/lt) (label end))
-    (%cc-gen! (lit cmp) x2 (imm 57))
-    (%cc-gen! (lit b/gt) (label end))
-    (%cc-gen! (lit mov) x8 (imm 10))
-    (%cc-gen! (lit mul) x1 x1 x8)
-    (%cc-gen! (lit sub) x2 x2 (imm 48))
-    (%cc-gen! (lit add) x1 x1 x2)
-    (%cc-gen! (lit add) x0 x0 (imm 1))
-    (%cc-gen! (lit b) (label next))
-    (asm-label! %cc-gen-asm end)
-    (%cc-gen! (lit ldr) x8 (mem x20 0))
-    (%cc-gen! (lit cmp) x8 (imm 0))
-    (%cc-gen! (lit b/eq) (label positive))
-    (%cc-gen! (lit sub) x1 xzr x1)
-    (asm-label! %cc-gen-asm positive)
-    (%cc-gen! (lit mov) x0 x1)
-    (%cc-gen! (lit add) x20 x20 (imm 16))
-    (%cc-gen! (lit ret))))
-
-; x0 = 1 if x0 lies in one of RANGES, ((LOW . HIGH) ...), else 0: one of
-; <ctype.h>'s classifications (ctype-ranges)
-(def %cc-gen-ranges-body!
-  (fn (_ ranges)
-    (def yes (%cc-gen-label))
-    (def go
-      (fn (self rs)
-        (if (null? rs) ()
-          (let ((next (%cc-gen-label)))
-            (do (%cc-gen! (lit cmp) x0 (imm (first (first rs))))
-                (%cc-gen! (lit b/lt) (label next))
-                (%cc-gen! (lit cmp) x0 (imm (rest (first rs))))
-                (%cc-gen! (lit b/le) (label yes))
-                (asm-label! %cc-gen-asm next)
-                (self (rest rs)))))))
-    (go ranges)
-    (%cc-gen! (lit mov) x0 (imm 0))
-    (%cc-gen! (lit ret))
-    (asm-label! %cc-gen-asm yes)
-    (%cc-gen! (lit mov) x0 (imm 1))
-    (%cc-gen! (lit ret))))
-
-; x0 moved thirty-two by OP when it lies in LOW..HIGH: toupper and tolower
-(def %cc-gen-case-body!
-  (fn (_ low high op)
-    (def same (%cc-gen-label))
-    (%cc-gen! (lit cmp) x0 (imm low))
-    (%cc-gen! (lit b/lt) (label same))
-    (%cc-gen! (lit cmp) x0 (imm high))
-    (%cc-gen! (lit b/gt) (label same))
-    (%cc-gen! op x0 x0 (imm 32))
-    (asm-label! %cc-gen-asm same)
-    (%cc-gen! (lit ret))))
-
-; abs: x0, negated when it is below zero
-(def %cc-gen-abs-body!
-  (fn (_)
-    (def done (%cc-gen-label))
-    (%cc-gen! (lit cmp) x0 (imm 0))
-    (%cc-gen! (lit b/ge) (label done))
-    (%cc-gen! (lit sub) x0 xzr x0)
-    (asm-label! %cc-gen-asm done)
-    (%cc-gen! (lit ret))))
-
-; read and write: a call to the helper the entry wrote for the system call,
-; OFF bytes past the write helper, with the three arguments already where
-; it takes them.  The link register waits on the stack across the call.
-(def %cc-gen-helper-body!
-  (fn (_ off)
-    (do (if (null? %cc-gen-link) () (asm-push! %cc-gen-asm %cc-gen-link))
-        (if (= off 0)
-          (%cc-gen! (lit blr) x21)
-          (do (%cc-gen! (lit add) x8 x21 (imm off))
-              (%cc-gen! (lit blr) x8)))
-        (if (null? %cc-gen-link) () (asm-pop! %cc-gen-asm %cc-gen-link))
-        (%cc-gen! (lit ret)))))
-
-; getchar: the next byte of standard input, as an unsigned char, or -1 once
-; a read gives nothing.  The bytes come through a buffer in the data, which
-; a read of up to 4096 of them refills when the ones in it are used: where
-; the next one is and how many there are, a word each, then the buffer.
-(def %cc-gen-getchar-body!
-  (fn (_)
-    (def at (%cc-gen-data-room! 4112 16))
-    (def have (%cc-gen-label))
-    (def none (%cc-gen-label))
-    (asm-load-imm64! %cc-gen-asm x8 at)
-    (%cc-gen! (lit add) x8 x8 x22)
-    (%cc-gen! (lit ldr) x0 (mem x8 0))
-    (%cc-gen! (lit ldr) x1 (mem x8 8))
-    (%cc-gen! (lit cmp) x0 x1)
-    (%cc-gen! (lit b/lt) (label have))
-    ; used up: a read into the buffer, with the link register and x8 kept
-    ; across it
-    (if (null? %cc-gen-link) () (asm-push! %cc-gen-asm %cc-gen-link))
-    (asm-push! %cc-gen-asm x8)
-    (%cc-gen! (lit mov) x0 (imm 0))
-    (%cc-gen! (lit add) x1 x8 (imm 16))
-    (%cc-gen! (lit mov) x2 (imm 4096))
-    (%cc-gen! (lit add) x8 x21 (imm %cc-gen-read-at))
-    (%cc-gen! (lit blr) x8)
-    (asm-pop! %cc-gen-asm x8)
-    (if (null? %cc-gen-link) () (asm-pop! %cc-gen-asm %cc-gen-link))
-    (%cc-gen! (lit cmp) x0 (imm 0))
-    (%cc-gen! (lit b/le) (label none))
-    (%cc-gen! (lit str) x0 (mem x8 8))
-    (%cc-gen! (lit mov) x0 (imm 0))
-    ; x0 is where the next byte is
-    (asm-label! %cc-gen-asm have)
-    (%cc-gen! (lit add) x1 x8 x0)
-    (%cc-gen! (lit ldrb) x2 (mem x1 16))
-    (%cc-gen! (lit add) x0 x0 (imm 1))
-    (%cc-gen! (lit str) x0 (mem x8 0))
-    (%cc-gen! (lit mov) x0 x2)
-    (%cc-gen! (lit ret))
-    (asm-label! %cc-gen-asm none)
-    (%cc-gen! (lit mov) x0 (imm 0))
-    (%cc-gen! (lit sub) x0 x0 (imm 1))
-    (%cc-gen! (lit ret))))
-
-; The runtime's functions: each written after the program's last function
-; when the program calls it and does not define its own.  An entry is
-; (NAME ARGUMENTS C-TYPE . BODY): how many arguments it takes, the C type
-; it answers, and what writes its code.  Its arguments arrive in registers,
-; as any call's first four do.  The classifications come from the table
-; run reads them from.
-(def %cc-gen-runtime
-  (append
-    (list (pair "malloc" (pair 1 (pair (library-c-type "malloc") %cc-gen-malloc-body!)))
-          (pair "strlen" (pair 1 (pair (library-c-type "strlen") %cc-gen-strlen-body!)))
-          (pair "strcmp" (pair 2 (pair (library-c-type "strcmp") %cc-gen-strcmp-body!)))
-          (pair "strcpy" (pair 2 (pair (library-c-type "strcpy") %cc-gen-strcpy-body!)))
-          (pair "memcpy" (pair 3 (pair (library-c-type "memcpy") %cc-gen-memcpy-body!)))
-          (pair "memset" (pair 3 (pair (library-c-type "memset") %cc-gen-memset-body!)))
-          (pair "strcat" (pair 2 (pair (library-c-type "strcat") %cc-gen-strcat-body!)))
-          (pair "strncmp" (pair 3 (pair (library-c-type "strncmp") (fn (_) (%cc-gen-compare-body! #t)))))
-          (pair "memcmp" (pair 3 (pair (library-c-type "memcmp") (fn (_) (%cc-gen-compare-body! #f)))))
-          (pair "strncpy" (pair 3 (pair (library-c-type "strncpy") %cc-gen-strncpy-body!)))
-          (pair "strchr" (pair 2 (pair (library-c-type "strchr") %cc-gen-strchr-body!)))
-          (pair "strrchr" (pair 2 (pair (library-c-type "strrchr") %cc-gen-strrchr-body!)))
-          (pair "strstr" (pair 2 (pair (library-c-type "strstr") %cc-gen-strstr-body!)))
-          (pair "memmove" (pair 3 (pair (library-c-type "memmove") %cc-gen-memmove-body!)))
-          (pair "atoi" (pair 1 (pair (library-c-type "atoi") %cc-gen-atoi-body!)))
-          (pair "toupper" (pair 1 (pair (library-c-type "toupper") (fn (_) (%cc-gen-case-body! 97 122 (lit sub))))))
-          (pair "tolower" (pair 1 (pair (library-c-type "tolower") (fn (_) (%cc-gen-case-body! 65 90 (lit add))))))
-          (pair "abs" (pair 1 (pair (library-c-type "abs") %cc-gen-abs-body!)))
-          ; a negation of the whole register serves a long as well
-          (pair "labs" (pair 1 (pair (library-c-type "labs") %cc-gen-abs-body!)))
-          (pair "getchar" (pair 0 (pair (library-c-type "getchar") %cc-gen-getchar-body!)))
-          (pair "read"
-            (pair 3 (pair (library-c-type "read")
-                      (fn (_) (%cc-gen-helper-body! %cc-gen-read-at)))))
-          (pair "write"
-            (pair 3 (pair (library-c-type "write") (fn (_) (%cc-gen-helper-body! 0))))))
-    (let ((go (fn (self es)
-                (if (null? es) ()
-                  (let ((ranges (rest (first es))))
-                    (pair (pair (first (first es))
-                            (pair 1 (pair (lit int) (fn (_) (%cc-gen-ranges-body! ranges)))))
-                      (self (rest es))))))))
-      (go ctype-ranges))))
-(def %cc-gen-runtime-live ())    ; the entries the program does not define
-(def %cc-gen-runtime-called ())  ; ((ENTRY . LABEL) ...), the ones it calls
-
-; each runtime function the program called, at its label.  malloc's comes
-; last: its heap starts past everything the data holds, and another's body
-; can take room there (getchar's buffer).
-(def %cc-gen-runtime-emit!
-  (fn (_)
-    (def go
-      (fn (self cs)
-        (if (null? cs) ()
-          (do (asm-label! %cc-gen-asm (rest (first cs)))
-              ((rest (rest (rest (first (first cs))))))
-              (self (rest cs))))))
-    (def malloc? (fn (_ c) (string=? (first (first c)) "malloc")))
-    (def called (reverse %cc-gen-runtime-called))
-    (do (go (append (filter (fn (_ c) (not (malloc? c))) called) (filter malloc? called)))
-        (if (null? %cc-gen-sprintf-copy) ()
-          (do (asm-label! %cc-gen-asm %cc-gen-sprintf-copy)
-              (%cc-gen-sprintf-copy-body!))))))
-
-; exit: the status into x0, then the entry's own exit, the one main's
-; return reaches
-(def %cc-gen-exit!
-  (fn (_ args)
-    (if (not (= (length args) 1))
-      (%cc-gen-no "exit with other than one argument"))
-    (do (%cc-gen-expr! (first args))
-        (%cc-gen! (lit sub) x1 x21 (imm %cc-gen-exit-at))
-        (%cc-gen! (lit blr) x1))))
-
-; puts: the string and the newline it adds.  A literal's text is known
-; here, so the newline goes into the data on the end of it and one write
-; does both; any other string is walked to its NUL at run time.  It
-; answers zero, which is one of the answers C allows: any number that is
-; not negative.
-(def %cc-gen-puts!
-  (fn (_ args)
-    (if (not (= (length args) 1))
-      (%cc-gen-no "puts with other than one argument"))
-    (def arg (first args))
-    (if (eq? (first arg) (lit str))
-      (let ((text (string-append (first (rest arg)) "\n")))
-        (do (%cc-gen-string-at! text)
-            (%cc-gen! (lit mov) x1 x0)
-            (%cc-gen! (lit mov) x0 (imm 1))
-            (%cc-gen! (lit mov) x2 (imm (byte-len text)))
-            (%cc-gen! (lit blr) x21)
-            (%cc-gen-const! 0)))
-      (do (if (not (%cc-gen-addr-kind? (%cc-gen-kind-of arg)))
-            (%cc-gen-no "puts of something that is not a string"))
-          (%cc-gen-expr! arg)
-          (%cc-gen-put-cstr!)
-          (%cc-gen! (lit mov) x0 (imm 10))
-          (%cc-gen-put-byte!)
-          (%cc-gen-const! 0)))))
-
-; the string whose address is in x0, to standard output: a cursor walks
-; to its NUL, and the bytes before it go in one write, whose count comes
-; back in x0
-(def %cc-gen-put-cstr!
-  (fn (_)
-    (do (%cc-gen-cstr-length! ())
-        (%cc-gen! (lit mov) x0 (imm 1))
-        (%cc-gen! (lit blr) x21))))
-
-; x1 = x0, and x2 = the count of bytes from there to the NUL, or to MOST
-; when that comes first and is not ()
-(def %cc-gen-cstr-length!
-  (fn (_ most)
-    (def top (%cc-gen-label))
-    (def done (%cc-gen-label))
-    (do (%cc-gen! (lit mov) x1 x0)
-        (%cc-gen! (lit mov) x2 x0)
-        (asm-label! %cc-gen-asm top)
-        (if (null? most) ()
-          (do (%cc-gen! (lit mov) x8 x2)
-              (%cc-gen! (lit sub) x8 x8 x1)
-              (%cc-gen! (lit cmp) x8 (imm most))
-              (%cc-gen! (lit b/ge) (label done))))
-        (%cc-gen! (lit ldrb) x0 (mem x2 0))
-        (%cc-gen! (lit cmp) x0 (imm 0))
-        (%cc-gen! (lit b/eq) (label done))
-        (%cc-gen! (lit add) x2 x2 (imm 1))
-        (%cc-gen! (lit b) (label top))
-        (asm-label! %cc-gen-asm done)
-        (%cc-gen! (lit sub) x2 x2 x1))))
+; A call into the C library, to a function the program does not define.
+; The arguments are evaluated in order and pushed, then popped into the
+; frame's call area, six at most; a variadic function is called through
+; its v- form, with the arguments past its fixed ones in their slots and a
+; va_list after the fixed ones.  x8 takes the function's address from its
+; slot in the data, x0 the area's address, and the trampoline makes the
+; call.  The answer is put in the form of the C type the function's header
+; declares.
+(def %cc-gen-libc-call!
+  (fn (_ name args)
+    (def v (%cc-gen-variadic name))
+    (if (not (%cc-gen-libc-has? (if (null? v) name (first v))))
+      (%cc-gen-no (string-append "a call to " name)))
+    (def fixed (if (null? v) (length args) (first (rest v))))
+    (def nvar (- (length args) fixed))
+    (if (< nvar 0) (%cc-gen-no (string-append name " with too few arguments")))
+    (if (> (if (null? v) fixed (+ fixed 1)) 6)
+      (%cc-gen-no (string-append "a call to " name " with more than six arguments")))
+    (def at (fn (_ off) (mem x19 (+ %cc-gen-ca off))))
+    (def push-all
+      (fn (self as)
+        (if (null? as) ()
+          (do (%cc-gen-expr! (first as))
+              (asm-push! %cc-gen-asm x0)
+              (self (rest as))))))
+    ; the last pushed is on top: slots K down to 0 from BASE
+    (def pop-into
+      (fn (self k base)
+        (if (< k 0) ()
+          (do (asm-pop! %cc-gen-asm x0)
+              (%cc-gen! (lit str) x0 (at (+ base (* 8 k))))
+              (self (- k 1) base)))))
+    (do (push-all args)
+        (pop-into (- nvar 1) %cc-gen-ca-vars)
+        (pop-into (- fixed 1) 0)
+        (if (null? v) ()
+          (do (%cc-gen-address! x19 (+ %cc-gen-ca %cc-gen-ca-vars))
+              (if %cc-gen-sysv?
+                (do (%cc-gen! (lit str) x0 (at (+ %cc-gen-ca-record 8)))
+                    (%cc-gen! (lit mov) x0 (imm 48))
+                    (%cc-gen! (lit strw) x0 (at %cc-gen-ca-record))
+                    (%cc-gen! (lit mov) x0 (imm 304))
+                    (%cc-gen! (lit strw) x0 (at (+ %cc-gen-ca-record 4)))
+                    (%cc-gen-address! x19 (+ %cc-gen-ca %cc-gen-ca-record)))
+                ())
+              (%cc-gen! (lit str) x0 (at (* 8 fixed)))))
+        (asm-load-imm64! %cc-gen-asm x8
+          (%cc-gen-import-slot (if (null? v) name (first v))))
+        (%cc-gen! (lit add) x8 x8 x22)
+        (%cc-gen! (lit ldr) x8 (mem x8 0))
+        (%cc-gen-address! x19 %cc-gen-ca)
+        (%cc-gen! (lit blr) x21)
+        (%cc-gen-normalize! (library-c-type name)))))
 
 ; Where each argument of a call goes, by the kinds of the callee's
 ; parameters: (reg . R) for one of the first four that is not a struct,
@@ -2360,476 +1708,30 @@
         (%cc-gen-no (string-append "a call to " name))
         hit))))
 
-; the low byte of x0 to standard output, from the frame's scratch slot
-(def %cc-gen-put-byte!
-  (fn (_)
-    (do (%cc-gen-scratch-byte!)
-        (%cc-gen! (lit mov) x0 (imm 1))
-        (%cc-gen! (lit blr) x21))))
-
-; the low byte of x0 into the frame's scratch slot: x1 its address, and x2
-; its length, one
-(def %cc-gen-scratch-byte!
-  (fn (_)
-    (def off %cc-gen-scratch)
-    (do (%cc-gen! (lit str) x0 (mem x19 off))
-        (if (= off 0)
-          (%cc-gen! (lit mov) x1 x19)
-          (%cc-gen! (lit add) x1 x19 (imm off)))
-        (%cc-gen! (lit mov) x2 (imm 1)))))
-
-; putchar, unless the program defines one of its own.  It answers the
-; character, as C's does.
-(def %cc-gen-putchar!
-  (fn (_ args)
-    (if (not (= (length args) 1))
-      (%cc-gen-no "putchar with other than one argument"))
-    (do (%cc-gen-expr! (first args))
-        (%cc-gen-put-byte!)
-        (%cc-gen! (lit ldr) x0 (mem x19 %cc-gen-scratch)))))
-
-; --- printf ------------------------------------------------------------------
-; printf of a literal format is laid out here, at compile time: the format
-; splits into runs of text and conversions, a %s's literal and a %% join the
-; text around them, and what is left for run time is a write per run of
-; text, one per %c, and a conversion per %d, %u, %ld or %lu to decimal and
-; per %x or %lx to hex (%i and %li are %d and %ld).  A conversion reads its
-; flags, field width and precision as run's printf does
-; (printf-conversion): a padding whose size is known here is text, and one
-; that waits on the value is a write of that many bytes from a run of
-; spaces or zeros in the data.  Every argument is evaluated before anything
-; is written, as a call's are.  It answers the count of bytes written, as
-; C's does.
-;
-; sprintf and snprintf lay their format out the same way, and each write
-; becomes a copy into the string, of as many of its bytes as fit before
-; the last byte the size leaves (%cc-gen-sprintf-copy-body!).  sprintf's
-; size is 2^62, room past any string.  A NUL follows what was copied, and
-; both answer the count printf would have written.
-
-; (PIECES . ARGS) for FORMAT and the arguments after it, in a call to NAME:
-; each piece is (text . STRING), or (CONV N . FIELD) for the Nth argument
-; left to run time, CONV one of d u x ld lu lx c s and FIELD (LEFT? ZERO?
-; WIDTH PRECISION)
-(def %cc-gen-printf-plan
-  (fn (_ name fmt args)
-    (def n (byte-len fmt))
-    ; the text gathered so far, as a piece, unless it is empty
-    (def flush
-      (fn (_ text pieces)
-        (let ((s (string-concat (reverse text))))
-          (if (= (byte-len s) 0) pieces (pair (pair (lit text) s) pieces)))))
-    (def go
-      (fn (self i from text args pieces later)
-        (match
-          ((>= i n)
-            (do (if (not (null? args))
-                  (%cc-gen-no (string-append name " with more arguments than conversions")))
-                (pair (reverse (flush (pair (substring fmt from n) text) pieces))
-                  (reverse later))))
-          ((not (= (byte-at fmt i) 37)) (self (+ i 1) from text args pieces later))
-          (#t
-            (let ((text (pair (substring fmt from i) text))
-                  (spec (printf-conversion fmt i)))
-              (if (null? spec) (%cc-gen-no (string-append name "'s % at the end of its format")))
-              (def next (first spec))
-              (def c (first (rest spec)))
-              (def l? (first (rest (rest spec))))
-              (def field (rest (rest (rest spec))))
-              (def left? (first field))
-              (def zero? (if (first (rest field)) (not left?) #f))
-              (def width (first (rest (rest field))))
-              (def precision (first (rest (rest (rest field)))))
-              (def conv
-                (match
-                  ((if l? #f (= c 37)) (lit pct))
-                  ((if (= c 100) #t (= c 105)) (if l? (lit ld) (lit d)))
-                  ((= c 117) (if l? (lit lu) (lit u)))
-                  ((= c 120) (if l? (lit lx) (lit x)))
-                  ((if l? #f (= c 99)) (lit c))
-                  ((if l? #f (= c 115)) (lit s))
-                  (#t (%cc-gen-no (string-append name "'s %" (substring fmt (+ i 1) next))))))
-              (if (> width 4095) (%cc-gen-no (string-append name "'s field width past 4095")))
-              (if (if (null? precision) #f (> precision 4095))
-                (%cc-gen-no (string-append name "'s precision past 4095")))
-              (match
-                ((eq? conv (lit pct)) (self next next (pair "%" text) args pieces later))
-                ((null? args)
-                  (%cc-gen-no (string-append name " with fewer arguments than conversions")))
-                ; a literal's text, fitted to its field, joins the text around it
-                ((if (eq? conv (lit s)) (eq? (first (first args)) (lit str)) #f)
-                  (self next next (pair (printf-fit c (first (rest (first args))) field) text)
-                    (rest args) pieces later))
-                ((if (eq? conv (lit s)) (not (%cc-gen-addr-kind? (%cc-gen-kind-of (first args)))) #f)
-                  (%cc-gen-no (string-append name "'s %s of something that is not a string")))
-                ; a character is one byte, so its padding is text before or after it
-                ((eq? conv (lit c))
-                  (let ((pad (printf-pad zero? (- width 1))))
-                    (self next next (if left? (list pad) ()) (rest args)
-                      (pair (pair conv (pair (length later) field))
-                        (flush (if left? text (pair pad text)) pieces))
-                      (pair (first args) later))))
-                (#t
-                  (self next next () (rest args)
-                    (pair (pair conv (pair (length later) field)) (flush text pieces))
-                    (pair (first args) later)))))))))
-    (go 0 0 () args () ())))
-
-; the most arguments a call in NODE to the runtime's printf, sprintf or
-; snprintf takes, the format included, and one more for sprintf, whose
-; size is given it; 0 when there is none
-(def %cc-gen-printf-width
-  (fn (self node)
-    (if (not (pair? node)) 0
-      (let ((here (if (eq? (first node) (lit call))
-                    (let ((name (first (rest node)))
-                          (n (length (first (rest (rest node))))))
-                      (match
-                        ((not (null? (%cc-gen-fun-find name))) 0)
-                        ((string=? name "printf") n)
-                        ((string=? name "sprintf") (+ n 1))
-                        ((string=? name "snprintf") n)
-                        (#t 0)))
-                    0)))
-        (def go
-          (fn (self2 xs best)
-            (if (null? xs) best
-              (self2 (rest xs) (let ((w (self (first xs)))) (if (> w best) w best))))))
-        (go node here)))))
-
-; x0 bytes were just written: they go on the count
-(def %cc-gen-printf-count!
-  (fn (_)
-    (def at (mem x19 (+ %cc-gen-pf %cc-gen-pf-count)))
-    (do (%cc-gen! (lit ldr) x1 at)
-        (%cc-gen! (lit add) x1 x1 x0)
-        (%cc-gen! (lit str) x1 at))))
-
-; x2 bytes from x1 go out, and x0 answers how many: to standard output, or,
-; while a sprintf is laid out, into its string at the count so far, as
-; many as fit before the last byte the string may take
-(def %cc-gen-printf-write!
-  (fn (_)
-    (if %cc-gen-pf-string?
-      (do (if (null? %cc-gen-sprintf-copy) (set! %cc-gen-sprintf-copy (%cc-gen-label)) ())
-          (%cc-gen! (lit ldr) x0 (mem x19 (+ %cc-gen-pf %cc-gen-pf-count)))
-          (%cc-gen! (lit ldr) x8 (mem x19 (+ %cc-gen-pf %cc-gen-pf-end)))
-          (%cc-gen! (lit add) x0 x0 x8)
-          (%cc-gen! (lit ldr) x8 (mem x19 (+ %cc-gen-pf (+ %cc-gen-pf-end 8))))
-          (%cc-gen! (lit sub) x8 x8 x0)
-          (%cc-gen! %cc-gen-callop (label %cc-gen-sprintf-copy)))
-      (do (%cc-gen! (lit mov) x0 (imm 1))
-          (%cc-gen! (lit blr) x21)))))
-
-; the low byte of x0, written as printf's bytes are
-(def %cc-gen-printf-byte!
-  (fn (_)
-    (do (%cc-gen-scratch-byte!)
-        (%cc-gen-printf-write!))))
-
-; A run of text: its bytes are in the data, so one write.
-(def %cc-gen-printf-text!
-  (fn (_ text)
-    (do (%cc-gen-string-at! text)
-        (%cc-gen! (lit mov) x1 x0)
-        (%cc-gen! (lit mov) x2 (imm (byte-len text)))
-        (%cc-gen-printf-write!)
-        (%cc-gen-printf-count!))))
-
-; Padding that waits on the value: N less the number LENGTH! leaves in x0
-; bytes of PAD, a run of spaces or zeros N long, when that is above zero.
-; The run's address may take x2, so the count waits on the stack.
-(def %cc-gen-printf-pad!
-  (fn (_ pad n length!)
-    (def skip (%cc-gen-label))
-    (do (length!)
-        (%cc-gen! (lit mov) x2 (imm n))
-        (%cc-gen! (lit sub) x2 x2 x0)
-        (%cc-gen! (lit cmp) x2 (imm 0))
-        (%cc-gen! (lit b/le) (label skip))
-        (asm-push! %cc-gen-asm x2)
-        (%cc-gen-string-at! pad)
-        (%cc-gen! (lit mov) x1 x0)
-        (asm-pop! %cc-gen-asm x2)
-        (%cc-gen-printf-write!)
-        (%cc-gen-printf-count!)
-        (asm-label! %cc-gen-asm skip))))
-
-; A string, from the address in SLOT, in its FIELD (LEFT? ZERO? WIDTH
-; PRECISION): its bytes to the NUL, or to the precision, padded to the
-; field width.  The count waits in the held slot across the padding.
-(def %cc-gen-printf-str!
-  (fn (_ slot field)
-    (def left? (first field))
-    (def zero? (if (first (rest field)) (not left?) #f))
-    (def width (first (rest (rest field))))
-    (def held (mem x19 (+ %cc-gen-pf %cc-gen-pf-held)))
-    (def length! (fn (_) (%cc-gen! (lit ldr) x0 held)))
-    (do (%cc-gen! (lit ldr) x0 (mem x19 slot))
-        (%cc-gen-cstr-length! (first (rest (rest (rest field)))))
-        (%cc-gen! (lit str) x2 held)
-        (if (if left? #t (= width 0)) () (%cc-gen-printf-pad! (printf-pad zero? width) width length!))
-        (%cc-gen! (lit ldr) x1 (mem x19 slot))
-        (%cc-gen! (lit ldr) x2 held)
-        (%cc-gen-printf-write!)
-        (%cc-gen-printf-count!)
-        (if (if left? (> width 0) #f) (%cc-gen-printf-pad! (printf-pad #f width) width length!) ()))))
-
-; A number, as CONV reads it -- d and ld signed, u and lu unsigned, x and
-; lx in hex, the l forms all 64 bits -- in its FIELD (LEFT? ZERO? WIDTH
-; PRECISION).  The digits of its magnitude are built from the end of the
-; buffer back before anything is written; then come the padding before,
-; the sign, zeros to the field width for ZERO? or to the precision, the
-; digits, and the padding after.  The value stays in its slot; the
-; magnitude, then the length the field is filled against, is in the held
-; slot, and the cursor in its own, rather than in registers, which the
-; division and the multiply take.
-(def %cc-gen-printf-int!
-  (fn (_ slot conv field)
-    (def left? (first field))
-    (def width (first (rest (rest field))))
-    (def precision (first (rest (rest (rest field)))))
-    (def zero? (if (first (rest field)) (if left? #f (null? precision)) #f))
-    (def cursor (mem x19 (+ %cc-gen-pf %cc-gen-pf-cursor)))
-    (def held (mem x19 (+ %cc-gen-pf %cc-gen-pf-held)))
-    (def end (+ %cc-gen-pf %cc-gen-pf-end))
-    (def digit (%cc-gen-label))
-    (def digits-done (%cc-gen-label))
-    (def signed? (if (eq? conv (lit d)) #t (eq? conv (lit ld))))
-    (def hex? (if (eq? conv (lit x)) #t (eq? conv (lit lx))))
-    ; x0 = the count of digits built
-    (def digits!
-      (fn (_)
-        (do (%cc-gen-address! x19 end)
-            (%cc-gen! (lit ldr) x1 cursor)
-            (%cc-gen! (lit sub) x0 x0 x1))))
-    (def length! (fn (_) (%cc-gen! (lit ldr) x0 held)))
-    (do (%cc-gen! (lit ldr) x0 (mem x19 slot))
-        ; %d reads an int, and %u and %x an unsigned int: the argument's low
-        ; 32 bits, in that C type's form
-        (match
-          ((eq? conv (lit d)) (do (%cc-gen-int!) (%cc-gen! (lit str) x0 (mem x19 slot))))
-          ((if (eq? conv (lit u)) #t (eq? conv (lit x)))
-            (do (%cc-gen-uint!) (%cc-gen! (lit str) x0 (mem x19 slot))))
-          (#t ()))
-        (if signed?
-          (let ((plus (%cc-gen-label)))
-            (do (%cc-gen! (lit cmp) x0 (imm 0))
-                (%cc-gen! (lit b/ge) (label plus))
-                (%cc-gen! (lit sub) x0 xzr x0)
-                (asm-label! %cc-gen-asm plus)))
-          ())
-        (%cc-gen! (lit str) x0 held)
-        (%cc-gen! (lit add) x2 x19 (imm end))
-        (%cc-gen! (lit str) x2 cursor)
-        ; a zero at precision 0 has no digits
-        (if (if (null? precision) #f (= precision 0))
-          (do (%cc-gen! (lit cmp) x0 (imm 0))
-              (%cc-gen! (lit b/eq) (label digits-done)))
-          ())
-        (asm-label! %cc-gen-asm digit)
-        (if hex?
-          ; A hex digit a turn: the low four bits, then the number shifted
-          ; right four with zeros in, as unsigned.
-          (let ((low (%cc-gen-label)))
-            (do (%cc-gen! (lit ldr) x0 held)
-                (%cc-gen! (lit mov) x8 x0)
-                (%cc-gen! (lit mov) x1 (imm 15))
-                (%cc-gen! (lit and) x0 x0 x1)
-                (%cc-gen! (lit cmp) x0 (imm 10))
-                (%cc-gen! (lit b/lt) (label low))
-                (%cc-gen! (lit add) x0 x0 (imm 39))
-                (asm-label! %cc-gen-asm low)
-                (%cc-gen! (lit add) x0 x0 (imm 48))
-                (%cc-gen! (lit mov) x2 (imm 4))
-                (%cc-gen! (lit lsrv) x8 x8 x2)))
-          ; A decimal digit a turn, the number read as unsigned: halved, it is
-          ; not negative, so a signed division by five is the unsigned one by
-          ; ten.  That also carries the most negative long, whose negation is
-          ; itself.
-          (do (%cc-gen! (lit ldr) x0 held)
-              (%cc-gen! (lit mov) x2 (imm 1))
-              (%cc-gen! (lit lsrv) x0 x0 x2)
-              (%cc-gen! (lit mov) x1 (imm 5))
-              (%cc-gen! (lit sdiv) x0 x0 x1)
-              (%cc-gen! (lit mov) x8 x0)
-              (%cc-gen! (lit mov) x1 (imm 10))
-              (%cc-gen! (lit mul) x2 x8 x1)
-              (%cc-gen! (lit ldr) x0 held)
-              (%cc-gen! (lit sub) x0 x0 x2)
-              (%cc-gen! (lit add) x0 x0 (imm 48))))
-        ; the digit goes in before the ones already written; x8 is the rest
-        (%cc-gen! (lit ldr) x2 cursor)
-        (%cc-gen! (lit sub) x2 x2 (imm 1))
-        (%cc-gen! (lit strb) x0 (mem x2 0))
-        (%cc-gen! (lit str) x2 cursor)
-        (%cc-gen! (lit str) x8 held)
-        (%cc-gen! (lit cmp) x8 (imm 0))
-        (%cc-gen! (lit b/ne) (label digit))
-        (asm-label! %cc-gen-asm digits-done)
-        ; the length the field is filled against: the digits, or the
-        ; precision when that is more, and the sign
-        (if (> width 0)
-          (do (digits!)
-              (if (null? precision) ()
-                (let ((more (%cc-gen-label)))
-                  (do (%cc-gen! (lit cmp) x0 (imm precision))
-                      (%cc-gen! (lit b/ge) (label more))
-                      (%cc-gen! (lit mov) x0 (imm precision))
-                      (asm-label! %cc-gen-asm more))))
-              (if signed?
-                (let ((plus (%cc-gen-label)))
-                  (do (%cc-gen! (lit ldr) x1 (mem x19 slot))
-                      (%cc-gen! (lit cmp) x1 (imm 0))
-                      (%cc-gen! (lit b/ge) (label plus))
-                      (%cc-gen! (lit add) x0 x0 (imm 1))
-                      (asm-label! %cc-gen-asm plus)))
-                ())
-              (%cc-gen! (lit str) x0 held))
-          ())
-        (if (if (> width 0) (if left? #f (not zero?)) #f)
-          (%cc-gen-printf-pad! (printf-pad #f width) width length!)
-          ())
-        (if signed?
-          (let ((plus (%cc-gen-label)))
-            (do (%cc-gen! (lit ldr) x0 (mem x19 slot))
-                (%cc-gen! (lit cmp) x0 (imm 0))
-                (%cc-gen! (lit b/ge) (label plus))
-                (%cc-gen! (lit mov) x0 (imm 45))
-                (%cc-gen-printf-byte!)
-                (%cc-gen-printf-count!)
-                (asm-label! %cc-gen-asm plus)))
-          ())
-        (if (if zero? (> width 0) #f)
-          (%cc-gen-printf-pad! (printf-pad #t width) width length!)
-          ())
-        (if (if (null? precision) #f (> precision 0))
-          (%cc-gen-printf-pad! (printf-pad #t precision) precision digits!)
-          ())
-        ; the digits, from the cursor to the end
-        (%cc-gen! (lit ldr) x1 cursor)
-        (%cc-gen! (lit add) x2 x19 (imm end))
-        (%cc-gen! (lit sub) x2 x2 x1)
-        (%cc-gen-printf-write!)
-        (%cc-gen-printf-count!)
-        (if (if left? (> width 0) #f)
-          (%cc-gen-printf-pad! (printf-pad #f width) width length!)
-          ()))))
-
-; A call to NAME -- printf, sprintf or snprintf -- with ARGS.  sprintf's
-; arguments start with the string it fills, and snprintf's with that and
-; its size, and those two take the first slots: the string's address, and
-; the last byte it may take, worked out from the size.
-(def %cc-gen-printf!
-  (fn (_ name args)
-    (def lead (match ((string=? name "sprintf") 1) ((string=? name "snprintf") 2) (#t 0)))
-    (def from (match ((= lead 0) args) ((= lead 1) (rest args)) (#t (rest (rest args)))))
-    (if (null? from) (%cc-gen-no (string-append name " without a format")))
-    (if (not (eq? (first (first from)) (lit str)))
-      (%cc-gen-no (string-append name " of a format that is not a literal")))
-    (def plan (%cc-gen-printf-plan name (first (rest (first from))) (rest from)))
-    (def front
-      (match
-        ((= lead 0) ())
-        ((= lead 1) (list (first args) (list (lit num) 4611686018427387904 (lit ulong))))
-        (#t (list (first args) (first (rest args))))))
-    (def later (append front (rest plan)))
-    (def slot (fn (_ k) (+ %cc-gen-pf (+ %cc-gen-pf-end (* 8 k)))))
-    (def arg-at (fn (_ k) (slot (+ k (length front)))))
-    (def count (mem x19 (+ %cc-gen-pf %cc-gen-pf-count)))
-    (def push-all
-      (fn (self as)
-        (if (null? as) ()
-          (do (%cc-gen-expr! (first as))
-              (asm-push! %cc-gen-asm x0)
-              (self (rest as))))))
-    ; the last one pushed is on top, so the slots fill from the last back
-    (def pop-all
-      (fn (self k)
-        (if (< k 0) ()
-          (do (asm-pop! %cc-gen-asm x0)
-              (%cc-gen! (lit str) x0 (mem x19 (slot k)))
-              (self (- k 1))))))
-    (def emit
-      (fn (self pieces)
-        (if (null? pieces) ()
-          (let ((p (first pieces)))
-            (do (match
-                  ((eq? (first p) (lit text)) (%cc-gen-printf-text! (rest p)))
-                  ((eq? (first p) (lit c))
-                    (do (%cc-gen! (lit ldr) x0 (mem x19 (arg-at (first (rest p)))))
-                        (%cc-gen-printf-byte!)
-                        (%cc-gen-printf-count!)))
-                  ((eq? (first p) (lit s))
-                    (%cc-gen-printf-str! (arg-at (first (rest p))) (rest (rest p))))
-                  (#t (%cc-gen-printf-int! (arg-at (first (rest p))) (first p) (rest (rest p)))))
-                (self (rest pieces)))))))
-    (do (push-all later)
-        (pop-all (- (length later) 1))
-        ; the last byte the string may take: its size less one past its start
-        (if (null? front) ()
-          (do (%cc-gen! (lit ldr) x0 (mem x19 (slot 0)))
-              (%cc-gen! (lit ldr) x8 (mem x19 (slot 1)))
-              (%cc-gen! (lit add) x0 x0 x8)
-              (%cc-gen! (lit sub) x0 x0 (imm 1))
-              (%cc-gen! (lit str) x0 (mem x19 (slot 1)))))
-        ; the count starts once the arguments are in: one of them may have
-        ; been a printf of its own, in this same frame
-        (%cc-gen! (lit mov) x0 (imm 0))
-        (%cc-gen! (lit str) x0 count)
-        (set! %cc-gen-pf-string? (not (null? front)))
-        (emit (first plan))
-        (set! %cc-gen-pf-string? #f)
-        (if (null? front) () (%cc-gen-sprintf-nul!))
-        (%cc-gen! (lit ldr) x0 count))))
-
-; sprintf's NUL, after what was copied: at the count, unless the string ran
-; out of room first, when it is on the last byte; none when the size is
-; zero, which leaves no byte at all
-(def %cc-gen-sprintf-nul!
-  (fn (_)
-    (def put (%cc-gen-label))
-    (def done (%cc-gen-label))
-    (do (%cc-gen! (lit ldr) x0 (mem x19 (+ %cc-gen-pf %cc-gen-pf-count)))
-        (%cc-gen! (lit ldr) x8 (mem x19 (+ %cc-gen-pf %cc-gen-pf-end)))
-        (%cc-gen! (lit add) x0 x0 x8)
-        (%cc-gen! (lit ldr) x1 (mem x19 (+ %cc-gen-pf (+ %cc-gen-pf-end 8))))
-        (%cc-gen! (lit cmp) x0 x1)
-        (%cc-gen! (lit b/le) (label put))
-        (%cc-gen! (lit mov) x0 x1)
-        (asm-label! %cc-gen-asm put)
-        (%cc-gen! (lit cmp) x0 x8)
-        (%cc-gen! (lit b/lt) (label done))
-        (%cc-gen! (lit mov) x1 (imm 0))
-        (%cc-gen! (lit strb) x1 (mem x0 0))
-        (asm-label! %cc-gen-asm done))))
-
-; sprintf's copy, called with x2 bytes at x1 for x0, and the room before
-; the string's last byte in x8: as many of them as the room takes, none
-; when it is not above zero.  It answers x2 as it came, the count printf
-; keeps.
-(def %cc-gen-sprintf-copy-body!
-  (fn (_)
-    (def some (%cc-gen-label))
-    (def next (%cc-gen-label))
-    (def done (%cc-gen-label))
-    (asm-push! %cc-gen-asm x2)
-    (%cc-gen! (lit cmp) x2 x8)
-    (%cc-gen! (lit b/le) (label some))
-    (%cc-gen! (lit mov) x2 x8)
-    (asm-label! %cc-gen-asm some)
-    (asm-label! %cc-gen-asm next)
-    (%cc-gen! (lit cmp) x2 (imm 0))
-    (%cc-gen! (lit b/le) (label done))
-    (%cc-gen! (lit ldrb) x8 (mem x1 0))
-    (%cc-gen! (lit strb) x8 (mem x0 0))
-    (%cc-gen! (lit add) x0 x0 (imm 1))
-    (%cc-gen! (lit add) x1 x1 (imm 1))
-    (%cc-gen! (lit sub) x2 x2 (imm 1))
-    (%cc-gen! (lit b) (label next))
-    (asm-label! %cc-gen-asm done)
-    (asm-pop! %cc-gen-asm x0)
-    (%cc-gen! (lit ret))))
+; the call area's size for a function whose body is NODE: 0 when it calls
+; nothing in the C library, else its fixed part and a slot for each of the
+; most arguments one of its variadic calls passes past its fixed ones
+(def %cc-gen-call-area
+  (fn (_ node)
+    ; -1 when NODE calls nothing in the library, else the most variable
+    ; arguments one of its calls passes
+    (def most
+      (fn (self node)
+        (if (not (pair? node)) -1
+          (let ((here (if (if (eq? (first node) (lit call))
+                                (null? (%cc-gen-fun-find (first (rest node))))
+                                #f)
+                        (let ((v (%cc-gen-variadic (first (rest node))))
+                              (n (length (first (rest (rest node))))))
+                          (if (null? v) 0 (- n (first (rest v)))))
+                        -1)))
+            (def go
+              (fn (self2 xs best)
+                (if (null? xs) best
+                  (self2 (rest xs) (let ((w (self (first xs)))) (if (> w best) w best))))))
+            (go node here)))))
+    (let ((m (most node)))
+      (if (< m 0) 0 (+ %cc-gen-ca-vars (* 8 m))))))
 
 ; --- statements --------------------------------------------------------------
 
@@ -3270,15 +2172,13 @@
     (set! %cc-gen-labels ())
     (set! %cc-gen-placed ())
     (set! %cc-gen-epilogue (%cc-gen-label))
-    ; The frame, from its base in x19 up: the slot the runtime writes a byte
-    ; from; the parameters, the declarations that are not arrays or structs,
-    ; and the word that says where a struct the function answers goes, each
-    ; where a load reaches it; printf's area when the function calls it; the
-    ; arrays and structs, reached through their address from any distance;
-    ; and at the top, the arguments the caller stored there (%cc-gen-homes),
-    ; which the prologue copies down into slots of their own, a struct
-    ; excepted.
-    (set! %cc-gen-scratch (%cc-gen-room! (lit long)))
+    ; The frame, from its base in x19 up: the parameters, the declarations
+    ; that are not arrays or structs, and the word that says where a struct
+    ; the function answers goes, each where a load reaches it; the call area
+    ; when the function calls into the C library; the arrays and structs,
+    ; reached through their address from any distance; and at the top, the
+    ; arguments the caller stored there (%cc-gen-homes), which the prologue
+    ; copies down into slots of their own, a struct excepted.
     (def pkinds
       (let ((go (fn (self ks)
                   (if (null? ks) ()
@@ -3299,12 +2199,8 @@
         (go params pkinds homes)))
     (set! %cc-gen-sret-slot (if sret? (%cc-gen-room! (lit long)) 0))
     (%cc-gen-scan! body #f)
-    ; printf's area: to the digits' end, then a slot per argument after the
-    ; format
-    (def width (%cc-gen-printf-width body))
-    (def pf-slots (if (= width 0) 0 (+ (/ %cc-gen-pf-end 8) (- width 1))))
-    (set! %cc-gen-pf (round-up %cc-gen-frame-bytes 8))
-    (set! %cc-gen-frame-bytes (+ %cc-gen-pf (* 8 pf-slots)))
+    (set! %cc-gen-ca (round-up %cc-gen-frame-bytes 8))
+    (set! %cc-gen-frame-bytes (+ %cc-gen-ca (%cc-gen-call-area body)))
     (if (> %cc-gen-frame-bytes 32760) (%cc-gen-no "more locals than a load reaches"))
     (%cc-gen-scan! body #t)
     (%cc-gen-scan-calls! body)
@@ -3380,6 +2276,10 @@
     (set! %cc-gen-strings ())
     (set! %cc-gen-databytes 0)
     (set! %cc-gen-data ())
+    ; the C library's exit, where the entry takes main's answer, in the
+    ; data's first eight bytes
+    (set! %cc-gen-imports ())
+    (%cc-gen-import-slot "exit")
     ; the ones a load reaches first, then the arrays and structs, which are
     ; only ever reached through their address
     (def gdecls (filter (fn (_ it) (eq? (first it) (lit gdecl))) prog))
@@ -3399,12 +2299,7 @@
     (set! %cc-gen-nlabels 0)
     (set! %cc-gen-link (if (eq? target (lit macho-arm64)) %cc-gen-lr ()))
     (set! %cc-gen-callop (if (eq? target (lit macho-arm64)) (lit bl) (lit call)))
-    (set! %cc-gen-exit-at (%cc-gen-exit-back target))
-    (set! %cc-gen-read-at (%cc-gen-read-after target))
-    (set! %cc-gen-runtime-called ())
-    (set! %cc-gen-sprintf-copy ())
-    (set! %cc-gen-pf-string? #f)
-    (set! %cc-gen-heap-bytes 0)
+    (set! %cc-gen-sysv? (eq? target (lit elf-x86-64)))
     ; every function gets its label before any code, so a call can name one
     ; that has not been compiled yet
     (set! %cc-gen-funs ())
@@ -3423,25 +2318,12 @@
                             %cc-gen-params))
                         (self (rest fs))))))))
       (go funs))
-    ; the runtime's malloc answers an address
-    ; the runtime's functions the program does not define, and the C types
-    ; they answer
-    (set! %cc-gen-runtime-live
-      (filter (fn (_ e) (null? (%cc-gen-fun-find (first e)))) %cc-gen-runtime))
-    (let ((go (fn (self es)
-                (if (null? es) ()
-                  (do (set! %cc-gen-rets
-                        (pair (pair (first (first es)) (first (rest (rest (first es)))))
-                          %cc-gen-rets))
-                      (self (rest es)))))))
-      (go %cc-gen-runtime-live))
     ; a refusal can raise partway through; the buffer is released first
     (guard (err (do (asm-free! a)
                     (set! %cc-gen-asm ())
                     (error err (if (Err err? err) (err msg) "cc: compile failed"))))
       (let ((go (fn (self fs) (if (null? fs) () (do (%cc-gen-fun! (first fs)) (self (rest fs)))))))
-        (do (go (pair main others))
-            (%cc-gen-runtime-emit!))))
+        (go (pair main others))))
     (def n (asm-pos a))
     (def code (%cc-gen-read (asm-finalize! a) (- n 1) ()))
     (asm-free! a)
@@ -3459,9 +2341,11 @@
   (fn (_ src path)
     (def target (%cc-gen-target))
     (def image (cc-compile-image src target))
+    ; the imports, (OFFSET . NAME) in the order of their slots
+    (def imports (map (fn (_ i) (pair (rest i) (first i))) (reverse %cc-gen-imports)))
     (if (eq? target (lit macho-arm64))
-      (macho-write! path (first image) (rest image) %cc-gen-heap-bytes)
-      (elf-write! path (first image) (rest image) elf-machine-x86-64 %cc-gen-heap-bytes))))
+      (macho-write! path (first image) (rest image) imports)
+      (elf-write! path (first image) (rest image) elf-machine-x86-64 imports))))
 
 ; compile SRC and run the executable with INPUT as its standard input and
 ; the rest of ARGV after its name, which is its path; print what it wrote,

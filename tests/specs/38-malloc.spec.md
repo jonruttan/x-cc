@@ -71,13 +71,3 @@ ok
 ```
 ---
     1
-
-## the refusals
-
-### malloc with two arguments
-
-```cc
-(write (guard (e (e msg)) (cc-exe-run "#include <stdlib.h>\nint main(void) { malloc(1, 2); return 0; }")))
-```
----
-    "cc: compile: not built yet: malloc with other than one argument"

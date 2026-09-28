@@ -46,13 +46,3 @@ through /usr/bin/cc, and exits as it does; where both columns show,
 bye
 7
 ```
-
-## the refusals
-
-### exit with two arguments
-
-```cc
-(write (guard (e (e msg)) (cc-exe-run "#include <stdlib.h>\nint main(void) { exit(1, 2); }")))
-```
----
-    "cc: compile: not built yet: exit with other than one argument"
