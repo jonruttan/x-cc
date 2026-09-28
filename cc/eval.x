@@ -1314,7 +1314,7 @@
           (self (+ i 8) end)))))
 
 (def %cc-run-core
-  (fn (_ src)
+  (fn (_ src input argv)
     ; one vector for the process, and only the dirty ranges cleared per
     ; run (a full clear of the buffer out-allocated the buffer itself; the
     ; replaced; the dirty ranges are hundreds of bytes)
@@ -1355,6 +1355,7 @@
                 (self (rest items)))))))
     (load! prog)
     (%cc-scan-program! prog)
+    (def saved (if (null? input) () (%cc-stdin-from! input)))
     (def status
       (guard (e
                (if (null? %cc-exit-code)
@@ -1366,11 +1367,75 @@
                      (newline)
                      1)
                  (& %cc-exit-code 255)))
-        (& (%cc-call "main" ()) 255)))
+        (& (%cc-call "main" (%cc-main-args argv)) 255)))
     (%cc-libc-flush!)
+    (if (null? saved) () (%cc-stdin-back! saved))
     status))
 
-(def cc-run (fn (_ src) (%cc-run-core src)))
+; The C library's own call, for run's plumbing rather than the program's
+(def %cc-libc-do
+  (fn (_ name . args)
+    (def f (%cc-libc-fn name))
+    (match
+      ((null? args) (%cc-ptr-call f))
+      ((null? (rest args)) (%cc-ptr-call f (first args)))
+      ((null? (rest (rest args))) (%cc-ptr-call f (first args) (first (rest args))))
+      (#t (%cc-ptr-call f (first args) (first (rest args)) (first (rest (rest args))))))))
 
-(provide cc/eval cc-run common-c-type ctype-ranges kind-elem library-c-type printf-conversion
-  printf-fit printf-pad promoted-c-type signed? unsigned-divide)
+; the C library's standard input, cleared of what it held and of its end:
+; fpurge on macOS, __fpurge on glibc
+(def %cc-stdin-reset!
+  (fn (_)
+    (def stdin (%cc-raw-ref (first (rest (%cc-libc-stream "stdin"))) 8))
+    (%cc-libc-do "clearerr" stdin)
+    (%cc-libc (if os-darwin? "fpurge" "__fpurge") stdin)))
+
+; TEXT as fd 0 for the program's run, from a temporary file the library
+; makes; answers the fd 0 it replaced, kept on another descriptor
+(def %cc-stdin-from!
+  (fn (_ text)
+    (def f (%cc-libc-do "tmpfile"))
+    (def fd (%cc-libc-do "fileno" f))
+    (%cc-libc-do "write" fd text (byte-len text))
+    (%cc-libc-do "lseek" fd 0 0)
+    (def saved (%cc-libc-do "dup" 0))
+    (%cc-libc-do "dup2" fd 0)
+    (%cc-libc-do "fclose" f)
+    (%cc-stdin-reset!)
+    saved))
+
+; fd 0 back from SAVED, as it was before the run
+(def %cc-stdin-back!
+  (fn (_ saved)
+    (%cc-libc-do "dup2" saved 0)
+    (%cc-libc-do "close" saved)
+    (%cc-stdin-reset!)))
+
+; main's arguments: none when it takes none, else argc and argv, each of
+; ARGV laid into memory as a C string and the pointers to them after, the
+; last one null
+(def %cc-main-args
+  (fn (_ argv)
+    (def f (%cc-fun "main"))
+    (if (if (null? f) #t (null? (first f))) ()
+      (let ((ptrs (map (fn (_ s)
+                         (let ((a (%cc-heap (+ (byte-len s) 1))))
+                           (do (%cc-put-text! a s (byte-len s)) a)))
+                    argv)))
+        (def table (%cc-heap (* 8 (+ (length argv) 1))))
+        (def go
+          (fn (self ps i)
+            (if (null? ps) (%cc-raw-set! (+ table (* 8 i)) 0 8)
+              (do (%cc-raw-set! (+ table (* 8 i)) (first ps) 8)
+                  (self (rest ps) (+ i 1))))))
+        (go ptrs 0)
+        (list (length argv) table)))))
+
+; SRC's program with INPUT as its standard input and ARGV its arguments,
+; the program's name first; with INPUT nil, standard input is fd 0
+(def cc-run-with (fn (_ src input argv) (%cc-run-core src input argv)))
+
+(def cc-run (fn (_ src) (%cc-run-core src () (list "a.out"))))
+
+(provide cc/eval cc-run cc-run-with common-c-type ctype-ranges kind-elem library-c-type
+  printf-conversion printf-fit printf-pad promoted-c-type signed? unsigned-divide)

@@ -49,6 +49,12 @@ as its size leaves room for before the NUL that ends it.  `exit`
 leaves through the entry's own exit, the one main's return reaches,
 which sits a fixed distance before the helper.
 
+main takes argc and argv as the kernel hands them to the entry, and a
+program reads its standard input with `getchar`, a byte at a time
+through a four-kilobyte buffer in the data, and moves bytes through a
+descriptor with `read` and `write`: the entry writes out a second
+helper, for the read system call, a fixed distance after the first.
+
 A pointer is an eight-byte address: `&` takes one, `*` loads or stores
 through one at the width of what it points at, and `+` and `-` move one
 by whole elements.  An array is its elements end to end, and where it is
@@ -140,8 +146,11 @@ truncating division; if/else, while, do, for, break, continue, return;
 functions with recursion and prototypes; globals; static locals, made
 once on first reach; string literals (interned, and joined when side by
 side); character constants; C's escapes, octal and hex among them;
-`#include` (dropped -- the C library provides the functions), object-like
-`#define` spliced token-wise; // and /* */ comments.
+`#include` (dropped -- the C library provides the functions -- and one
+of a standard header defines `EOF`, `NULL`, `EXIT_SUCCESS` and
+`EXIT_FAILURE`), object-like `#define` spliced token-wise; // and /* */
+comments.  `x -l cc -- run prog.c ARG ...` hands main the file's name
+and the ARGs as its argv, and fd 0 as its standard input.
 
 Structs, too: `struct S { ... };`, `typedef struct { ... } T;`,
 fields by `.` and `->`, nested structs, arrays of structs, pointers to
