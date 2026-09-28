@@ -10,8 +10,8 @@
 ; lists print bare, and defines the REPL printer run.x installs, and both
 ; have to be the root's.
 
-(provide cc/base cc-version cc-preprocess cc-lex cc-parse cc-run
-  cc-compile cc-compile-image cc-exe-run cc-argv cc-main
+(provide cc/base cc-version cc-preprocess cc-lex cc-parse cc-run cc-run-with
+  cc-compile cc-compile-image cc-exe-run cc-exe-run-with cc-argv cc-main
   %cc-repl-print)
 
 (def cc-version "0.1.0")
@@ -48,6 +48,6 @@
 (import cc/pp cc-preprocess)
 (import cc/lex cc-lex)
 (import cc/parse cc-parse)
-(import cc/eval cc-run)
-(import cc/gen cc-compile cc-compile-image cc-exe-run)
+(import cc/eval cc-run cc-run-with)
+(import cc/gen cc-compile cc-compile-image cc-exe-run cc-exe-run-with)
 (import cc/cli cc-argv cc-main)
