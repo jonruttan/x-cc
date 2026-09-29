@@ -101,10 +101,13 @@ suffixes and its value give it.  A `double` is held as its IEEE bits
 where a long would be, and works in the machine's d registers; it meets
 the integer kinds as C's conversions say, and the maths functions --
 `sqrt`, `pow`, `fmod` and the rest -- are the C library's, called with
-their arguments in the d registers.  Anything else refuses by name:
-`float` and `long double`, a call into the C library with more than six
-arguments, and a global initialized by something other than a constant
-or an address.
+their arguments in the d registers.  A `float` is held as its single's 32
+bits where an unsigned int would be; its operations are the double's
+rounded to a single, which is the single-precision answer, and one
+handed to a function past its declared parameters goes as a double.
+Anything else refuses by name: `long double`, a call into the C library
+with more than six arguments, and a global initialized by something
+other than a constant or an address.
 
     x -l cc -- run prog.c
 
@@ -192,11 +195,11 @@ value moves out of the popped frame into a fresh slot in the caller's
 text as a string literal and `A ## B` pastes, the rescan lexing the
 joined token.
 
-Doubles run as they compile: a double is its IEEE bits, and each
-operation on it is the machine's, through the platform's stubs
-(x/num/float).
+Doubles and floats run as they compile: each is its IEEE bits, and each
+operation on one is the machine's, through the platform's stubs
+(x/num/float), made in cc/real.x.
 
-Refused loudly, each a recorded pending: `float`, `long double`, casts
+Refused loudly, each a recorded pending: `long double`, casts
 to function-pointer types.
 
 Paired with x-lang v0.17.0 (`lang.xon` is the checkable row).
@@ -214,6 +217,7 @@ Paired with x-lang v0.17.0 (`lang.xon` is the checkable row).
     cc/lex.x          C tokens, macros spliced token-wise
     cc/parse.x        the fifteen-level ladder, declarations, statements
     cc/eval.x         the machine: memory, frames, calls, builtins
+    cc/real.x         float and double: conversions and operations
     cc/gen.x          code generation, through x/tool/asm
     cc/image.x        the byte image an executable is built in
     cc/macho.x        the macOS executable and its ad-hoc signature
