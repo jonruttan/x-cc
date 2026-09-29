@@ -20,19 +20,20 @@
 ;
 ; Compiled so far: main and the functions beside it, with globals, locals
 ; (static ones kept once, in the data), and parameters of `char`, `short`,
-; `int` and `long`, signed and unsigned,
+; `int` and `long`, signed and unsigned, and `double`,
 ; pointers to anything, and arrays, structs and unions of any of these, each
 ; at its kind's size,
 ; assignment, ++ and --, `if`/`else`, `while`, `do`, `for`, `switch`,
 ; `break`, `continue`, `return` and calls (recursion included), over integer
-; constants typed by their suffixes and string literals, + - * / %,
+; constants typed by their suffixes, floating constants and string
+; literals, + - * / %,
 ; & | ^ << >>, the six comparisons, &&, ||, the ternary, the comma,
 ; unary - ~ ! & *, casts, subscripts, `.` and `->`, each in the kind C's
 ; usual conversions give it, and calls into the C library -- six arguments
 ; at most, a variadic function's through its v- form; pointers to
 ; functions, which the C library can call back through; structs are passed
-; and returned by value.  Everything else refuses by name: floating point
-; among it.
+; and returned by value.  Everything else refuses by name: `float` and
+; `long double` among it.
 ;
 ; The convention is this compiler's own, since nothing else links with what
 ; it writes: of the first four arguments, the ones that are not structs in
@@ -51,8 +52,8 @@
   substring)
 (import cc/lex cc-lex)
 (import cc/parse cc-parse kind-size kind-align round-up struct-entry)
-(import cc/eval common-c-type kind-elem library-c-type library-variadic
-  promoted-c-type signed? unsigned-divide)
+(import cc/eval common-c-type convert-double double-arith kind-elem library-c-type
+  library-double-label library-variadic promoted-c-type signed? unsigned-divide)
 (import cc/macho macho-write! macho-data-at)
 (import cc/elf elf-write! elf-data-at elf-machine-x86-64)
 
@@ -108,11 +109,13 @@
 ; whose slot is the data's first eight bytes, so exit writes out what the
 ; library's streams hold.  It puts the trampoline's address in x21, where
 ; nothing the generator emits touches it.  Compiled code calls the
-; trampoline with x0 the address of six eight-byte arguments and x8 the
-; function; the trampoline loads the arguments where the C calling
-; convention takes them, gives the stack the sixteen-byte alignment the
-; convention asks for, and calls the function, whose answer comes back in
-; x0.  x86-64's indirect call puts x0 in rdi on the way in.
+; trampoline with x0 the address of six eight-byte integer arguments and
+; four doubles after them, and x8 the function; the trampoline loads the
+; arguments where the C calling convention takes them -- the integers in
+; the general registers, the doubles in d0 to d3 -- gives the stack the
+; sixteen-byte alignment the convention asks for, and calls the function,
+; whose answer comes back in x0, or in d0 for a double.  x86-64's
+; indirect call puts x0 in rdi on the way in.
 ;
 ; main is handed argc in x0 and argv in x1, as any call's first two
 ; arguments: dyld calls a Mach-O's entry as it would main, with the two
@@ -126,30 +129,32 @@
 (def %cc-gen-entry
   (fn (_ target dataat)
     (if (eq? target (lit macho-arm64))
-      ; sixteen words: adr x21, the trampoline; adr x22, the data;
-      ; mov x20, sp; sub sp, #4M; bl main (twelve words on);
+      ; seventeen words: adr x21, the trampoline; adr x22, the data;
+      ; mov x20, sp; sub sp, #4M; bl main (thirteen words on);
       ; ldr x16, [x22]; br x16 -- exit, with main's answer in x0; then the
       ; trampoline: stp x29, x30, [sp, #-16]!; mov x9, x0; ldp x0, x1,
-      ; [x9]; ldp x2, x3, [x9, #16]; ldp x4, x5, [x9, #32]; ldp x6, x7,
-      ; [x9, #48]; blr x8; ldp x29, x30, [sp], #16; ret
+      ; [x9]; ldp x2, x3, [x9, #16]; ldp x4, x5, [x9, #32]; ldp d0, d1,
+      ; [x9, #48]; ldp d2, d3, [x9, #64]; blr x8; ldp x29, x30, [sp], #16;
+      ; ret
       (%cc-gen-cat
         (map %cc-gen-le32
           (list (%cc-gen-adr 21 28)
                 (%cc-gen-adr 22 (- dataat 4))
                 0x910003F4
                 (| 0xD14003FF (<< (/ %cc-gen-region 4096) 10))
-                0x9400000C
+                0x9400000D
                 0xF94002D0 0xD61F0200
                 0xA9BF7BFD 0xAA0003E9 0xA9400520 0xA9410D22 0xA9421524
-                0xA9431D26 0xD63F0100 0xA8C17BFD 0xD65F03C0)))
-      ; ninety-five bytes: mov rax, [rsp] (argc); lea rsi, [rsp+8] (argv);
-      ; lea r13, [rip+35] (the trampoline); lea r14, [rip+...] (the data);
-      ; mov r12, rsp; sub rsp, 4M; call main (fifty-seven bytes on);
-      ; mov rdi, rax; mov r11, [r14]; and rsp, -16; call r11 -- exit; then
-      ; the trampoline: push rbp; mov rbp, rsp; and rsp, -16; mov r11, rdi;
-      ; mov rdi, [r11]; mov rsi, [r11+8]; mov rdx, [r11+16];
-      ; mov rcx, [r11+24]; mov r8, [r11+32]; mov r9, [r11+40];
-      ; xor eax, eax; call r10; mov rsp, rbp; pop rbp; ret
+                0x6D430520 0x6D440D22 0xD63F0100 0xA8C17BFD 0xD65F03C0)))
+      ; a hundred and nineteen bytes: mov rax, [rsp] (argc); lea rsi,
+      ; [rsp+8] (argv); lea r13, [rip+35] (the trampoline); lea r14,
+      ; [rip+...] (the data); mov r12, rsp; sub rsp, 4M; call main
+      ; (eighty-one bytes on); mov rdi, rax; mov r11, [r14]; and rsp, -16;
+      ; call r11 -- exit; then the trampoline: push rbp; mov rbp, rsp;
+      ; and rsp, -16; mov r11, rdi; mov rdi, [r11]; mov rsi, [r11+8];
+      ; mov rdx, [r11+16]; mov rcx, [r11+24]; mov r8, [r11+32];
+      ; mov r9, [r11+40]; movsd xmm0..xmm3, [r11+48..72]; xor eax, eax;
+      ; call r10; mov rsp, rbp; pop rbp; ret
       (%cc-gen-cat
         (list (list 0x48 0x8B 0x04 0x24)
               (list 0x48 0x8D 0x74 0x24 0x08)
@@ -157,16 +162,18 @@
               (list 0x4C 0x8D 0x35) (%cc-gen-le32 (- dataat 23))
               (list 0x49 0x89 0xE4)
               (list 0x48 0x81 0xEC) (%cc-gen-le32 %cc-gen-region)
-              (list 0xE8) (%cc-gen-le32 57)
+              (list 0xE8) (%cc-gen-le32 81)
               (list 0x48 0x89 0xC7 0x4D 0x8B 0x1E 0x48 0x83 0xE4 0xF0 0x41 0xFF 0xD3)
               (list 0x55 0x48 0x89 0xE5 0x48 0x83 0xE4 0xF0 0x49 0x89 0xFB
                     0x49 0x8B 0x3B 0x49 0x8B 0x73 0x08 0x49 0x8B 0x53 0x10
                     0x49 0x8B 0x4B 0x18 0x4D 0x8B 0x43 0x20 0x4D 0x8B 0x4B 0x28
+                    0xF2 0x41 0x0F 0x10 0x43 0x30 0xF2 0x41 0x0F 0x10 0x4B 0x38
+                    0xF2 0x41 0x0F 0x10 0x53 0x40 0xF2 0x41 0x0F 0x10 0x5B 0x48
                     0x31 0xC0 0x41 0xFF 0xD2 0x48 0x89 0xEC 0x5D 0xC3))))))
 
 ; how long the entry is; the container lays the code out from here
 (def %cc-gen-entry-len
-  (fn (_ target) (if (eq? target (lit macho-arm64)) 64 95)))
+  (fn (_ target) (if (eq? target (lit macho-arm64)) 68 119)))
 
 ; where the container puts the data, as a distance from the entry's start
 (def %cc-gen-data-at
@@ -200,6 +207,135 @@
     (do (%cc-gen! (lit mov) x2 (imm 32))
         (%cc-gen! (lit lslv) x0 x0 x2)
         (%cc-gen! (lit lsrv) x0 x0 x2))))
+
+; --- doubles -----------------------------------------------------------------
+; A double is held as its IEEE bits in a general register, as a long is.
+; Each operation on it moves the bits to d0 and d1, works there and moves
+; the answer back; nothing stays in a d register between operations.  x1
+; can hold a place's address while a value converts, so the conversions
+; keep off it.
+
+(def %cc-gen-double? (fn (_ k) (eq? k (lit double))))
+(def %cc-gen-top-bit (<< 1 63))
+(def %cc-gen-two-63 0x43E0000000000000)   ; 2^63 as a double
+(def %cc-gen-one 0x3FF0000000000000)      ; 1.0
+
+; x0, an integer of kind FROM, as a double.  An unsigned long past the
+; signed range converts halved, its last bit kept so it rounds as C does,
+; and doubled.
+(def %cc-gen-int->double!
+  (fn (_ from)
+    (if (eq? from (lit ulong))
+      (let ((big (%cc-gen-label)) (done (%cc-gen-label)))
+        (do (%cc-gen! (lit cmp) x0 (imm 0))
+            (%cc-gen! (lit b/lt) (label big))
+            (%cc-gen! (lit scvtf) d0 x0)
+            (%cc-gen! (lit b) (label done))
+            (asm-label! %cc-gen-asm big)
+            (%cc-gen! (lit mov) x2 (imm 1))
+            (%cc-gen! (lit and) x2 x2 x0)
+            (%cc-gen! (lit fmov/d) d1 x2)
+            (%cc-gen! (lit mov) x2 (imm 1))
+            (%cc-gen! (lit lsrv) x0 x0 x2)
+            (%cc-gen! (lit fmov/x) x2 d1)
+            (%cc-gen! (lit orr) x0 x0 x2)
+            (%cc-gen! (lit scvtf) d0 x0)
+            (%cc-gen! (lit fadd) d0 d0 d0)
+            (asm-label! %cc-gen-asm done)
+            (%cc-gen! (lit fmov/x) x0 d0)))
+      (do (%cc-gen! (lit scvtf) d0 x0)
+          (%cc-gen! (lit fmov/x) x0 d0)))))
+
+; x0, a double, as an integer of KIND, toward zero.  An unsigned long at
+; 2^63 or past it converts less 2^63 and takes the top bit back.
+(def %cc-gen-double->int!
+  (fn (_ kind)
+    (%cc-gen! (lit fmov/d) d0 x0)
+    (if (eq? kind (lit ulong))
+      (let ((small (%cc-gen-label)) (done (%cc-gen-label)))
+        (do (asm-load-imm64! %cc-gen-asm x2 %cc-gen-two-63)
+            (%cc-gen! (lit fmov/d) d1 x2)
+            (%cc-gen! (lit flt) x2 d0 d1)
+            (%cc-gen! (lit cmp) x2 (imm 0))
+            (%cc-gen! (lit b/ne) (label small))
+            (%cc-gen! (lit fsub) d0 d0 d1)
+            (%cc-gen! (lit fcvtzs) x0 d0)
+            (asm-load-imm64! %cc-gen-asm x2 %cc-gen-top-bit)
+            (%cc-gen! (lit eor) x0 x0 x2)
+            (%cc-gen! (lit b) (label done))
+            (asm-label! %cc-gen-asm small)
+            (%cc-gen! (lit fcvtzs) x0 d0)
+            (asm-label! %cc-gen-asm done)))
+      (do (%cc-gen! (lit fcvtzs) x0 d0)
+          (%cc-gen-convert! kind (lit long))))))
+
+; the doubles in x0 and x1 put together by OP, into x0
+(def %cc-gen-double-bin!
+  (fn (_ op)
+    (def f
+      (match
+        ((string=? op "+") (lit fadd))
+        ((string=? op "-") (lit fsub))
+        ((string=? op "*") (lit fmul))
+        ((string=? op "/") (lit fdiv))
+        (#t (%cc-gen-no (string-append "the operator " op " on a double")))))
+    (%cc-gen! (lit fmov/d) d0 x0)
+    (%cc-gen! (lit fmov/d) d1 x1)
+    (%cc-gen! f d0 d0 d1)
+    (%cc-gen! (lit fmov/x) x0 d0)))
+
+; x0 = 1 when the doubles in x0 and x1 compare as OP says, else 0: false
+; for a NaN on either side but for !=
+(def %cc-gen-double-compare!
+  (fn (_ op)
+    (%cc-gen! (lit fmov/d) d0 x0)
+    (%cc-gen! (lit fmov/d) d1 x1)
+    (match
+      ((string=? op "<") (%cc-gen! (lit flt) x0 d0 d1))
+      ((string=? op ">") (%cc-gen! (lit flt) x0 d1 d0))
+      ((string=? op "==") (%cc-gen! (lit feq) x0 d0 d1))
+      ((string=? op "!=")
+        (do (%cc-gen! (lit feq) x0 d0 d1)
+            (%cc-gen! (lit mov) x1 (imm 1))
+            (%cc-gen! (lit eor) x0 x0 x1)))
+      ((string=? op "<=")
+        (do (%cc-gen! (lit flt) x0 d0 d1)
+            (%cc-gen! (lit feq) x1 d0 d1)
+            (%cc-gen! (lit orr) x0 x0 x1)))
+      ((string=? op ">=")
+        (do (%cc-gen! (lit flt) x0 d1 d0)
+            (%cc-gen! (lit feq) x1 d0 d1)
+            (%cc-gen! (lit orr) x0 x0 x1)))
+      (#t (%cc-gen-no (string-append "the comparison " op))))))
+
+; x0, a double, without its sign: zero at either zero, which is what a
+; test of it asks
+(def %cc-gen-drop-sign!
+  (fn (_)
+    (do (%cc-gen! (lit mov) x2 (imm 1))
+        (%cc-gen! (lit lslv) x0 x0 x2))))
+
+; the unary OP on the double in x0: - flips its sign, ! tests it
+(def %cc-gen-double-unary!
+  (fn (_ op)
+    (match
+      ((string=? op "-")
+        (do (asm-load-imm64! %cc-gen-asm x2 %cc-gen-top-bit)
+            (%cc-gen! (lit eor) x0 x0 x2)))
+      ((string=? op "!")
+        (do (%cc-gen-drop-sign!)
+            (%cc-gen! (lit cmp) x0 (imm 0))
+            (%cc-gen-flag! (lit b/eq))))
+      (#t (%cc-gen-no (string-append "the operator " op " on a double"))))))
+
+; the double in x0 moved one step, up or down
+(def %cc-gen-double-step!
+  (fn (_ up)
+    (do (asm-load-imm64! %cc-gen-asm x2 %cc-gen-one)
+        (%cc-gen! (lit fmov/d) d0 x0)
+        (%cc-gen! (lit fmov/d) d1 x2)
+        (%cc-gen! (if up (lit fadd) (lit fsub)) d0 d0 d1)
+        (%cc-gen! (lit fmov/x) x0 d0))))
 
 ; --- integer kinds -----------------------------------------------------------
 ; A value is held in a whole register in the form its kind reads it: an int,
@@ -448,6 +584,7 @@
       ((eq? kind (lit long)) kind)
       ((eq? kind (lit uint)) kind)
       ((eq? kind (lit ulong)) kind)
+      ((eq? kind (lit double)) kind)
       ((%cc-gen-ptr? kind) kind)
       ((%cc-gen-fnptr? kind) kind)
       ((%cc-gen-bits? kind) (do (self (first (rest kind)) what) kind))
@@ -461,7 +598,7 @@
             kind))
       (#t (%cc-gen-no
             (string-append what
-              " that is not an integer, a pointer, an array or a struct"))))))
+              " that is not an integer, a double, a pointer, an array or a struct"))))))
 
 (def %cc-gen-byte? (fn (_ kind) (if (eq? kind (lit char)) #t (eq? kind (lit uchar)))))
 (def %cc-gen-half? (fn (_ kind) (if (eq? kind (lit short)) #t (eq? kind (lit ushort)))))
@@ -496,7 +633,8 @@
       ((%cc-gen-wide? kind) (lit str))
       (#t (do (%cc-gen-value-kind! kind) (lit strw))))))
 
-; the kinds held in all 64 bits: an address, a long, an unsigned long
+; the kinds held in all 64 bits: an address, a long, an unsigned long, a
+; double
 (def %cc-gen-wide?
   (fn (_ k)
     (match
@@ -504,6 +642,7 @@
       ((%cc-gen-fnptr? k) #t)
       ((eq? k (lit long)) #t)
       ((eq? k (lit ulong)) #t)
+      ((eq? k (lit double)) #t)
       (#t #f))))
 
 ; a pointer to a function, (fnptr RET): the function's address, which a
@@ -542,16 +681,18 @@
 (def %cc-gen-epilogue ())   ; where `return` goes in the function being compiled
 
 ; A function that calls into the C library has an area in its frame for the
-; calls: six eight-byte arguments, which the trampoline loads where the C
-; calling convention takes them; then x86-64's va_list record, whose
-; offsets say the argument registers are used up; then a slot for each
-; argument a variadic call passes past its fixed ones, which the va_list
-; points at -- directly on arm64 macOS, through the record on x86-64.  The
-; arguments are all evaluated before any goes into the area, so a call
-; among another's arguments does not disturb it.
+; calls: six eight-byte integer arguments and four doubles, which the
+; trampoline loads where the C calling convention takes them; then
+; x86-64's va_list record, whose offsets say the argument registers are
+; used up; then a slot for each argument a variadic call passes past its
+; fixed ones, which the va_list points at -- directly on arm64 macOS,
+; through the record on x86-64.  The arguments are all evaluated before any
+; goes into the area, so a call among another's arguments does not disturb
+; it.
 (def %cc-gen-ca 0)          ; where the area starts
-(def %cc-gen-ca-record 48)  ; x86-64's va_list record
-(def %cc-gen-ca-vars 72)    ; the variable arguments
+(def %cc-gen-ca-doubles 48) ; the four doubles
+(def %cc-gen-ca-record 80)  ; x86-64's va_list record
+(def %cc-gen-ca-vars 104)   ; the variable arguments
 (def %cc-gen-sysv? #f)      ; whether the target takes x86-64's va_list
 
 ; The data a program carries, in the segment the container maps readable and
@@ -918,18 +1059,24 @@
             (zeros 8 ())))
       ((eq? (first init) (lit initlist))
         (%cc-gen-no "a braced initializer for something that is not an array or a struct"))
-      (#t (%cc-gen-value-bytes kind (%cc-gen-fold init))))))
+      (#t (let ((v (%cc-gen-fold init)))
+            (%cc-gen-value-bytes kind (convert-double v (%cc-gen-kind-of init) kind)))))))
 
 ; What a global starts out holding.  C asks for a constant here, so the
 ; value is worked out now: each operation in the kind C's conversions give
 ; it, its result in that kind's form, as the code for it would leave it.
 ; The program starts with the value's low bytes, as many as the global's
-; kind has, in place.
+; kind has, in place.  A double is worked out by run's own operations
+; (cc/eval.x), which are the machine's.
 (def %cc-gen-fold
   (fn (self node)
     (let ((t (first node)))
       (match
         ((eq? t (lit num)) (%cc-gen-form (first (rest node)) (%cc-gen-num-kind node)))
+        ((if (eq? t (lit un)) (%cc-gen-double? (%cc-gen-kind-of node)) #f)
+          (if (string=? (first (rest node)) "-")
+            (^ (self (first (rest (rest node)))) %cc-gen-top-bit)
+            (%cc-gen-no (string-append "a global double initialized with " (first (rest node))))))
         ((eq? t (lit un))
           (let ((op (first (rest node))) (v (self (first (rest (rest node))))))
             (%cc-gen-form
@@ -940,14 +1087,21 @@
                 (#t (%cc-gen-no (string-append "a global initialized with " op))))
               (%cc-gen-kind-of node))))
         ((eq? t (lit bin))
-          (let ((a (self (first (rest (rest node)))))
-                (b (self (first (rest (rest (rest node)))))))
-            (%cc-gen-fold-bin (first (rest node)) a b (%cc-gen-kind-of node))))
+          (let ((l (first (rest (rest node)))) (r (first (rest (rest (rest node))))))
+            (def op (first (rest node)))
+            (def k (%cc-gen-kind-of node))
+            (match
+              ((not (%cc-gen-double? k)) (%cc-gen-fold-bin op (self l) (self r) k))
+              ((if (string=? op "+") #t
+                 (if (string=? op "-") #t (if (string=? op "*") #t (string=? op "/"))))
+                (double-arith op (convert-double (self l) (%cc-gen-kind-of l) k)
+                  (convert-double (self r) (%cc-gen-kind-of r) k)))
+              (#t (%cc-gen-no (string-append "the operator " op " on a double"))))))
         ((eq? t (lit cast))
-          (let ((k (first (rest node))))
+          (let ((k (first (rest node))) (e (first (rest (rest node)))))
             (if (if (eq? k (lit void)) #t (%cc-gen-aggregate? k))
               (%cc-gen-no "a global initialized by something other than a constant"))
-            (%cc-gen-form (self (first (rest (rest node)))) k)))
+            (%cc-gen-form (convert-double (self e) (%cc-gen-kind-of e) k) k)))
         (#t (%cc-gen-no "a global initialized by something other than a constant"))))))
 
 ; OP on the constants A and B, in KIND: each operand converted to it first,
@@ -1223,21 +1377,41 @@
 ; x0, a value of kind FROM, converted to KIND: narrowed to a char or short,
 ; and into an int's or an unsigned int's form from any other kind, an
 ; address included.  The eight-byte kinds need nothing: every value's form
-; is already its conversion to them.
+; is already its conversion to them.  A double converts to and from the
+; integers as C says (the doubles, above).
 (def %cc-gen-convert!
   (fn (_ kind from)
     (match
+      ((%cc-gen-double? kind) (if (%cc-gen-double? from) () (%cc-gen-int->double! from)))
+      ((%cc-gen-double? from) (%cc-gen-double->int! kind))
       ((if (%cc-gen-byte? kind) #t (%cc-gen-half? kind)) (%cc-gen-narrow! kind))
       ((eq? kind (lit int)) (if (%cc-gen-int-form? from) () (%cc-gen-int!)))
       ((eq? kind (lit uint)) (if (eq? from (lit uint)) () (%cc-gen-uint!)))
       (#t ()))))
 
 ; an assignment's store, of a value of kind FROM: the value it answers is
-; converted as the stored one was
+; converted as the stored one was.  A double's bits are not an integer's,
+; so a store with a double on either side converts first.
 (def %cc-gen-store!
   (fn (_ place from)
-    (do (%cc-gen-put! place)
-        (%cc-gen-convert! (%cc-gen-place-kind place) from))))
+    (def k (%cc-gen-place-kind place))
+    (if (if (%cc-gen-double? k) #t (%cc-gen-double? from))
+      (do (%cc-gen-convert! k from) (%cc-gen-put! place))
+      (do (%cc-gen-put! place) (%cc-gen-convert! k from)))))
+
+; x0, of kind FROM, as KIND when either is a double; any other value is
+; left as it is, for a store to cut
+(def %cc-gen-convert-double!
+  (fn (_ kind from)
+    (if (if (%cc-gen-double? kind) #t (%cc-gen-double? from)) (%cc-gen-convert! kind from) ())))
+
+; NODE's value into x0 and compared with zero, for a branch on whether it
+; is true: a double is false at either zero
+(def %cc-gen-cond!
+  (fn (_ node)
+    (do (%cc-gen-expr! node)
+        (if (%cc-gen-double? (%cc-gen-kind-of node)) (%cc-gen-drop-sign!) ())
+        (%cc-gen! (lit cmp) x0 (imm 0)))))
 
 ; A value of KIND whose address is in x0, into x0: loaded, unless it is an
 ; array, whose value is that address.
@@ -1411,6 +1585,7 @@
             (def k (promoted-c-type (%cc-gen-kind-of (first (rest (rest node))))))
             (do (self (first (rest (rest node))))
                 (match
+                  ((%cc-gen-double? k) (%cc-gen-double-unary! op))
                   ((string=? op "-")
                     (do (%cc-gen! (lit sub) x0 xzr x0) (%cc-gen-normalize! k)))
                   ((string=? op "~")
@@ -1437,21 +1612,31 @@
             (def k (if (if (string=? op "<<") #t (string=? op ">>"))
                      (promoted-c-type ka)
                      (common-c-type ka kb)))
-            (do (self (first (rest (rest node))))
-                (asm-push! %cc-gen-asm x0)
-                (self (first (rest (rest (rest node)))))
-                (%cc-gen! (lit mov) x1 x0)
-                (asm-pop! %cc-gen-asm x0)
-                ; an int converted to an unsigned int takes that kind's form
-                (if (if (eq? k (lit uint)) (not addr?) #f)
-                  (do (%cc-gen-uint!) (%cc-gen-uint-x1!))
-                  ())
-                (match
-                  ((eq? t (lit cmp))
-                    (do (if addr? (%cc-gen! (lit cmp) x0 x1) (%cc-gen-compare! k))
-                        (%cc-gen-flag! (%cc-gen-branch op))))
-                  (addr? (%cc-gen-addr-bin! op ka kb))
-                  (#t (%cc-gen-bin! op k))))))
+            (if (if (%cc-gen-double? k) (not addr?) #f)
+              ; each operand converted to a double as it is worked out
+              (do (self (first (rest (rest node))))
+                  (%cc-gen-convert! k ka)
+                  (asm-push! %cc-gen-asm x0)
+                  (self (first (rest (rest (rest node)))))
+                  (%cc-gen-convert! k kb)
+                  (%cc-gen! (lit mov) x1 x0)
+                  (asm-pop! %cc-gen-asm x0)
+                  (if (eq? t (lit cmp)) (%cc-gen-double-compare! op) (%cc-gen-double-bin! op)))
+              (do (self (first (rest (rest node))))
+                  (asm-push! %cc-gen-asm x0)
+                  (self (first (rest (rest (rest node)))))
+                  (%cc-gen! (lit mov) x1 x0)
+                  (asm-pop! %cc-gen-asm x0)
+                  ; an int converted to an unsigned int takes that kind's form
+                  (if (if (eq? k (lit uint)) (not addr?) #f)
+                    (do (%cc-gen-uint!) (%cc-gen-uint-x1!))
+                    ())
+                  (match
+                    ((eq? t (lit cmp))
+                      (do (if addr? (%cc-gen! (lit cmp) x0 x1) (%cc-gen-compare! k))
+                          (%cc-gen-flag! (%cc-gen-branch op))))
+                    (addr? (%cc-gen-addr-bin! op ka kb))
+                    (#t (%cc-gen-bin! op k)))))))
         ((eq? t (lit var))
           (let ((at (%cc-gen-place-of (first (rest node)))))
             (if (%cc-gen-aggregate? (%cc-gen-place-kind at))
@@ -1485,8 +1670,7 @@
             (def k (%cc-gen-kind-of node))
             (def arm
               (fn (_ n) (do (self n) (%cc-gen-convert! k (%cc-gen-kind-of n)))))
-            (do (self (first (rest node)))
-                (%cc-gen! (lit cmp) x0 (imm 0))
+            (do (%cc-gen-cond! (first (rest node)))
                 (%cc-gen! (lit b/eq) (label else-))
                 (arm (first (rest (rest node))))
                 (%cc-gen! (lit b) (label done))
@@ -1498,11 +1682,9 @@
           (let ((no (%cc-gen-label)) (done (%cc-gen-label)))
             (def out (if (eq? t (lit and)) 0 1))
             (def leave (if (eq? t (lit and)) (lit b/eq) (lit b/ne)))
-            (do (self (first (rest node)))
-                (%cc-gen! (lit cmp) x0 (imm 0))
+            (do (%cc-gen-cond! (first (rest node)))
                 (%cc-gen! leave (label no))
-                (self (first (rest (rest node))))
-                (%cc-gen! (lit cmp) x0 (imm 0))
+                (%cc-gen-cond! (first (rest (rest node))))
                 (%cc-gen! leave (label no))
                 (%cc-gen! (lit mov) x0 (imm (- 1 out)))
                 (%cc-gen! (lit b) (label done))
@@ -1549,9 +1731,10 @@
         ; the old value waits in x8 for the postfix forms: x2 is the
         ; re-extension's shift amount
         (%cc-gen! (lit mov) x8 x0)
-        (if (%cc-gen-ptr? k)
-          (%cc-gen-bump! up (kind-size (kind-elem k)))
-          (do (%cc-gen-bump! up 1) (%cc-gen-normalize! (promoted-c-type k))))
+        (match
+          ((%cc-gen-ptr? k) (%cc-gen-bump! up (kind-size (kind-elem k))))
+          ((%cc-gen-double? k) (%cc-gen-double-step! up))
+          (#t (do (%cc-gen-bump! up 1) (%cc-gen-normalize! (promoted-c-type k)))))
         (%cc-gen-store! at k)
         (if after () (%cc-gen! (lit mov) x0 x8)))))
 
@@ -1609,12 +1792,20 @@
 ; va_list after the fixed ones.  x8 takes the function's address from its
 ; slot in the data, x0 the area's address, and the trampoline makes the
 ; call.  The answer is put in the form of the C type the function's header
-; declares.
+; declares.  One of the library's functions on doubles (library-double-fns)
+; takes its arguments as doubles, in the area's double slots, and a double
+; answer comes back in d0.
 (def %cc-gen-libc-call!
   (fn (_ name args)
     (def v (%cc-gen-variadic name))
-    (if (not (%cc-gen-libc-has? (if (null? v) name (first v))))
+    ; the maths functions are libm's, which glibc keeps apart from the C
+    ; library this process can ask
+    (def label (library-double-label name))
+    (if (if (null? label) (not (%cc-gen-libc-has? (if (null? v) name (first v)))) #f)
       (%cc-gen-no (string-append "a call to " name)))
+    (def doubles? (if (null? label) #f (not (string=? label "s0->d"))))
+    (if (if doubles? (not (= (length args) (if (string=? label "dd->d") 2 1))) #f)
+      (%cc-gen-no (string-append "a call to " name " with the wrong number of arguments")))
     (def fixed (if (null? v) (length args) (first (rest v))))
     (def nvar (- (length args) fixed))
     (if (< nvar 0) (%cc-gen-no (string-append name " with too few arguments")))
@@ -1625,6 +1816,7 @@
       (fn (self as)
         (if (null? as) ()
           (do (%cc-gen-expr! (first as))
+              (if doubles? (%cc-gen-convert! (lit double) (%cc-gen-kind-of (first as))) ())
               (asm-push! %cc-gen-asm x0)
               (self (rest as))))))
     ; the last pushed is on top: slots K down to 0 from BASE
@@ -1636,7 +1828,7 @@
               (self (- k 1) base)))))
     (do (push-all args)
         (pop-into (- nvar 1) %cc-gen-ca-vars)
-        (pop-into (- fixed 1) 0)
+        (pop-into (- fixed 1) (if doubles? %cc-gen-ca-doubles 0))
         (if (null? v) ()
           (do (%cc-gen-address! x19 (+ %cc-gen-ca %cc-gen-ca-vars))
               (if %cc-gen-sysv?
@@ -1655,7 +1847,9 @@
         (%cc-gen-address! x19 %cc-gen-ca)
         (%cc-gen-frame-top!)
         (%cc-gen! (lit blr) x21)
-        (%cc-gen-normalize! (library-c-type name)))))
+        (if (%cc-gen-double? (library-c-type name))
+          (%cc-gen! (lit fmov/x) x0 d0)
+          (%cc-gen-normalize! (library-c-type name))))))
 
 ; the frame stack's top, where the gate takes it up again when the library
 ; calls one of the program's functions
@@ -1853,6 +2047,7 @@
                     (%cc-gen-no "a struct passed for a parameter that is not one")
                     ()))
                 (%cc-gen-expr! (first t))
+                (%cc-gen-convert-double! (first (rest t)) (%cc-gen-kind-of (first t)))
                 (asm-push! %cc-gen-asm x0)
                 (self (rest ts)))))))
     ; the last pushed is on top
@@ -1954,7 +2149,9 @@
                       (let ((item (first is)))
                         (if (%cc-gen-aggregate? ek)
                           (%cc-gen-init-aggregate! (elem i) item)
-                          (do (%cc-gen-expr! item) (%cc-gen-put! (elem i))))))
+                          (do (%cc-gen-expr! item)
+                              (%cc-gen-convert-double! ek (%cc-gen-kind-of item))
+                              (%cc-gen-put! (elem i))))))
                     (fill (+ i 1) (if (null? is) () (rest is)))))))
           (fill 0 items)))
       ((if (eq? (first init) (lit str)) (%cc-gen-byte? ek) #f)
@@ -2010,7 +2207,9 @@
                 (if (< start end) (%cc-gen-no "more initializers than a union takes"))
                 (do (if (%cc-gen-aggregate? fk)
                       (%cc-gen-init-aggregate! fat (first is))
-                      (do (%cc-gen-expr! (first is)) (%cc-gen-put! fat)))
+                      (do (%cc-gen-expr! (first is))
+                          (%cc-gen-convert-double! fk (%cc-gen-kind-of (first is)))
+                          (%cc-gen-put! fat)))
                     (fill (rest fs) (rest is) (+ start size)))))))
         (fill fields items 0)))))
 
@@ -2093,8 +2292,7 @@
 ; a condition, then a branch taken when it is false
 (def %cc-gen-test!
   (fn (_ node to)
-    (do (%cc-gen-expr! node)
-        (%cc-gen! (lit cmp) x0 (imm 0))
+    (do (%cc-gen-cond! node)
         (%cc-gen! (lit b/eq) (label to)))))
 
 ; where a break or a continue goes: the innermost loop's, but a switch's
@@ -2135,7 +2333,9 @@
             (def init (first (rest (rest (rest node)))))
             (if (%cc-gen-aggregate? (%cc-gen-place-kind at))
               (if (null? init) () (%cc-gen-init-aggregate! at init))
-              (do (if (null? init) (%cc-gen-const! 0) (%cc-gen-expr! init))
+              (do (if (null? init) (%cc-gen-const! 0)
+                    (do (%cc-gen-expr! init)
+                        (%cc-gen-convert-double! (%cc-gen-place-kind at) (%cc-gen-kind-of init))))
                   (%cc-gen-put! at)))))
         ((eq? t (lit expr)) (%cc-gen-expr! (first (rest node))))
         ((eq? t (lit if))
@@ -2162,8 +2362,7 @@
             (do (asm-label! %cc-gen-asm top)
                 (self (first (rest node)))
                 (asm-label! %cc-gen-asm again)
-                (%cc-gen-expr! (first (rest (rest node))))
-                (%cc-gen! (lit cmp) x0 (imm 0))
+                (%cc-gen-cond! (first (rest (rest node))))
                 (%cc-gen! (lit b/ne) (label top))
                 (asm-label! %cc-gen-asm out)
                 (set! %cc-gen-loops (rest %cc-gen-loops)))))

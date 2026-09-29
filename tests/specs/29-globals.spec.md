@@ -68,14 +68,14 @@ tick
 
 ## the refusals
 
-### a global double
+### a global float
 
 ```cc
 (display (guard (e (do (display "refused: ") (write e) ""))
-  (cc-exe-run "double d;\nint main(void) { return 0; }")))
+  (cc-exe-run "float d;\nint main(void) { return 0; }")))
 ```
 ---
-    refused: #<err:cc cc: parse: not built yet: double>
+    refused: #<err:cc cc: parse: not built yet: float>
 
 ### one initialized by something that is not a constant
 

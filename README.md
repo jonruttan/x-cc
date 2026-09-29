@@ -97,10 +97,14 @@ extended by its sign.  An operator works in the kind C's usual
 conversions give its operands -- `int` for `char` and `short`, then
 `unsigned int`, `long` and `unsigned long` -- and a store converts the
 value to its place's kind.  An integer constant has the type its
-suffixes and its value give it.  Anything else refuses by name:
-floating point, a call into the C library with more than six arguments,
-and a global initialized by something other than a constant or an
-address.
+suffixes and its value give it.  A `double` is held as its IEEE bits
+where a long would be, and works in the machine's d registers; it meets
+the integer kinds as C's conversions say, and the maths functions --
+`sqrt`, `pow`, `fmod` and the rest -- are the C library's, called with
+their arguments in the d registers.  Anything else refuses by name:
+`float` and `long double`, a call into the C library with more than six
+arguments, and a global initialized by something other than a constant
+or an address.
 
     x -l cc -- run prog.c
 
@@ -188,8 +192,12 @@ value moves out of the popped frame into a fresh slot in the caller's
 text as a string literal and `A ## B` pastes, the rescan lexing the
 joined token.
 
-Refused loudly, each a recorded pending: floats, casts to
-function-pointer types.
+Doubles run as they compile: a double is its IEEE bits, and each
+operation on it is the machine's, through the platform's stubs
+(x/num/float).
+
+Refused loudly, each a recorded pending: `float`, `long double`, casts
+to function-pointer types.
 
 Paired with x-lang v0.17.0 (`lang.xon` is the checkable row).
 
