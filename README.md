@@ -31,9 +31,14 @@ any of them, assignment, `++` and `--`,
 `goto`, `return` and calls, recursion included, over integer constants and
 string literals, `+ - * / %`, `& | ^ << >>`, the six comparisons,
 `&&`, `||`, the ternary, the comma, unary `- ~ ! & *`, casts,
-subscripts, and `.` and `->`.  A pointer to a function is the function's
-address, and a call through one hands over up to three arguments, none
-of them a struct, in the first registers.
+subscripts, and `.` and `->`.  A pointer to a function leads to a thunk
+that takes the function's address and branches to a gate the compiler
+writes out after the code, and a call through one hands over up to three
+arguments, none of them a struct.  The gate keeps the caller's
+registers, takes up the program's own -- the data and the trampoline
+from where the gate stands, the frame stack's top from where the last
+call out left it -- and calls the function, so the C library can call
+the program back: a comparator handed to `qsort` or `bsearch`.
 A call to a function the program does not define goes to the C
 library, which the compiler asks, in its own process, whether it has
 the function, refusing the call by name when it does not.  Each such
