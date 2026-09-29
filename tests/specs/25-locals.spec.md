@@ -95,10 +95,10 @@ Each status below is the one the same source gives when compiled with
 
 ## the refusals
 
-### a floating-point local is not compiled yet
+### a float local is not compiled yet
 
 ```cc
-(write (guard (e (e msg)) (cc-exe-run "int main(void) { double d = 1.5; return 0; }")))
+(write (guard (e (e msg)) (cc-exe-run "int main(void) { float f = 1.5; return 0; }")))
 ```
 ---
-    "cc: parse: not built yet: double"
+    "cc: parse: not built yet: float"

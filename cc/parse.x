@@ -29,7 +29,7 @@
 ; unsized array takes its size from one) and function pointers (the
 ; `(*NAME)(params)` declarator is a pointer-wide value; a call whose callee is
 ; any expression but a bare name is (callx E ARGS)) and goto parse.
-; Refused loudly: floats, a recorded pending.
+; Refused loudly: `float` and `long double`, a recorded pending.
 (module cc/parse)
 
 (import cc/prims append byte-len convert length map reverse string-append
@@ -69,7 +69,7 @@
 
 ; the unimplemented keywords refuse by name
 (def %cc-p-hard
-  (list (lit float) (lit double)))
+  (list (lit float)))
 
 (def %cc-p-hard?
   (fn (_ toks)
@@ -88,16 +88,18 @@
     (if (null? toks) #f
       (if (eq? (first (first toks)) (lit kw))
         (let ((k (first (rest (first toks)))))
-          (if (eq? k (lit int)) #t
-            (if (eq? k (lit char)) #t
-              (if (eq? k (lit void)) #t
-                (if (eq? k (lit long)) #t
-                  (if (eq? k (lit short)) #t
-                    (if (eq? k (lit unsigned)) #t
-                      (if (eq? k (lit signed)) #t
-                        (if (eq? k (lit const)) #t
-                          (if (eq? k (lit static)) #t
-                            (eq? k (lit extern))))))))))))
+          (match
+            ((eq? k (lit int)) #t)
+            ((eq? k (lit char)) #t)
+            ((eq? k (lit void)) #t)
+            ((eq? k (lit double)) #t)
+            ((eq? k (lit long)) #t)
+            ((eq? k (lit short)) #t)
+            ((eq? k (lit unsigned)) #t)
+            ((eq? k (lit signed)) #t)
+            ((eq? k (lit const)) #t)
+            ((eq? k (lit static)) #t)
+            (#t (eq? k (lit extern)))))
         #f))))
 
 ; The scalar the specifiers name.  `unsigned`/`signed` pick the flavour and
@@ -115,8 +117,15 @@
               ((eq? k (lit signed)) (self (rest ts) width #f))
               ((eq? k (lit char)) (self (rest ts) (lit char) unsigned?))
               ((eq? k (lit short)) (self (rest ts) (lit short) unsigned?))
-              ((eq? k (lit long)) (self (rest ts) (lit long) unsigned?))
+              ((eq? k (lit long))
+                (if (eq? width (lit double))
+                  (%cc-p-err "not built yet: long double")
+                  (self (rest ts) (lit long) unsigned?)))
               ((eq? k (lit void)) (self (rest ts) (lit void) unsigned?))
+              ((eq? k (lit double))
+                (if (eq? width (lit long))
+                  (%cc-p-err "not built yet: long double")
+                  (self (rest ts) (lit double) unsigned?)))
               (#t (self (rest ts) width unsigned?)))))))
     (def got (go toks () #f))
     (def width (first (first got)))
@@ -124,6 +133,7 @@
     (pair
       (match
         ((eq? width (lit void)) (lit void))
+        ((eq? width (lit double)) (lit double))
         ((eq? width (lit char)) (if unsigned? (lit uchar) (lit char)))
         ((eq? width (lit short)) (if unsigned? (lit ushort) (lit short)))
         ((eq? width (lit long)) (if unsigned? (lit ulong) (lit long)))

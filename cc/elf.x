@@ -13,7 +13,8 @@
 ; fixed address; the third maps the data readable and writable on the next
 ; page; the fourth points the loader at the dynamic section.  The data ends
 ; with what the loader reads: the dynamic section, which names libc.so.6
-; and where the rest is; a symbol table, the program's imports each an
+; and libm.so.6, where glibc keeps the maths functions, and where the rest
+; is; a symbol table, the program's imports each an
 ; undefined function; their names; a hash table with every bucket empty,
 ; since the program defines nothing for anyone to find; and a relocation
 ; for each import's slot, which the loader fills with the function's
@@ -62,7 +63,7 @@
     (def datalen (length data))
     (def dataoff (+ %cc-elf-codeoff (elf-data-at codelen)))
     (def n (length imports))
-    ; the names: a NUL, libc.so.6, then each import's
+    ; the names: a NUL, libc.so.6, libm.so.6, then each import's
     (def names
       (let ((go (fn (self is at acc offs)
                   (if (null? is) (pair acc (reverse offs))
@@ -70,11 +71,15 @@
                       (self (rest is) (+ at (+ (byte-len s) 1))
                         (append acc (append (%cc-elf-ascii s) (list 0)))
                         (pair at offs)))))))
-        (go imports 11 (append (list 0) (append (%cc-elf-ascii "libc.so.6") (list 0))) ())))
+        (go imports 21
+          (append (list 0)
+            (append (%cc-elf-ascii "libc.so.6")
+              (append (list 0) (append (%cc-elf-ascii "libm.so.6") (list 0)))))
+          ())))
     (def strsz (length (first names)))
     ; the loader's tables, after the data at eight-byte boundaries
     (def dyn (* 8 (/ (+ dataoff datalen 7) 8)))
-    (def ndyn 11)
+    (def ndyn 12)
     (def symtab (+ dyn (* 16 ndyn)))
     (def strtab (+ symtab (* 24 (+ n 1))))
     (def hash (* 8 (/ (+ strtab strsz 7) 8)))
@@ -119,16 +124,17 @@
         (do (img-u64! img (+ dyn (* 16 k)) tag)
             (img-u64! img (+ dyn (+ (* 16 k) 8)) v))))
     (tag! 0 1 1)                        ; DT_NEEDED libc.so.6
-    (tag! 1 4 (addr hash))              ; DT_HASH
-    (tag! 2 5 (addr strtab))            ; DT_STRTAB
-    (tag! 3 6 (addr symtab))            ; DT_SYMTAB
-    (tag! 4 10 strsz)                   ; DT_STRSZ
-    (tag! 5 11 24)                      ; DT_SYMENT
-    (tag! 6 7 (addr rela))              ; DT_RELA
-    (tag! 7 8 relasz)                   ; DT_RELASZ
-    (tag! 8 9 24)                       ; DT_RELAENT
-    (tag! 9 24 0)                       ; DT_BIND_NOW
-    (tag! 10 0 0)                       ; DT_NULL
+    (tag! 1 1 11)                       ; DT_NEEDED libm.so.6
+    (tag! 2 4 (addr hash))              ; DT_HASH
+    (tag! 3 5 (addr strtab))            ; DT_STRTAB
+    (tag! 4 6 (addr symtab))            ; DT_SYMTAB
+    (tag! 5 10 strsz)                   ; DT_STRSZ
+    (tag! 6 11 24)                      ; DT_SYMENT
+    (tag! 7 7 (addr rela))              ; DT_RELA
+    (tag! 8 8 relasz)                   ; DT_RELASZ
+    (tag! 9 9 24)                       ; DT_RELAENT
+    (tag! 10 24 0)                      ; DT_BIND_NOW
+    (tag! 11 0 0)                       ; DT_NULL
 
     ; the symbols: the null one, then each import, an undefined global
     ; function; the relocations fill each slot with its symbol's address

@@ -18,6 +18,7 @@
 (import cc/prims byte-at byte-len convert integer->char length list->string
   map reverse string-append string-concat string=? substring)
 (import cc/pp cc-preprocess)
+(import x/num/float Float)
 
 ; The type handle this file asks convert for, fetched by name through the
 ; platform's public door and private to this module.
@@ -94,6 +95,32 @@
       ((= b 102) (pair 12 (+ i 1)))                       ; f
       ((= b 118) (pair 11 (+ i 1)))                       ; v
       (#t (pair (+ 0 b) (+ i 1))))))                      ; \\ \' \" \?
+
+; the end of a decimal floating constant at I, or nil when the number there
+; is an integer's: digits, then a . and digits, an exponent, or both --
+; 1.5, .5, 2., 1e3, 1.5e-3 -- then l or L, which leave it a double
+(def %cc-lex-float-end
+  (fn (_ src end i)
+    (def digits
+      (fn (self j) (if (if (< j end) (%cc-digit? (byte-at src j)) #f) (self (+ j 1)) j)))
+    (def at (fn (_ j) (if (< j end) (byte-at src j) 0)))
+    (def a (digits i))
+    (def dot? (= (at a) 46))
+    (def b (if dot? (digits (+ a 1)) a))
+    (def e? (if (= (at b) 101) #t (= (at b) 69)))
+    (def c
+      (if e?
+        (let ((s (if (if (= (at (+ b 1)) 43) #t (= (at (+ b 1)) 45)) (+ b 2) (+ b 1))))
+          (if (%cc-digit? (at s)) (digits s) ()))
+        b))
+    (match
+      ((if (= (at i) 48) (if (= (at (+ i 1)) 120) #t (= (at (+ i 1)) 88)) #f) ())
+      ((null? c) ())
+      ((not (if dot? #t e?)) ())
+      ((if (= (at c) 102) #t (= (at c) 70))
+        (Err raise (lit cc) "cc: not built yet: a float constant" ()))
+      ((if (= (at c) 108) #t (= (at c) 76)) (+ c 1))
+      (#t c))))
 
 ; number: decimal, 0x hex, 0 octal, as (VALUE KIND . NEXT); the suffixes
 ; u U l L, with the base and the value, give the literal its type
@@ -330,14 +357,21 @@
       (let ((b (byte-at src i)))
         (if (if (= b 32) #t (if (= b 9) #t (if (= b 10) #t (= b 13))))
           (self src end (+ i 1) macros expanding acc)
-          (if (%cc-digit? b)
-            ; (num VALUE), or (num VALUE KIND) when the literal is not an int
-            (let ((r (%cc-lex-num src end i)))
-              (self src end (rest (rest r)) macros expanding
-                (pair (if (eq? (first (rest r)) (lit int))
-                        (list (lit num) (first r))
-                        (list (lit num) (first r) (first (rest r))))
-                  acc)))
+          (if (if (%cc-digit? b) #t
+                (if (= b 46) (if (< (+ i 1) end) (%cc-digit? (byte-at src (+ i 1))) #f) #f))
+            ; (num VALUE), or (num VALUE KIND) when the literal is not an
+            ; int; a double's VALUE is its IEEE bits, read by the C library
+            (let ((fe (%cc-lex-float-end src end i)))
+              (if (not (null? fe))
+                (self src end fe macros expanding
+                  (pair (list (lit num) (Float str->bits (substring src i fe)) (lit double))
+                    acc))
+                (let ((r (%cc-lex-num src end i)))
+                  (self src end (rest (rest r)) macros expanding
+                    (pair (if (eq? (first (rest r)) (lit int))
+                            (list (lit num) (first r))
+                            (list (lit num) (first r) (first (rest r))))
+                      acc)))))
             (if (= b 34)                                   ; "
               (let ((r (%cc-lex-str src end (+ i 1))))
                 (self src end (rest r) macros expanding
