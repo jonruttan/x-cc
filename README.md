@@ -184,7 +184,7 @@ joined token.
 Refused loudly, each a recorded pending: floats, casts to
 function-pointer types.
 
-Paired with x-lang v0.16.0 (`lang.xon` is the checkable row).
+Paired with x-lang v0.17.0 (`lang.xon` is the checkable row).
 
 ## Tests
 
