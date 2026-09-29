@@ -415,9 +415,11 @@
 ; and an integer is already in its C type -- seven at most.  A variadic
 ; function goes through its v- form, the arguments after its fixed ones laid
 ; out as a va_list: on arm64 macOS that is a pointer to eight-byte slots, and
-; on x86-64 Linux a record whose offsets say the registers are used up, so
-; every argument is read from the slots.  The answer is converted to the C
-; type the function's header declares (library-c-type).
+; on Linux a record whose offsets say the registers are used up, so every
+; argument is read from the slots.  The record is the architecture's: on
+; x86-64 two offsets and then the slots, on arm64 the slots, the two register
+; areas' ends, and then two offsets.  The answer is converted to the C type
+; the function's header declares (library-c-type).
 
 (def %cc-ptr-call (prim-ref (lit ptr) (lit call)))
 (def %cc-libc ())       ; the library's handle
@@ -447,12 +449,23 @@
           (do (%cc-raw-set! (+ slots (* 8 i)) (first as) 8)
               (self (rest as) (+ i 1))))))
     (go args 0)
-    (if os-darwin? slots
-      (let ((v (%cc-alloca 24)))
-        (do (%cc-raw-set! v 48 4)
-            (%cc-raw-set! (+ v 4) 304 4)
-            (%cc-raw-set! (+ v 8) slots 8)
-            v)))))
+    (match
+      (os-darwin? slots)
+      ; an offset of zero or more says its register area is used up
+      (arch-arm64?
+        (let ((v (%cc-alloca 32)))
+          (do (%cc-raw-set! v slots 8)
+              (%cc-raw-set! (+ v 8) 0 8)
+              (%cc-raw-set! (+ v 16) 0 8)
+              (%cc-raw-set! (+ v 24) 0 4)
+              (%cc-raw-set! (+ v 28) 0 4)
+              v)))
+      (#t
+        (let ((v (%cc-alloca 24)))
+          (do (%cc-raw-set! v 48 4)
+              (%cc-raw-set! (+ v 4) 304 4)
+              (%cc-raw-set! (+ v 8) slots 8)
+              v))))))
 
 ; the first N of a list, and what follows them
 (def %cc-take
