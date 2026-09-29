@@ -29,14 +29,14 @@ source prints through /usr/bin/cc, then its status.
 ### conversions: an integer to a float in one rounding, a float to each integer type
 
 ```cc
-(def src "#include <stdio.h>\nint main(void) {\n  int i = 16777217;\n  long v = (1L << 60) + (1L << 36) + 1;\n  unsigned long u = 18446744073709551615UL;\n  unsigned long w = (1UL << 63) + (1UL << 39) + 1;\n  float fi = i, fv = v, fu = u, fw = w;\n  float f = -7.9f;\n  int back = f;\n  unsigned ub = 3000000000.0f;\n  char c = 65.7f;\n  long lb = 1e18f;\n  printf(\"%.1f %.1f %.1f %.1f\\n\", fi, fv, fu, fw);\n  printf(\"%d %u %d %ld\\n\", back, ub, c, lb);\n  printf(\"%lu %lu\\n\", (unsigned long)fu - 1, (unsigned long)1e19f);\n  printf(\"%g %g\\n\", (float)1 / 3, (double)((float)1 / 3));\n  return back + 20;\n}\n")
+(def src "#include <stdio.h>\nint main(void) {\n  int i = 16777217;\n  long v = (1L << 60) + (1L << 36) + 1;\n  unsigned long u = 18446744073709551615UL;\n  unsigned long w = (1UL << 63) + (1UL << 39) + 1;\n  float fi = i, fv = v, fu = u, fw = w;\n  float f = -7.9f;\n  int back = f;\n  unsigned ub = 3000000000.0f;\n  char c = 65.7f;\n  long lb = 1e18f;\n  printf(\"%.1f %.1f %.1f %.1f\\n\", fi, fv, fu, fw);\n  printf(\"%d %u %d %ld\\n\", back, ub, c, lb);\n  printf(\"%lu %lu\\n\", (unsigned long)fw, (unsigned long)1e19f);\n  printf(\"%g %g\\n\", (float)1 / 3, (double)((float)1 / 3));\n  return back + 20;\n}\n")
 (display (cc-run src))
 ```
 ---
 ```output
 16777216.0 1152921642045800448.0 18446744073709551616.0 9223373136366403584.0
 -7 3000000000 65 999999984306749440
-18446744073709551614 9999999980506447872
+9223373136366403584 9999999980506447872
 0.333333 0.333333
 13
 ```
@@ -106,14 +106,14 @@ source prints through /usr/bin/cc, then its status.
 ### conversions: an integer to a float in one rounding, a float to each integer type
 
 ```cc
-(def src "#include <stdio.h>\nint main(void) {\n  int i = 16777217;\n  long v = (1L << 60) + (1L << 36) + 1;\n  unsigned long u = 18446744073709551615UL;\n  unsigned long w = (1UL << 63) + (1UL << 39) + 1;\n  float fi = i, fv = v, fu = u, fw = w;\n  float f = -7.9f;\n  int back = f;\n  unsigned ub = 3000000000.0f;\n  char c = 65.7f;\n  long lb = 1e18f;\n  printf(\"%.1f %.1f %.1f %.1f\\n\", fi, fv, fu, fw);\n  printf(\"%d %u %d %ld\\n\", back, ub, c, lb);\n  printf(\"%lu %lu\\n\", (unsigned long)fu - 1, (unsigned long)1e19f);\n  printf(\"%g %g\\n\", (float)1 / 3, (double)((float)1 / 3));\n  return back + 20;\n}\n")
+(def src "#include <stdio.h>\nint main(void) {\n  int i = 16777217;\n  long v = (1L << 60) + (1L << 36) + 1;\n  unsigned long u = 18446744073709551615UL;\n  unsigned long w = (1UL << 63) + (1UL << 39) + 1;\n  float fi = i, fv = v, fu = u, fw = w;\n  float f = -7.9f;\n  int back = f;\n  unsigned ub = 3000000000.0f;\n  char c = 65.7f;\n  long lb = 1e18f;\n  printf(\"%.1f %.1f %.1f %.1f\\n\", fi, fv, fu, fw);\n  printf(\"%d %u %d %ld\\n\", back, ub, c, lb);\n  printf(\"%lu %lu\\n\", (unsigned long)fw, (unsigned long)1e19f);\n  printf(\"%g %g\\n\", (float)1 / 3, (double)((float)1 / 3));\n  return back + 20;\n}\n")
 (display (cc-exe-run src))
 ```
 ---
 ```output
 16777216.0 1152921642045800448.0 18446744073709551616.0 9223373136366403584.0
 -7 3000000000 65 999999984306749440
-18446744073709551614 9999999980506447872
+9223373136366403584 9999999980506447872
 0.333333 0.333333
 13
 ```
