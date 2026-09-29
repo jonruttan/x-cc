@@ -31,7 +31,9 @@ any of them, assignment, `++` and `--`,
 `goto`, `return` and calls, recursion included, over integer constants and
 string literals, `+ - * / %`, `& | ^ << >>`, the six comparisons,
 `&&`, `||`, the ternary, the comma, unary `- ~ ! & *`, casts,
-subscripts, and `.` and `->`.
+subscripts, and `.` and `->`.  A pointer to a function is the function's
+address, and a call through one hands over up to three arguments, none
+of them a struct, in the first registers.
 A call to a function the program does not define goes to the C
 library, which the compiler asks, in its own process, whether it has
 the function, refusing the call by name when it does not.  Each such
@@ -91,9 +93,9 @@ conversions give its operands -- `int` for `char` and `short`, then
 `unsigned int`, `long` and `unsigned long` -- and a store converts the
 value to its place's kind.  An integer constant has the type its
 suffixes and its value give it.  Anything else refuses by name:
-floating point, function pointers, a call into the C library with more
-than six arguments, and a global initialized by something other than a
-constant or an address.
+floating point, a call into the C library with more than six arguments,
+and a global initialized by something other than a constant or an
+address.
 
     x -l cc -- run prog.c
 
@@ -184,7 +186,7 @@ joined token.
 Refused loudly, each a recorded pending: floats, casts to
 function-pointer types.
 
-Paired with x-lang v0.16.0 (`lang.xon` is the checkable row).
+Paired with x-lang v0.17.0 (`lang.xon` is the checkable row).
 
 ## Tests
 

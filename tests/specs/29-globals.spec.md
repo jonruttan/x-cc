@@ -68,14 +68,14 @@ tick
 
 ## the refusals
 
-### a global function pointer
+### a global double
 
 ```cc
 (display (guard (e (do (display "refused: ") (write e) ""))
-  (cc-exe-run "int (*fp)(void);\nint main(void) { return 0; }")))
+  (cc-exe-run "double d;\nint main(void) { return 0; }")))
 ```
 ---
-    refused: #<err:cc cc: compile: not built yet: a global that is not an integer, a pointer, an array or a struct>
+    refused: #<err:cc cc: parse: not built yet: double>
 
 ### one initialized by something that is not a constant
 

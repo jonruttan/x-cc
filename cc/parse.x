@@ -132,7 +132,7 @@
 
 ; --- types, as far as the memory model needs them --------------------------
 ; Kinds: a scalar's own name (char uchar short ushort int uint long ulong
-; void fnptr) | (array N K) | (struct S) | (ptr K).  Sizes are bytes, as the
+; void) | (fnptr RET) | (array N K) | (struct S) | (ptr K).  Sizes are bytes, as the
 ; platforms this compiles for count them; a struct is its fields at aligned
 ; offsets, padded; an array of K is N*size(K); a pointer is 8 and keeps its
 ; pointee, which is what arithmetic scales by, what a read through it takes
@@ -654,9 +654,10 @@
 ; --- declarations ------------------------------------------------------------
 
 ; One declarator's name and C type, on the specifiers' BASE: *s NAME
-; [N]..., the function-pointer form (*NAME [N]...)(params) --
-; pointer-wide, the parameter types erased -- or a pointer to an array,
-; (*NAME)[N].... (NAME C-TYPE . rest)
+; [N]..., the function-pointer form (*NAME [N]...)(params) -- (fnptr RET),
+; RET the C type the specifiers and stars before it give, the parameters'
+; types not kept -- or a pointer to an array, (*NAME)[N]....
+; (NAME C-TYPE . rest)
 (def %cc-p-declarator-head
   (fn (_ toks base)
     (def sr (%cc-p-stars base toks))
@@ -665,12 +666,12 @@
       (let ((ts2 (rest (rest ts))))
         (if (not (%cc-p-id? ts2))
           (%cc-p-err "expected a name in a function-pointer declarator"))
-        (let ((kr (%cc-p-array-suffix (lit fnptr) (rest ts2))))
+        (let ((kr (%cc-p-array-suffix (list (lit fnptr) (first sr)) (rest ts2))))
           (def after (%cc-p-eat (rest kr) ")"))
           (match
             ((not (%cc-p-op? after "["))
               (pair (first (rest (first ts2))) (pair (first kr) (%cc-p-skip-parens after))))
-            ((not (eq? (first kr) (lit fnptr)))
+            ((eq? (first (first kr)) (lit array))
               (%cc-p-err "not built yet: an array of pointers to arrays"))
             (#t
               (let ((ar (%cc-p-array-suffix (first sr) after)))
