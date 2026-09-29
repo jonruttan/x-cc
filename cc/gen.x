@@ -29,9 +29,10 @@
 ; & | ^ << >>, the six comparisons, &&, ||, the ternary, the comma,
 ; unary - ~ ! & *, casts, subscripts, `.` and `->`, each in the kind C's
 ; usual conversions give it, and calls into the C library -- six arguments
-; at most, a variadic function's through its v- form; structs are passed
+; at most, a variadic function's through its v- form; pointers to
+; functions, which the C library can call back through; structs are passed
 ; and returned by value.  Everything else refuses by name: floating point
-; and function pointers.
+; among it.
 ;
 ; The convention is this compiler's own, since nothing else links with what
 ; it writes: of the first four arguments, the ones that are not structs in
@@ -1652,8 +1653,78 @@
         (%cc-gen! (lit add) x8 x8 x22)
         (%cc-gen! (lit ldr) x8 (mem x8 0))
         (%cc-gen-address! x19 %cc-gen-ca)
+        (%cc-gen-frame-top!)
         (%cc-gen! (lit blr) x21)
         (%cc-gen-normalize! (library-c-type name)))))
+
+; the frame stack's top, where the gate takes it up again when the library
+; calls one of the program's functions
+(def %cc-gen-frame-top!
+  (fn (_) (%cc-gen! (lit str) x20 (mem x22 8))))
+
+(def %cc-gen-thunks ())     ; ((name . label) ...), the functions whose address is taken
+(def %cc-gen-gate ())       ; the label the gate follows the code at
+
+; the label of NAME's thunk, which the function's address is: it takes
+; the function's address into x8 and branches to the gate
+(def %cc-gen-thunk-label
+  (fn (_ name)
+    (def go (fn (self es)
+              (match
+                ((null? es) ())
+                ((string=? (first (first es)) name) (rest (first es)))
+                (#t (self (rest es))))))
+    (def hit (go %cc-gen-thunks))
+    (if (not (null? hit)) hit
+      (let ((l (%cc-gen-label)))
+        (do (set! %cc-gen-thunks (pair (pair name l) %cc-gen-thunks)) l)))))
+
+; each thunk, then the gate's label, after the program's last function
+(def %cc-gen-thunks!
+  (fn (_)
+    (set! %cc-gen-gate (%cc-gen-label))
+    (def go
+      (fn (self ts)
+        (if (null? ts) ()
+          (do (asm-label! %cc-gen-asm (rest (first ts)))
+              (%cc-gen! (lit adr) x8 (label (%cc-gen-fun-label (first (first ts)))))
+              (%cc-gen! (lit b) (label %cc-gen-gate))
+              (self (rest ts))))))
+    (do (go (reverse %cc-gen-thunks))
+        (asm-label! %cc-gen-asm %cc-gen-gate))))
+
+; The gate, written out per target after the code, since it takes registers
+; the portable model does not name.  A pointer to a function leads to it,
+; from the C library or from the program's own call through a pointer, with
+; the function in x8 and the arguments where the C calling convention
+; puts them.  It keeps the caller's x19 to x22, which that convention has
+; the callee keep; takes up the program's own -- the data and the
+; trampoline from where the gate stands, the frame stack's top from where
+; the last call out left it -- and keeps that slot to put back; moves the
+; arguments into the program's registers (on x86-64: rax from rdi, rcx
+; from rdx); calls the function; and puts everything back.  GATEPOS and
+; DATAAT are the gate's and the data's distance from the entry's start.
+(def %cc-gen-gate-bytes
+  (fn (_ target gatepos dataat)
+    (if (eq? target (lit macho-arm64))
+      (%cc-gen-cat
+        (map %cc-gen-le32
+          (list 0xA9BF7BFD 0xA9BF53F3 0xA9BF5BF5
+                (%cc-gen-adr 22 (- dataat (+ gatepos 12)))
+                (%cc-gen-adr 21 (- 28 (+ gatepos 16)))
+                0xF94006D4 0xF94006C9 0xF81F0FE9 0xD63F0100 0xF84107E9 0xF90006C9
+                0xA8C15BF5 0xA8C153F3 0xA8C17BFD 0xD65F03C0)))
+      (%cc-gen-cat
+        (list (list 0x53 0x41 0x54 0x41 0x55 0x41 0x56)
+              (list 0x4C 0x8D 0x35) (%cc-gen-le32 (- dataat (+ gatepos 14)))
+              (list 0x4C 0x8D 0x2D) (%cc-gen-le32 (- 51 (+ gatepos 21)))
+              (list 0x4D 0x8B 0x66 0x08 0x41 0xFF 0x76 0x08 0x48 0x89 0xF8
+                    0x48 0x89 0xD1 0x41 0xFF 0xD2 0x41 0x8F 0x46 0x08
+                    0x41 0x5E 0x41 0x5D 0x41 0x5C 0x5B 0xC3))))))
+
+; how long the gate is
+(def %cc-gen-gate-len
+  (fn (_ target) (if (eq? target (lit macho-arm64)) 60 50)))
 
 ; Where each argument of a call goes, by the kinds of the callee's
 ; parameters: (reg . R) for one of the first four that is not a struct,
@@ -1714,7 +1785,7 @@
             (not (null? (filter %cc-gen-struct? params)))))
       (%cc-gen-no (string-append "the address of " name
                     ", which takes a struct or more than three arguments, or answers a struct")))
-    (%cc-gen! (lit adr) x0 (label (%cc-gen-fun-label name)))))
+    (%cc-gen! (lit adr) x0 (label (%cc-gen-thunk-label name)))))
 
 ; A call through TARGET, a pointer to a function, with ARGS: the address,
 ; then each argument in its own C type's promoted form, wait on the stack;
@@ -1744,6 +1815,7 @@
         (push-all args)
         (pop-all (reverse (%cc-gen-take (length args) (list x0 x1 x2))))
         (asm-pop! %cc-gen-asm x8)
+        (%cc-gen-frame-top!)
         (%cc-gen! (lit blr) x8))))
 
 (def %cc-gen-call-fun!
@@ -2402,6 +2474,10 @@
     ; data's first eight bytes
     (set! %cc-gen-imports ())
     (%cc-gen-import-slot "exit")
+    ; then the frame stack's top as the last call out left it, which the
+    ; gate takes up again (%cc-gen-gate-bytes)
+    (%cc-gen-data! (list 0 0 0 0 0 0 0 0) 8)
+    (set! %cc-gen-thunks ())
     ; the ones a load reaches first, then the arrays and structs, which are
     ; only ever reached through their address
     (def gdecls (filter (fn (_ it) (eq? (first it) (lit gdecl))) prog))
@@ -2445,18 +2521,22 @@
                     (set! %cc-gen-asm ())
                     (error err (if (Err err? err) (err msg) "cc: compile failed"))))
       (let ((go (fn (self fs) (if (null? fs) () (do (%cc-gen-fun! (first fs)) (self (rest fs)))))))
-        (go (pair main others))))
+        (do (go (pair main others))
+            (%cc-gen-thunks!))))
     (def n (asm-pos a))
     (def code (%cc-gen-read (asm-finalize! a) (- n 1) ()))
     (asm-free! a)
     (set! %cc-gen-asm ())
-    (def entry
-      (%cc-gen-entry target (%cc-gen-data-at target (+ (%cc-gen-entry-len target) n))))
+    ; the gate follows the code, where the label the thunks branch to is
+    (def gatepos (+ (%cc-gen-entry-len target) n))
+    (def dataat (%cc-gen-data-at target (+ gatepos (%cc-gen-gate-len target))))
+    (def entry (%cc-gen-entry target dataat))
     ; the entry's two addresses are taken from where it stands, so a length
     ; the layout did not expect would point them somewhere else
     (if (not (= (length entry) (%cc-gen-entry-len target)))
       (Err raise (lit cc) "cc: compile: the entry is not the length the layout takes it for" ()))
-    (pair (append entry code) (%cc-gen-data-bytes))))
+    (pair (append entry (append code (%cc-gen-gate-bytes target gatepos dataat)))
+      (%cc-gen-data-bytes))))
 
 ; compile SRC to an executable at PATH
 (def cc-compile
