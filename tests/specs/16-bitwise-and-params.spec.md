@@ -1,6 +1,6 @@
 # @weight 2
 
-The bitwise family and wide parameter lists.  `&` `|` `^` `<<` `>>`
+The bitwise operators and wide parameter lists.  `&` `|` `^` `<<` `>>`
 answer what C answers, `>>` arithmetic on a signed value, including as
 compound operators in a loop.  A function takes eight parameters, and
 a recursion four deep carries its own.  Every expectation is an oracle

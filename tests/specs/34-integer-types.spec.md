@@ -2,11 +2,11 @@
 # @timeout-scale 3
 
 Compiled integer types: `long`, `unsigned int` and `unsigned long` beside
-`int` and the narrower kinds.  A value is held in a whole register in the
-form its kind reads it -- an `int`, and anything narrower, sign-extended
+`int` and the narrower C types.  A value is held in a whole register in the
+form its C type reads it -- an `int`, and anything narrower, sign-extended
 from bit 31, an `unsigned int` zero-extended, a `long` or `unsigned long`
-as all 64 bits -- and an operator works in the kind C's usual conversions
-give its operands.  A literal's type comes from its value, its base and
+as all 64 bits -- and an operator works in the C type C's usual conversions
+give its operands.  A literal's C type comes from its value, its base and
 its `u` and `l` suffixes, as C gives it.  Each case below prints what the
 same source prints through /usr/bin/cc, and exits as it does.
 
@@ -40,7 +40,7 @@ same source prints through /usr/bin/cc, and exits as it does.
 ---
     101
 
-### a right shift brings in zeros for an unsigned kind, the sign for a signed one
+### a right shift brings in zeros for an unsigned C type, the sign for a signed one
 
 ```cc
 (display (cc-exe-run "int main(void) { unsigned int u = 0x80000000u; int s = 0x80000000; return (u >> 28) * 10 + ((s >> 28) & 15); }"))
@@ -56,7 +56,7 @@ same source prints through /usr/bin/cc, and exits as it does.
 ---
     7
 
-### globals of the wider kinds, stepped past their ends
+### globals of the wider C types, stepped past their ends
 
 ```cc
 (display (cc-exe-run "unsigned int g = 7u;\nlong h = -5000000000;\nint main(void) { g--; g = g - 10; return (g > 100) + (h < -4000000000) * 2 + (g % 1000 == 4294967293u % 1000) * 4; }"))
@@ -64,7 +64,7 @@ same source prints through /usr/bin/cc, and exits as it does.
 ---
     3
 
-### a global's initializer is worked out in its operands' kinds
+### a global's initializer is worked out in its operands' C types
 
 ```cc
 (display (cc-exe-run "#include <stdio.h>\nunsigned int a = -1u / 2;\nunsigned int b = -1u >> 28;\nunsigned long c = -1ul / 10;\nunsigned long d = -1ul >> 60;\nint e = -7 / 2;\nunsigned int f = -7 % 5u;\nlong g = -1u;\nint main(void) { printf(\"%u %u %lu %lu %d %u %ld\\n\", a, b, c, d, e, f, g); return 0; }"))

@@ -18,9 +18,9 @@ Both are dynamic executables that the system's C library is loaded into:
 the Mach-O names dyld and libSystem, and the ELF names ld-linux and
 libc.so.6.  The code generator
 evaluates expressions on a stack machine, and keeps every value in a
-whole register in its kind's form -- an `int` sign-extended from bit
+whole register in its C type's form -- an `int` sign-extended from bit
 31, an `unsigned int` zero-extended, a `long` or an `unsigned long` as
-all 64 bits -- so arithmetic wraps as C's does in each kind.
+all 64 bits -- so arithmetic wraps as C's does in each C type.
 
 Compiled so far: main and the functions beside it, with integer
 globals, locals (a static one kept once, in the data) and parameters of
@@ -72,7 +72,7 @@ bytes, and a braced initializer fills its fields and zeroes the rest.
 The executable has a data segment, mapped readable and writable on the
 page after the code -- `__DATA` in the Mach-O, a second `PT_LOAD` in the
 ELF.  The import slots are at the front of it, `exit`'s first; the
-globals follow, each at its kind's size with the initializer's value
+globals follow, each at its C type's size with the initializer's value
 already in place; then the string literals, end to end and each stored
 once.  The entry hands compiled code the data's address the way it
 hands over the trampoline's.  The executable is loaded where the kernel
@@ -92,14 +92,14 @@ arrays and structs above, reached through their address.  A struct
 goes by value: an argument is copied whole to the callee's frame, and a
 call that answers one has a slot of its own in the caller's frame,
 which the callee's return copies into.  A local, a parameter and a global take
-the size and alignment of their kind, and a value loads at that width,
-extended by its sign.  An operator works in the kind C's usual
+the size and alignment of their C type, and a value loads at that width,
+extended by its sign.  An operator works in the C type C's usual
 conversions give its operands -- `int` for `char` and `short`, then
 `unsigned int`, `long` and `unsigned long` -- and a store converts the
-value to its place's kind.  An integer constant has the type its
+value to its place's C type.  An integer constant has the C type its
 suffixes and its value give it.  A `double` is held as its IEEE bits
 where a long would be, and works in the machine's d registers; it meets
-the integer kinds as C's conversions say, and the maths functions --
+the integer C types as C's conversions say, and the maths functions --
 `sqrt`, `pow`, `fmod` and the rest -- are the C library's, called with
 their arguments in the d registers.  Anything else refuses by name:
 `float` and `long double`, a call into the C library with more than six
@@ -117,9 +117,10 @@ real binary byte for byte.
 
 MEMORY IS BYTES, at real addresses: the globals, string literals and
 stack are in one buffer, anything else is wherever the C library put
-it, and every read and write takes the width of its type -- `char` 1,
-`short` 2, `int` 4, `long` and pointers 8, with signed types
-sign-extending.  An address below 4096 is a null pointer and refuses.
+it, and every read and write takes the width of its C type -- `char` 1,
+`short` 2, `int` 4, `long` and pointers 8, with signed C types
+sign-extending.  Width here is a byte count; C11 (6.2.6.2) counts a type's
+width in bits.  An address below 4096 is a null pointer and refuses.
 `sizeof`, a field's offset and a struct's padding are what /usr/bin/cc
 counts.  Arithmetic is C's: an operand narrower than an int promotes
 to one, a binary operator's operands meet in the C type the usual
@@ -140,7 +141,7 @@ program's own functions cannot be handed to the library, and refuses.
 Working: int/char/void/pointer/array declarations (specifier soup
 accepted, erased, but for `static` on a local); all C89 operators with
 C precedence, short-circuit && || and the ternary; casts, each
-converting its operand to its type and giving the expression that type;
+converting its operand to its C type and giving the expression that C type;
 truncating division; if/else, while, do, for, break, continue, return;
 functions with recursion and prototypes; globals; static locals, made
 once on first reach; string literals (interned, and joined when side by
@@ -157,7 +158,7 @@ structs stepping by the struct's size, struct assignment as a byte
 copy, `sizeof` a struct with its padding, bit-fields of the integer
 types but long, and the linked list built
 from `malloc(sizeof(struct N))` -- oracle-checked.  A field access
-whose chain the evaluator cannot type (a call's result) resolves by
+whose chain the evaluator cannot give a C type (a call's result) resolves by
 the field's name when exactly one struct has it.
 
 `switch` runs its matched clause and every clause after it as one
@@ -170,14 +171,17 @@ no parentheses are added, as in C.
 `#ifdef`/`#ifndef`/`#elif`/`#else`/`#endif`/`#undef` and the `#if`
 forms a build header needs (`0`, `1`, `defined`) select lines; an
 inactive region still tracks its nesting.  Initializer lists lay
-values into memory by kind -- `int a[] = {…}` sized by the list,
+values into memory by C type -- `int a[] = {…}` sized by the list,
 `struct P p = {…}`, nested lists for arrays of structs, missing
 trailing items zero, `char s[] = "…"` from the string's bytes.
 
 Enums fold at parse time (`enum { A, B = 1 << 3, C }` -- constant
-expressions, counting on from the last; the type is a scalar; `case
-RED:` labels).  A union is a struct whose fields all sit at offset 0,
-sized by its widest -- overlap, copy, nesting anonymously in a struct.
+expressions, counting on from the last; the C type is a scalar; `case
+RED:` labels).  A scalar here is a C type the specifiers name on their own
+(`int`, `unsigned char`, `double`, `void`); C11's scalar types (6.2.5) are the
+arithmetic and pointer types, so the two sets differ.  A union is a struct
+whose fields all sit at offset 0, sized by its widest -- overlap, copy,
+nesting anonymously in a struct.
 Function pointers: `int (*f)(int, int)` as a local, global, parameter,
 struct field or typedef, arrays of them with initializer lists; a
 function's name is its value (an id above every memory address, never
@@ -197,7 +201,7 @@ operation on it is the machine's, through the platform's stubs
 (x/num/float).
 
 Refused loudly, each a recorded pending: `float`, `long double`, casts
-to function-pointer types.
+to function-pointer C types.
 
 Paired with x-lang v0.17.0 (`lang.xon` is the checkable row).
 

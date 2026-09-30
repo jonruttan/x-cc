@@ -4,7 +4,7 @@ The preprocessor and lexer: C text to tokens.
 
 ## the lexer
 
-### the shape of a tiny program
+### a tiny program, tokenized
 
 ```cc
 (write (cc-lex "int main() { return 42; }"))
