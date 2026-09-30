@@ -234,14 +234,6 @@ cc: run failed: #<err:cc cc: run: the operator % on a double>
 ---
     "cc: parse: not built yet: long double"
 
-### float
-
-```cc
-(write (guard (e (e msg)) (cc-exe-run "int main(void) { float f = 1.5; return 0; }")))
-```
----
-    "cc: parse: not built yet: float"
-
 ### double long
 
 ```cc
@@ -249,11 +241,3 @@ cc: run failed: #<err:cc cc: run: the operator % on a double>
 ```
 ---
     "cc: parse: not built yet: long double"
-
-### a float constant
-
-```cc
-(write (guard (e (e msg)) (cc-run "int main(void) { return 1.5f > 1; }")))
-```
----
-    "cc: not built yet: a float constant"

@@ -29,7 +29,7 @@
 ; unsized array takes its size from one) and function pointers (the
 ; `(*NAME)(params)` declarator is a pointer-wide value; a call whose callee is
 ; any expression but a bare name is (callx E ARGS)) and goto parse.
-; Refused loudly: `float` and `long double`, a recorded pending.
+; Refused loudly: `long double`, a recorded pending.
 (module cc/parse)
 
 (import cc/prims append byte-len convert length map reverse string-append
@@ -67,9 +67,9 @@
       (rest toks)
       (%cc-p-err (string-append "expected " s)))))
 
-; the unimplemented keywords refuse by name
+; the keywords the parser knows and refuses by name, none at present
 (def %cc-p-hard
-  (list (lit float)))
+  ())
 
 (def %cc-p-hard?
   (fn (_ toks)
@@ -93,6 +93,7 @@
             ((eq? k (lit char)) #t)
             ((eq? k (lit void)) #t)
             ((eq? k (lit double)) #t)
+            ((eq? k (lit float)) #t)
             ((eq? k (lit long)) #t)
             ((eq? k (lit short)) #t)
             ((eq? k (lit unsigned)) #t)
@@ -122,6 +123,7 @@
                   (%cc-p-err "not built yet: long double")
                   (self (rest ts) (lit long) unsigned?)))
               ((eq? k (lit void)) (self (rest ts) (lit void) unsigned?))
+              ((eq? k (lit float)) (self (rest ts) (lit float) unsigned?))
               ((eq? k (lit double))
                 (if (eq? width (lit long))
                   (%cc-p-err "not built yet: long double")
@@ -134,6 +136,7 @@
       (match
         ((eq? width (lit void)) (lit void))
         ((eq? width (lit double)) (lit double))
+        ((eq? width (lit float)) (lit float))
         ((eq? width (lit char)) (if unsigned? (lit uchar) (lit char)))
         ((eq? width (lit short)) (if unsigned? (lit ushort) (lit short)))
         ((eq? width (lit long)) (if unsigned? (lit ulong) (lit long)))
@@ -179,6 +182,7 @@
         ((eq? c-type (lit ushort)) 2)
         ((eq? c-type (lit int)) 4)
         ((eq? c-type (lit uint)) 4)
+        ((eq? c-type (lit float)) 4)
         ((eq? c-type (lit void)) 1)
         (#t 8))
       (match

@@ -95,10 +95,10 @@ Each status below is the one the same source gives when compiled with
 
 ## the refusals
 
-### a float local is not compiled yet
+### a long double local is not compiled yet
 
 ```cc
-(write (guard (e (e msg)) (cc-exe-run "int main(void) { float f = 1.5; return 0; }")))
+(write (guard (e (e msg)) (cc-exe-run "int main(void) { long double f = 1.5; return 0; }")))
 ```
 ---
-    "cc: parse: not built yet: float"
+    "cc: parse: not built yet: long double"

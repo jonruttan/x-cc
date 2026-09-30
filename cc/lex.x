@@ -19,6 +19,7 @@
   map reverse string-append string-concat string=? substring)
 (import cc/pp cc-preprocess)
 (import x/num/float Float)
+(import cc/real single)
 
 ; The type handle this file asks convert for, fetched by name through the
 ; platform's public door and private to this module.
@@ -98,7 +99,8 @@
 
 ; the end of a decimal floating constant at I, or nil when the number there
 ; is an integer's: digits, then a . and digits, an exponent, or both --
-; 1.5, .5, 2., 1e3, 1.5e-3 -- then l or L, which leave it a double
+; 1.5, .5, 2., 1e3, 1.5e-3 -- then f or F, which make it a float, or l or
+; L, which leave it a double
 (def %cc-lex-float-end
   (fn (_ src end i)
     (def digits
@@ -117,9 +119,8 @@
       ((if (= (at i) 48) (if (= (at (+ i 1)) 120) #t (= (at (+ i 1)) 88)) #f) ())
       ((null? c) ())
       ((not (if dot? #t e?)) ())
-      ((if (= (at c) 102) #t (= (at c) 70))
-        (Err raise (lit cc) "cc: not built yet: a float constant" ()))
-      ((if (= (at c) 108) #t (= (at c) 76)) (+ c 1))
+      ((if (= (at c) 102) #t (if (= (at c) 70) #t (if (= (at c) 108) #t (= (at c) 76))))
+        (+ c 1))
       (#t c))))
 
 ; number: decimal, 0x hex, 0 octal, as (VALUE C-TYPE . NEXT); the suffixes
@@ -361,12 +362,16 @@
           (if (if (%cc-digit? b) #t
                 (if (= b 46) (if (< (+ i 1) end) (%cc-digit? (byte-at src (+ i 1))) #f) #f))
             ; (num VALUE), or (num VALUE C-TYPE) when the literal is not an
-            ; int; a double's VALUE is its IEEE bits, read by the C library
+            ; int; a double's VALUE is its IEEE bits, read by the C
+            ; library, and a float's its single's, rounded from them
             (let ((fe (%cc-lex-float-end src end i)))
               (if (not (null? fe))
-                (self src end fe macros expanding
-                  (pair (list (lit num) (Float str->bits (substring src i fe)) (lit double))
-                    acc))
+                (let ((bits (Float str->bits (substring src i fe)))
+                      (f? (if (= (byte-at src (- fe 1)) 102) #t (= (byte-at src (- fe 1)) 70))))
+                  (self src end fe macros expanding
+                    (pair (if f? (list (lit num) (single bits) (lit float))
+                            (list (lit num) bits (lit double)))
+                      acc)))
                 (let ((r (%cc-lex-num src end i)))
                   (self src end (rest (rest r)) macros expanding
                     (pair (if (eq? (first (rest r)) (lit int))

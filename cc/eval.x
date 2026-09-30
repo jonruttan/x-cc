@@ -27,7 +27,8 @@
   string-concat string=? substring word-set! x-write)
 (import cc/lex cc-lex)
 (import cc/parse cc-parse c-type-size round-up struct-entry struct-table)
-(import x/num/float libm-fn)
+(import cc/real convert-real real-arith real-compare real-negate real-step real-stub
+  real-zero? real?)
 
 ; The collector is non-moving (the reflection layer rides raw object
 ; pointers); the base is refreshed every run.
@@ -221,6 +222,8 @@
         ((eq? k (lit ushort)) #f)
         ((eq? k (lit uint)) #f)
         ((eq? k (lit ulong)) #f)
+        ; a float's 32 bits read back as they are
+        ((eq? k (lit float)) #f)
         (#t #t)))))
 
 ; a W-byte read comes back zero-extended; a signed type takes its top bit
@@ -283,66 +286,16 @@
               (let ((low (& v (- (<< 1 (* 8 w)) 1))))
                 (if (signed? c-type) (%cc-sext low w) low))))))))
 
-; --- doubles -----------------------------------------------------------------
-; A double is its IEEE bits, an integer to everything that moves it; only
-; the operations on it know it for a double.  They are the platform's
-; (libm-fn): machine code made the first time a run needs each, since a
-; state image cannot carry it.
-
-(def %cc-dstubs ())     ; ((key . operation) ...)
-
-; the operation LABEL, or the library's function NAME called as LABEL says
-(def %cc-dstub
-  (fn (_ label name)
-    (def key (if (null? name) label (string-append label name)))
-    (def go
-      (fn (self es)
-        (match
-          ((null? es) ())
-          ((string=? (first (first es)) key) (rest (first es)))
-          (#t (self (rest es))))))
-    (def hit (go %cc-dstubs))
-    (if (not (null? hit)) hit
-      (let ((f (libm-fn (lit %cc-dstub) label name)))
-        (do (set! %cc-dstubs (pair (pair key f) %cc-dstubs)) f)))))
-
-(def %cc-d (fn (_ label a b) ((%cc-dstub label ()) a b)))
-
-(def %cc-double? (fn (_ k) (eq? k (lit double))))
-
-(def %cc-top-bit (<< 1 63))
-(def %cc-low-63 0x7FFFFFFFFFFFFFFF)   ; every bit but the sign
-(def %cc-two-63 0x43E0000000000000)   ; 2^63 as a double
-(def %cc-one 0x3FF0000000000000)      ; 1.0
-
-; V of the integer C type K as a double: an unsigned long past the signed
-; range converts halved, its last bit kept so it rounds as C does, and
-; doubled
-(def %cc-int->double
-  (fn (_ v k)
-    (if (if (eq? k (lit ulong)) (< v 0) #f)
-      (let ((h ((%cc-dstub "i->d" ()) (| (& (>> v 1) %cc-low-63) (& v 1)))))
-        (%cc-d "d+d" h h))
-      ((%cc-dstub "i->d" ()) v))))
-
-; the double V as the integer C type K, toward zero: an unsigned long at
-; 2^63 or past it converts less 2^63 and takes the top bit back
-(def %cc-double->int
-  (fn (_ v k)
-    (match
-      ((if (eq? k (lit ulong)) (not (%cc-d "d<d" v %cc-two-63)) #f)
-        (^ ((%cc-dstub "d->i" ()) (%cc-d "d-d" v %cc-two-63)) %cc-top-bit))
-      ((%cc-bits? k) ((%cc-dstub "d->i" ()) v))
-      (#t (%cc-convert ((%cc-dstub "d->i" ()) v) k)))))
-
+; --- the real types ------------------------------------------------------------
 ; V of the C type FROM as the C type TO takes it where C converts, when
-; either is a double; any other V is as it was
+; either is real (cc/real.x), an integer TO's answer cut to its width; any
+; other V is as it was
 (def %cc-convert-from
   (fn (_ v from to)
-    (match
-      ((%cc-double? to) (if (%cc-double? from) v (%cc-int->double v from)))
-      ((%cc-double? from) (%cc-double->int v to))
-      (#t v))))
+    (if (if (real? from) #t (real? to))
+      (let ((r (convert-real v from to)))
+        (if (if (real? to) #t (%cc-bits? to)) r (%cc-convert r to)))
+      v)))
 
 ; stack bytes, zero-filled, eight-aligned; answers the base address
 (def %cc-alloca
@@ -418,15 +371,15 @@
 
 (def %cc-b (fn (_ x) (if x 1 0)))
 
-; is NODE's value true: not zero, and for a double not zero of either sign
+; is NODE's value true: not zero, and for a real value not zero of either
+; sign
 (def %cc-test
   (fn (_ node env)
     (def v (%cc-eval node env))
     (def t (first node))
     (if (if (eq? t (lit cmp)) #f (if (eq? t (lit and)) #f (not (eq? t (lit or)))))
-      (if (%cc-double? (%cc-c-type-of node env))
-        (not (= (& v %cc-low-63) 0))
-        (not (= v 0)))
+      (let ((k (%cc-c-type-of node env)))
+        (if (real? k) (not (real-zero? v k)) (not (= v 0))))
       (not (= v 0)))))
 
 ; --- C types -------------------------------------------------------------------
@@ -764,11 +717,13 @@
 ; holds every value of -- is an int, and two operands meet in an unsigned
 ; long if either is one, else a long, which holds every unsigned int, else
 ; an unsigned int, else an int -- and in a double before any of them when
-; either is one.  The compiled code works in the same C types (cc/gen.x).
+; either is one, else in a float when either is one.  The compiled code works
+; in the same C types (cc/gen.x).
 (def promoted-c-type
   (fn (_ k)
     (match
       ((eq? k (lit double)) k)
+      ((eq? k (lit float)) k)
       ((eq? k (lit uint)) k)
       ((eq? k (lit long)) k)
       ((eq? k (lit ulong)) k)
@@ -784,6 +739,7 @@
     (def b (promoted-c-type kb))
     (match
       ((if (eq? a (lit double)) #t (eq? b (lit double))) (lit double))
+      ((if (eq? a (lit float)) #t (eq? b (lit float))) (lit float))
       ((if (eq? a (lit ulong)) #t (eq? b (lit ulong))) (lit ulong))
       ((if (eq? a (lit long)) #t (eq? b (lit long))) (lit long))
       ((if (eq? a (lit uint)) #t (eq? b (lit uint))) (lit uint))
@@ -812,19 +768,11 @@
   (fn (_ op a b ka kb)
     (def shift? (if (string=? op "<<") #t (string=? op ">>")))
     (def k (if shift? (promoted-c-type ka) (common-c-type ka kb)))
-    (if (if (%cc-double? k) #t (if shift? (%cc-double? kb) #f))
-      (%cc-double-arith op (%cc-convert-from a ka k) (%cc-convert-from b kb k))
-      (%cc-int-arith op a b k shift?))))
-
-; OP on the doubles X and Y
-(def %cc-double-arith
-  (fn (_ op x y)
     (match
-      ((string=? op "+") (%cc-d "d+d" x y))
-      ((string=? op "-") (%cc-d "d-d" x y))
-      ((string=? op "*") (%cc-d "d*d" x y))
-      ((string=? op "/") (%cc-d "d/d" x y))
-      (#t (%cc-oops (string-append "the operator " op " on a double"))))))
+      ((real? k) (real-arith op (%cc-convert-from a ka k) (%cc-convert-from b kb k) k))
+      ((if shift? (real? kb) #f)
+        (%cc-oops (string-append "the operator " op " by a floating value")))
+      (#t (%cc-int-arith op a b k shift?)))))
 
 (def %cc-int-arith
   (fn (_ op a b k shift?)
@@ -856,7 +804,7 @@
 ; compares with its top bit flipped, which is unsigned order
 (def %cc-int-cmp
   (fn (_ op a b k)
-    (def flip (if (eq? k (lit ulong)) %cc-top-bit 0))
+    (def flip (if (eq? k (lit ulong)) (<< 1 63) 0))
     (def x (^ (%cc-convert a k) flip))
     (def y (^ (%cc-convert b k) flip))
     (match
@@ -866,18 +814,6 @@
       ((string=? op ">=") (>= x y))
       ((string=? op "==") (= x y))
       (#t (not (= x y))))))
-
-; the comparison OP of the doubles X and Y: false for a NaN on either side
-; but for !=
-(def %cc-double-cmp
-  (fn (_ op x y)
-    (match
-      ((string=? op "<") (%cc-d "d<d" x y))
-      ((string=? op ">") (%cc-d "d<d" y x))
-      ((string=? op "<=") (if (%cc-d "d<d" x y) #t (%cc-d "d=d" x y)))
-      ((string=? op ">=") (if (%cc-d "d<d" y x) #t (%cc-d "d=d" x y)))
-      ((string=? op "==") (%cc-d "d=d" x y))
-      (#t (not (%cc-d "d=d" x y))))))
 
 ; + and - with an address among the operands: the count beside an address
 ; moves it by that many of what it points at, and two addresses subtract to
@@ -1035,8 +971,8 @@
               ; the operands in the C type they meet in, an address as it is
               (def k (if (if (%cc-address? ka) #t (%cc-address? kb)) (lit long) (common-c-type ka kb)))
               (%cc-b
-                (if (%cc-double? k)
-                  (%cc-double-cmp op (%cc-convert-from a ka k) (%cc-convert-from b kb k))
+                (if (real? k)
+                  (real-compare op (%cc-convert-from a ka k) (%cc-convert-from b kb k) k)
                   (%cc-int-cmp op a b k))))))
       (if (eq? t (lit and))
         (%cc-b (if (%cc-test (first (rest node)) env)
@@ -1060,15 +996,16 @@
                   (%cc-fun-id (first (rest sub)))
                   (%cc-lval sub env)))
               ; - and ~ in the operand's C type, promoted; ~v is -v-1.  A
-              ; double negates by its sign bit and is false at either zero
+              ; real value negates by its sign bit and is false at either zero
               (let ((v (%cc-eval (first (rest (rest node))) env)))
                 (def k (promoted-c-type (%cc-c-type-of (first (rest (rest node))) env)))
                 (match
-                  ((%cc-double? k)
+                  ((real? k)
                     (match
-                      ((string=? op "!") (%cc-b (= (& v %cc-low-63) 0)))
-                      ((string=? op "-") (^ v %cc-top-bit))
-                      (#t (%cc-oops "the operator ~ on a double"))))
+                      ((string=? op "!") (%cc-b (real-zero? v k)))
+                      ((string=? op "-") (real-negate v k))
+                      (#t (%cc-oops (string-append "the operator ~ on a "
+                                      (if (eq? k (lit float)) "float" "double"))))))
                   ((string=? op "!") (%cc-b (= v 0)))
                   (#t (%cc-convert (if (string=? op "-") (- 0 v) (- (- 0 v) 1)) k)))))))
       (if (eq? t (lit idx))
@@ -1118,7 +1055,7 @@
                      (first (rest (rest (rest node)))))))
           (def v (%cc-eval arm env))
           (def k (%cc-c-type-of node env))
-          (if (%cc-double? k) (%cc-convert-from v (%cc-c-type-of arm env) k) v))
+          (if (real? k) (%cc-convert-from v (%cc-c-type-of arm env) k) v))
       (if (eq? t (lit comma))
         (do (%cc-eval (first (rest node)) env)
             (%cc-eval (first (rest (rest node))) env))
@@ -1146,11 +1083,11 @@
           (%cc-oops "unknown expression")))))))))))))))))))))))))
 
 ; V moved one step by OP, + or -, as ++ and -- move the place NODE of C
-; type K: an address by what it points at, a double by 1.0
+; type K: an address by what it points at, a real value by 1.0
 (def %cc-step
   (fn (_ v node k env op)
     (match
-      ((%cc-double? k) (%cc-double-arith op v %cc-one))
+      ((real? k) (real-step v k op))
       ((string=? op "+") (+ v (%cc-step-of node env)))
       (#t (- v (%cc-step-of node env))))))
 
@@ -1167,12 +1104,17 @@
         ((string=? label "d->d") (list (lit double)))
         ((string=? label "dd->d") (list (lit double) (lit double)))
         (#t ())))
+    ; past the parameters a float goes as a double, C's default promotion
     (def go
       (fn (self ns ks)
         (if (null? ns) ()
-          (let ((v (%cc-eval (first ns) env)))
-            (pair (if (null? ks) v (%cc-convert-from v (%cc-c-type-of (first ns) env) (first ks)))
-                  (self (rest ns) (if (null? ks) () (rest ks))))))))
+          (let ((v (%cc-eval (first ns) env)) (k (%cc-c-type-of (first ns) env)))
+            (pair
+              (match
+                ((not (null? ks)) (%cc-convert-from v k (first ks)))
+                ((eq? k (lit float)) (%cc-convert-from v k (lit double)))
+                (#t v))
+              (self (rest ns) (if (null? ks) () (rest ks))))))))
     (go nodes ks)))
 
 ; --- calls and builtins ------------------------------------------------------
@@ -1235,11 +1177,11 @@
     (if (not (= (length args) n))
       (%cc-oops (string-append "a call to " name " with the wrong number of arguments")))
     (match
-      ((string=? label "d->d") (first ((%cc-dstub label name) (list (first args)))))
+      ((string=? label "d->d") (first ((real-stub label name) (list (first args)))))
       ((string=? label "dd->d")
-        (first ((%cc-dstub label name) (list (first args)) (list (first (rest args))))))
+        (first ((real-stub label name) (list (first args)) (list (first (rest args))))))
       ((< (first args) 4096) (%cc-oops (string-append "a null pointer, handed to " name)))
-      (#t ((%cc-dstub label "strtod") (first args))))))
+      (#t ((real-stub label "strtod") (first args))))))
 
 (set! %cc-call %cc-call-interp)
 
@@ -1589,11 +1531,6 @@
 
 (def cc-run (fn (_ src) (%cc-run-core src () (list "a.out"))))
 
-; run's conversions and arithmetic on doubles, which the compiler works a
-; global's initializer out with (cc/gen.x)
-(def convert-double %cc-convert-from)
-(def double-arith %cc-double-arith)
-
-(provide cc/eval cc-run cc-run-with common-c-type convert-double double-arith c-type-elem
+(provide cc/eval cc-run cc-run-with common-c-type c-type-elem
   library-c-type library-double-fns library-double-label library-variadic
   promoted-c-type signed? unsigned-divide)

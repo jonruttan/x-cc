@@ -20,7 +20,7 @@
 ;
 ; Compiled so far: main and the functions beside it, with globals, locals
 ; (static ones kept once, in the data), and parameters of `char`, `short`,
-; `int` and `long`, signed and unsigned, and `double`,
+; `int` and `long`, signed and unsigned, `double` and `float`,
 ; pointers to anything, and arrays, structs and unions of any of these, each
 ; at its C type's size,
 ; assignment, ++ and --, `if`/`else`, `while`, `do`, `for`, `switch`,
@@ -32,8 +32,8 @@
 ; usual conversions give it, and calls into the C library -- six arguments
 ; at most, a variadic function's through its v- form; pointers to
 ; functions, which the C library can call back through; structs are passed
-; and returned by value.  Everything else refuses by name: `float` and
-; `long double` among it.
+; and returned by value.  Everything else refuses by name: `long double`
+; among it.
 ;
 ; The convention is this compiler's own, since nothing else links with what
 ; it writes: of the first four arguments, the ones that are not structs in
@@ -52,8 +52,9 @@
   substring)
 (import cc/lex cc-lex)
 (import cc/parse cc-parse c-type-size c-type-align round-up struct-entry)
-(import cc/eval common-c-type convert-double double-arith c-type-elem library-c-type
+(import cc/eval common-c-type c-type-elem library-c-type
   library-double-label library-variadic promoted-c-type signed? unsigned-divide)
+(import cc/real convert-real real-arith real-negate)
 (import cc/macho macho-write! macho-data-at)
 (import cc/elf elf-write! elf-data-at elf-machine-x86-64)
 
@@ -208,28 +209,44 @@
         (%cc-gen! (lit lslv) x0 x0 x2)
         (%cc-gen! (lit lsrv) x0 x0 x2))))
 
-; --- doubles -----------------------------------------------------------------
-; A double is held as its IEEE bits in a general register, as a long is.
-; Each operation on it moves the bits to d0 and d1, works there and moves
-; the answer back; nothing stays in a d register between operations.  x1
-; can hold a place's address while a value converts, so the conversions
-; keep off it.
+; --- the real types ------------------------------------------------------------
+; A double is held as its IEEE bits in a general register, as a long is,
+; and a float as its single's 32 bits, zero above, as an unsigned int is.
+; Each operation moves the bits to d0 and d1, works there -- a float as
+; the double it widens to, rounded back to a single after, which gives the
+; single-precision answer -- and moves the answer back; nothing stays in a
+; d register between operations.  x1 can hold a place's address while a
+; value converts, so the conversions keep off it.
 
-(def %cc-gen-double? (fn (_ k) (eq? k (lit double))))
+(def %cc-gen-real? (fn (_ k) (if (eq? k (lit double)) #t (eq? k (lit float)))))
 (def %cc-gen-top-bit (<< 1 63))
 (def %cc-gen-two-63 0x43E0000000000000)   ; 2^63 as a double
 (def %cc-gen-one 0x3FF0000000000000)      ; 1.0
 
-; x0, an integer of C type FROM, as a double.  An unsigned long past the
-; signed range converts halved, its last bit kept so it rounds as C does,
-; and doubled.
-(def %cc-gen-int->double!
-  (fn (_ from)
+; the value of real C type K in the general register X, as a double in D
+(def %cc-gen-real-in!
+  (fn (_ d x k)
+    (do (%cc-gen! (lit fmov/d) d x)
+        (if (eq? k (lit float)) (%cc-gen! (lit fcvt/d) d d) ()))))
+
+; the double in d0, as real C type K in x0
+(def %cc-gen-real-out!
+  (fn (_ k)
+    (do (if (eq? k (lit float)) (%cc-gen! (lit fcvt/s) d0 d0) ())
+        (%cc-gen! (lit fmov/x) x0 d0))))
+
+; x0, an integer of C type FROM, as real C type K, converted in one rounding
+; (scvtf, scvtf/s).  An unsigned long past the signed range converts
+; halved, its last bit kept so it rounds as C does, and doubled, which
+; is exact.
+(def %cc-gen-int->real!
+  (fn (_ from k)
+    (def cvt (if (eq? k (lit float)) (lit scvtf/s) (lit scvtf)))
     (if (eq? from (lit ulong))
       (let ((big (%cc-gen-label)) (done (%cc-gen-label)))
         (do (%cc-gen! (lit cmp) x0 (imm 0))
             (%cc-gen! (lit b/lt) (label big))
-            (%cc-gen! (lit scvtf) d0 x0)
+            (%cc-gen! cvt d0 x0)
             (%cc-gen! (lit b) (label done))
             (asm-label! %cc-gen-asm big)
             (%cc-gen! (lit mov) x2 (imm 1))
@@ -239,18 +256,20 @@
             (%cc-gen! (lit lsrv) x0 x0 x2)
             (%cc-gen! (lit fmov/x) x2 d1)
             (%cc-gen! (lit orr) x0 x0 x2)
-            (%cc-gen! (lit scvtf) d0 x0)
+            (%cc-gen! cvt d0 x0)
+            (if (eq? k (lit float)) (%cc-gen! (lit fcvt/d) d0 d0) ())
             (%cc-gen! (lit fadd) d0 d0 d0)
+            (if (eq? k (lit float)) (%cc-gen! (lit fcvt/s) d0 d0) ())
             (asm-label! %cc-gen-asm done)
             (%cc-gen! (lit fmov/x) x0 d0)))
-      (do (%cc-gen! (lit scvtf) d0 x0)
+      (do (%cc-gen! cvt d0 x0)
           (%cc-gen! (lit fmov/x) x0 d0)))))
 
-; x0, a double, as an integer of C-TYPE, toward zero.  An unsigned long at
-; 2^63 or past it converts less 2^63 and takes the top bit back.
-(def %cc-gen-double->int!
-  (fn (_ c-type)
-    (%cc-gen! (lit fmov/d) d0 x0)
+; x0, of real C type FROM, as an integer of C-TYPE, toward zero.  An unsigned
+; long at 2^63 or past it converts less 2^63 and takes the top bit back.
+(def %cc-gen-real->int!
+  (fn (_ c-type from)
+    (%cc-gen-real-in! d0 x0 from)
     (if (eq? c-type (lit ulong))
       (let ((small (%cc-gen-label)) (done (%cc-gen-label)))
         (do (asm-load-imm64! %cc-gen-asm x2 %cc-gen-two-63)
@@ -269,27 +288,29 @@
       (do (%cc-gen! (lit fcvtzs) x0 d0)
           (%cc-gen-convert! c-type (lit long))))))
 
-; the doubles in x0 and x1 put together by OP, into x0
-(def %cc-gen-double-bin!
-  (fn (_ op)
+; x0 and x1, both of real C type K, put together by OP, into x0
+(def %cc-gen-real-bin!
+  (fn (_ op k)
     (def f
       (match
         ((string=? op "+") (lit fadd))
         ((string=? op "-") (lit fsub))
         ((string=? op "*") (lit fmul))
         ((string=? op "/") (lit fdiv))
-        (#t (%cc-gen-no (string-append "the operator " op " on a double")))))
-    (%cc-gen! (lit fmov/d) d0 x0)
-    (%cc-gen! (lit fmov/d) d1 x1)
+        (#t (%cc-gen-no (string-append "the operator " op " on a " (%cc-gen-real-name k))))))
+    (%cc-gen-real-in! d0 x0 k)
+    (%cc-gen-real-in! d1 x1 k)
     (%cc-gen! f d0 d0 d1)
-    (%cc-gen! (lit fmov/x) x0 d0)))
+    (%cc-gen-real-out! k)))
 
-; x0 = 1 when the doubles in x0 and x1 compare as OP says, else 0: false
-; for a NaN on either side but for !=
-(def %cc-gen-double-compare!
-  (fn (_ op)
-    (%cc-gen! (lit fmov/d) d0 x0)
-    (%cc-gen! (lit fmov/d) d1 x1)
+(def %cc-gen-real-name (fn (_ k) (if (eq? k (lit float)) "float" "double")))
+
+; x0 = 1 when x0 and x1, both of real C type K, compare as OP says, else 0:
+; false for a NaN on either side but for !=
+(def %cc-gen-real-compare!
+  (fn (_ op k)
+    (%cc-gen-real-in! d0 x0 k)
+    (%cc-gen-real-in! d1 x1 k)
     (match
       ((string=? op "<") (%cc-gen! (lit flt) x0 d0 d1))
       ((string=? op ">") (%cc-gen! (lit flt) x0 d1 d0))
@@ -308,34 +329,35 @@
             (%cc-gen! (lit orr) x0 x0 x1)))
       (#t (%cc-gen-no (string-append "the comparison " op))))))
 
-; x0, a double, without its sign: zero at either zero, which is what a
-; test of it asks
+; x0, of real C type K, without its sign: zero at either zero, which is what
+; a test of it asks.  A float's sign is bit 31, with zeros above it.
 (def %cc-gen-drop-sign!
-  (fn (_)
-    (do (%cc-gen! (lit mov) x2 (imm 1))
+  (fn (_ k)
+    (do (%cc-gen! (lit mov) x2 (imm (if (eq? k (lit float)) 33 1)))
         (%cc-gen! (lit lslv) x0 x0 x2))))
 
-; the unary OP on the double in x0: - flips its sign, ! tests it
-(def %cc-gen-double-unary!
-  (fn (_ op)
+; the unary OP on x0, of real C type K: - flips its sign, ! tests it
+(def %cc-gen-real-unary!
+  (fn (_ op k)
     (match
       ((string=? op "-")
-        (do (asm-load-imm64! %cc-gen-asm x2 %cc-gen-top-bit)
+        (do (asm-load-imm64! %cc-gen-asm x2
+              (if (eq? k (lit float)) 0x80000000 %cc-gen-top-bit))
             (%cc-gen! (lit eor) x0 x0 x2)))
       ((string=? op "!")
-        (do (%cc-gen-drop-sign!)
+        (do (%cc-gen-drop-sign! k)
             (%cc-gen! (lit cmp) x0 (imm 0))
             (%cc-gen-flag! (lit b/eq))))
-      (#t (%cc-gen-no (string-append "the operator " op " on a double"))))))
+      (#t (%cc-gen-no (string-append "the operator " op " on a " (%cc-gen-real-name k)))))))
 
-; the double in x0 moved one step, up or down
-(def %cc-gen-double-step!
-  (fn (_ up)
-    (do (asm-load-imm64! %cc-gen-asm x2 %cc-gen-one)
-        (%cc-gen! (lit fmov/d) d0 x0)
+; x0, of real C type K, moved one step, up or down
+(def %cc-gen-real-step!
+  (fn (_ up k)
+    (do (%cc-gen-real-in! d0 x0 k)
+        (asm-load-imm64! %cc-gen-asm x2 %cc-gen-one)
         (%cc-gen! (lit fmov/d) d1 x2)
         (%cc-gen! (if up (lit fadd) (lit fsub)) d0 d0 d1)
-        (%cc-gen! (lit fmov/x) x0 d0))))
+        (%cc-gen-real-out! k))))
 
 ; --- integer C types -----------------------------------------------------------
 ; A value is held in a whole register in the form its C type reads it: an int,
@@ -585,6 +607,7 @@
       ((eq? c-type (lit uint)) c-type)
       ((eq? c-type (lit ulong)) c-type)
       ((eq? c-type (lit double)) c-type)
+      ((eq? c-type (lit float)) c-type)
       ((%cc-gen-ptr? c-type) c-type)
       ((%cc-gen-fnptr? c-type) c-type)
       ((%cc-gen-bits? c-type) (do (self (first (rest c-type)) what) c-type))
@@ -598,7 +621,7 @@
             c-type))
       (#t (%cc-gen-no
             (string-append what
-              " that is not an integer, a double, a pointer, an array or a struct"))))))
+              " that is not an integer, a double, a float, a pointer, an array or a struct"))))))
 
 (def %cc-gen-byte? (fn (_ c-type) (if (eq? c-type (lit char)) #t (eq? c-type (lit uchar)))))
 (def %cc-gen-half? (fn (_ c-type) (if (eq? c-type (lit short)) #t (eq? c-type (lit ushort)))))
@@ -622,6 +645,7 @@
       ((eq? c-type (lit short)) (lit ldrsh))
       ((eq? c-type (lit ushort)) (lit ldrh))
       ((eq? c-type (lit uint)) (lit ldrw))
+      ((eq? c-type (lit float)) (lit ldrw))
       ((%cc-gen-wide? c-type) (lit ldr))
       (#t (do (%cc-gen-value-c-type! c-type) (lit ldrsw))))))
 
@@ -1060,23 +1084,23 @@
       ((eq? (first init) (lit initlist))
         (%cc-gen-no "a braced initializer for something that is not an array or a struct"))
       (#t (let ((v (%cc-gen-fold init)))
-            (%cc-gen-value-bytes c-type (convert-double v (%cc-gen-c-type-of init) c-type)))))))
+            (%cc-gen-value-bytes c-type (convert-real v (%cc-gen-c-type-of init) c-type)))))))
 
 ; What a global starts out holding.  C asks for a constant here, so the
 ; value is worked out now: each operation in the C type C's conversions give
 ; it, its result in that C type's form, as the code for it would leave it.
 ; The program starts with the value's low bytes, as many as the global's
-; C type has, in place.  A double is worked out by run's own operations
-; (cc/eval.x), which are the machine's.
+; C type has, in place.  A real value is worked out by run's own operations
+; (cc/real.x), which are the machine's.
 (def %cc-gen-fold
   (fn (self node)
     (let ((t (first node)))
       (match
         ((eq? t (lit num)) (%cc-gen-form (first (rest node)) (%cc-gen-num-c-type node)))
-        ((if (eq? t (lit un)) (%cc-gen-double? (%cc-gen-c-type-of node)) #f)
+        ((if (eq? t (lit un)) (%cc-gen-real? (%cc-gen-c-type-of node)) #f)
           (if (string=? (first (rest node)) "-")
-            (^ (self (first (rest (rest node)))) %cc-gen-top-bit)
-            (%cc-gen-no (string-append "a global double initialized with " (first (rest node))))))
+            (real-negate (self (first (rest (rest node)))) (%cc-gen-c-type-of node))
+            (%cc-gen-no (string-append "a global " (%cc-gen-real-name (%cc-gen-c-type-of node)) " initialized with " (first (rest node))))))
         ((eq? t (lit un))
           (let ((op (first (rest node))) (v (self (first (rest (rest node))))))
             (%cc-gen-form
@@ -1091,17 +1115,17 @@
             (def op (first (rest node)))
             (def k (%cc-gen-c-type-of node))
             (match
-              ((not (%cc-gen-double? k)) (%cc-gen-fold-bin op (self l) (self r) k))
+              ((not (%cc-gen-real? k)) (%cc-gen-fold-bin op (self l) (self r) k))
               ((if (string=? op "+") #t
                  (if (string=? op "-") #t (if (string=? op "*") #t (string=? op "/"))))
-                (double-arith op (convert-double (self l) (%cc-gen-c-type-of l) k)
-                  (convert-double (self r) (%cc-gen-c-type-of r) k)))
-              (#t (%cc-gen-no (string-append "the operator " op " on a double"))))))
+                (real-arith op (convert-real (self l) (%cc-gen-c-type-of l) k)
+                  (convert-real (self r) (%cc-gen-c-type-of r) k) k))
+              (#t (%cc-gen-no (string-append "the operator " op " on a " (%cc-gen-real-name k)))))))
         ((eq? t (lit cast))
           (let ((k (first (rest node))) (e (first (rest (rest node)))))
             (if (if (eq? k (lit void)) #t (%cc-gen-aggregate? k))
               (%cc-gen-no "a global initialized by something other than a constant"))
-            (%cc-gen-form (convert-double (self e) (%cc-gen-c-type-of e) k) k)))
+            (%cc-gen-form (convert-real (self e) (%cc-gen-c-type-of e) k) k)))
         (#t (%cc-gen-no "a global initialized by something other than a constant"))))))
 
 ; OP on the constants A and B, in C-TYPE: each operand converted to it first,
@@ -1377,40 +1401,45 @@
 ; x0, a value of C type FROM, converted to C-TYPE: narrowed to a char or short,
 ; and into an int's or an unsigned int's form from any other C type, an
 ; address included.  The eight-byte C types need nothing: every value's form
-; is already its conversion to them.  A double converts to and from the
-; integers as C says (the doubles, above).
+; is already its conversion to them.  A double and a float convert to each
+; other and to and from the integers as C says (the real types, above).
 (def %cc-gen-convert!
   (fn (_ c-type from)
     (match
-      ((%cc-gen-double? c-type) (if (%cc-gen-double? from) () (%cc-gen-int->double! from)))
-      ((%cc-gen-double? from) (%cc-gen-double->int! c-type))
+      ((%cc-gen-real? c-type)
+        (match
+          ((eq? from c-type) ())
+          ((%cc-gen-real? from) (do (%cc-gen-real-in! d0 x0 from) (%cc-gen-real-out! c-type)))
+          (#t (%cc-gen-int->real! from c-type))))
+      ((%cc-gen-real? from) (%cc-gen-real->int! c-type from))
       ((if (%cc-gen-byte? c-type) #t (%cc-gen-half? c-type)) (%cc-gen-narrow! c-type))
       ((eq? c-type (lit int)) (if (%cc-gen-int-form? from) () (%cc-gen-int!)))
       ((eq? c-type (lit uint)) (if (eq? from (lit uint)) () (%cc-gen-uint!)))
       (#t ()))))
 
 ; an assignment's store, of a value of C type FROM: the value it answers is
-; converted as the stored one was.  A double's bits are not an integer's,
-; so a store with a double on either side converts first.
+; converted as the stored one was.  A real value's bits are not an
+; integer's, so a store with one on either side converts first.
 (def %cc-gen-store!
   (fn (_ place from)
     (def k (%cc-gen-place-c-type place))
-    (if (if (%cc-gen-double? k) #t (%cc-gen-double? from))
+    (if (if (%cc-gen-real? k) #t (%cc-gen-real? from))
       (do (%cc-gen-convert! k from) (%cc-gen-put! place))
       (do (%cc-gen-put! place) (%cc-gen-convert! k from)))))
 
-; x0, of C type FROM, as C-TYPE when either is a double; any other value is
-; left as it is, for a store to cut
-(def %cc-gen-convert-double!
+; x0, of C type FROM, as C-TYPE when either is real; any other value is left
+; as it is, for a store to cut
+(def %cc-gen-convert-real!
   (fn (_ c-type from)
-    (if (if (%cc-gen-double? c-type) #t (%cc-gen-double? from)) (%cc-gen-convert! c-type from) ())))
+    (if (if (%cc-gen-real? c-type) #t (%cc-gen-real? from)) (%cc-gen-convert! c-type from) ())))
 
 ; NODE's value into x0 and compared with zero, for a branch on whether it
-; is true: a double is false at either zero
+; is true: a real value is false at either zero
 (def %cc-gen-cond!
   (fn (_ node)
+    (def k (%cc-gen-c-type-of node))
     (do (%cc-gen-expr! node)
-        (if (%cc-gen-double? (%cc-gen-c-type-of node)) (%cc-gen-drop-sign!) ())
+        (if (%cc-gen-real? k) (%cc-gen-drop-sign! k) ())
         (%cc-gen! (lit cmp) x0 (imm 0)))))
 
 ; A value of C-TYPE whose address is in x0, into x0: loaded, unless it is an
@@ -1585,7 +1614,7 @@
             (def k (promoted-c-type (%cc-gen-c-type-of (first (rest (rest node))))))
             (do (self (first (rest (rest node))))
                 (match
-                  ((%cc-gen-double? k) (%cc-gen-double-unary! op))
+                  ((%cc-gen-real? k) (%cc-gen-real-unary! op k))
                   ((string=? op "-")
                     (do (%cc-gen! (lit sub) x0 xzr x0) (%cc-gen-normalize! k)))
                   ((string=? op "~")
@@ -1612,7 +1641,7 @@
             (def k (if (if (string=? op "<<") #t (string=? op ">>"))
                      (promoted-c-type ka)
                      (common-c-type ka kb)))
-            (if (if (%cc-gen-double? k) (not addr?) #f)
+            (if (if (%cc-gen-real? k) (not addr?) #f)
               ; each operand converted to a double as it is worked out
               (do (self (first (rest (rest node))))
                   (%cc-gen-convert! k ka)
@@ -1621,7 +1650,7 @@
                   (%cc-gen-convert! k kb)
                   (%cc-gen! (lit mov) x1 x0)
                   (asm-pop! %cc-gen-asm x0)
-                  (if (eq? t (lit cmp)) (%cc-gen-double-compare! op) (%cc-gen-double-bin! op)))
+                  (if (eq? t (lit cmp)) (%cc-gen-real-compare! op k) (%cc-gen-real-bin! op k)))
               (do (self (first (rest (rest node))))
                   (asm-push! %cc-gen-asm x0)
                   (self (first (rest (rest (rest node)))))
@@ -1733,7 +1762,7 @@
         (%cc-gen! (lit mov) x8 x0)
         (match
           ((%cc-gen-ptr? k) (%cc-gen-bump! up (c-type-size (c-type-elem k))))
-          ((%cc-gen-double? k) (%cc-gen-double-step! up))
+          ((%cc-gen-real? k) (%cc-gen-real-step! up k))
           (#t (do (%cc-gen-bump! up 1) (%cc-gen-normalize! (promoted-c-type k)))))
         (%cc-gen-store! at k)
         (if after () (%cc-gen! (lit mov) x0 x8)))))
@@ -1816,7 +1845,9 @@
       (fn (self as)
         (if (null? as) ()
           (do (%cc-gen-expr! (first as))
-              (if doubles? (%cc-gen-convert! (lit double) (%cc-gen-c-type-of (first as))) ())
+              ; a float goes as a double, C's default promotion
+              (let ((k (%cc-gen-c-type-of (first as))))
+                (if (if doubles? #t (eq? k (lit float))) (%cc-gen-convert! (lit double) k) ()))
               (asm-push! %cc-gen-asm x0)
               (self (rest as))))))
     ; the last pushed is on top: slots K down to 0 from BASE
@@ -1847,7 +1878,7 @@
         (%cc-gen-address! x19 %cc-gen-ca)
         (%cc-gen-frame-top!)
         (%cc-gen! (lit blr) x21)
-        (if (%cc-gen-double? (library-c-type name))
+        (if (eq? (library-c-type name) (lit double))
           (%cc-gen! (lit fmov/x) x0 d0)
           (%cc-gen-normalize! (library-c-type name))))))
 
@@ -2047,7 +2078,7 @@
                     (%cc-gen-no "a struct passed for a parameter that is not one")
                     ()))
                 (%cc-gen-expr! (first t))
-                (%cc-gen-convert-double! (first (rest t)) (%cc-gen-c-type-of (first t)))
+                (%cc-gen-convert-real! (first (rest t)) (%cc-gen-c-type-of (first t)))
                 (asm-push! %cc-gen-asm x0)
                 (self (rest ts)))))))
     ; the last pushed is on top
@@ -2150,7 +2181,7 @@
                         (if (%cc-gen-aggregate? ek)
                           (%cc-gen-init-aggregate! (elem i) item)
                           (do (%cc-gen-expr! item)
-                              (%cc-gen-convert-double! ek (%cc-gen-c-type-of item))
+                              (%cc-gen-convert-real! ek (%cc-gen-c-type-of item))
                               (%cc-gen-put! (elem i))))))
                     (fill (+ i 1) (if (null? is) () (rest is)))))))
           (fill 0 items)))
@@ -2208,7 +2239,7 @@
                 (do (if (%cc-gen-aggregate? fk)
                       (%cc-gen-init-aggregate! fat (first is))
                       (do (%cc-gen-expr! (first is))
-                          (%cc-gen-convert-double! fk (%cc-gen-c-type-of (first is)))
+                          (%cc-gen-convert-real! fk (%cc-gen-c-type-of (first is)))
                           (%cc-gen-put! fat)))
                     (fill (rest fs) (rest is) (+ start size)))))))
         (fill fields items 0)))))
@@ -2335,7 +2366,7 @@
               (if (null? init) () (%cc-gen-init-aggregate! at init))
               (do (if (null? init) (%cc-gen-const! 0)
                     (do (%cc-gen-expr! init)
-                        (%cc-gen-convert-double! (%cc-gen-place-c-type at) (%cc-gen-c-type-of init))))
+                        (%cc-gen-convert-real! (%cc-gen-place-c-type at) (%cc-gen-c-type-of init))))
                   (%cc-gen-put! at)))))
         ((eq? t (lit expr)) (%cc-gen-expr! (first (rest node))))
         ((eq? t (lit if))
