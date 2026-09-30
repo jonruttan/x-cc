@@ -83,7 +83,7 @@ oracle row from /usr/bin/cc.
 0
 ```
 
-### a member's alignment pads the struct
+### a field's alignment pads the struct
 
 `int i` cannot start at offset 1, so the `char` before it is followed by
 three bytes of padding, and the struct's size rounds up to four.

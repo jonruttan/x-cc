@@ -123,8 +123,8 @@
         (+ c 1))
       (#t c))))
 
-; number: decimal, 0x hex, 0 octal, as (VALUE KIND . NEXT); the suffixes
-; u U l L, with the base and the value, give the literal its type
+; number: decimal, 0x hex, 0 octal, as (VALUE C-TYPE . NEXT); the suffixes
+; u U l L, with the base and the value, give the literal its C type
 (def %cc-lex-num
   (fn (_ src end i)
     (def hexp
@@ -158,15 +158,16 @@
               (#t (pair (pair u l) j)))))))
     (def s (suf (rest r) #f #f))
     (pair (first r)
-      (pair (%cc-lit-kind (first r) (not (if hexp #t (= (byte-at src i) 48)))
+      (pair (%cc-lit-c-type (first r) (not (if hexp #t (= (byte-at src i) 48)))
               (first (first s)) (rest (first s)))
         (rest s)))))
 
-; The type of an integer literal, as C gives it (6.4.4.1, long long being
-; long): the first of a list that holds the value, the list set by the
-; suffix and by whether the literal is decimal.  A value past a long's reach
-; wrapped negative as it was read, and only an unsigned long holds it.
-(def %cc-lit-kind
+; The C type of an integer literal -- C11's integer constant (6.4.4.1) -- as C
+; gives it, long long being long: the first of a list that holds the value, the
+; list set by the suffix and by whether the literal is decimal.  A value past a
+; long's reach wrapped negative as it was read, and only an unsigned long holds
+; it.
+(def %cc-lit-c-type
   (fn (_ v decimal? u? l?)
     (def int? (if (>= v 0) (<= v 2147483647) #f))
     (def uint? (if (>= v 0) (<= v 4294967295) #f))
@@ -360,7 +361,7 @@
           (self src end (+ i 1) macros expanding acc)
           (if (if (%cc-digit? b) #t
                 (if (= b 46) (if (< (+ i 1) end) (%cc-digit? (byte-at src (+ i 1))) #f) #f))
-            ; (num VALUE), or (num VALUE KIND) when the literal is not an
+            ; (num VALUE), or (num VALUE C-TYPE) when the literal is not an
             ; int; a double's VALUE is its IEEE bits, read by the C
             ; library, and a float's its single's, rounded from them
             (let ((fe (%cc-lex-float-end src end i)))

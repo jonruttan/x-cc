@@ -15,20 +15,20 @@
 ; Expressions evaluate on a stack machine.  Each leaves its value in x0; a
 ; binary operator evaluates its left operand and pushes it, evaluates the
 ; right, moves it to x1 and pops the left back into x0.  Every value is held
-; in the form of its kind (the integer kinds, below), and an operator whose
+; in the form of its C type (the integer C types, below), and an operator whose
 ; result can leave that form puts it back, so arithmetic wraps as C's does.
 ;
 ; Compiled so far: main and the functions beside it, with globals, locals
 ; (static ones kept once, in the data), and parameters of `char`, `short`,
 ; `int` and `long`, signed and unsigned, `double` and `float`,
 ; pointers to anything, and arrays, structs and unions of any of these, each
-; at its kind's size,
+; at its C type's size,
 ; assignment, ++ and --, `if`/`else`, `while`, `do`, `for`, `switch`,
 ; `break`, `continue`, `return` and calls (recursion included), over integer
-; constants typed by their suffixes, floating constants and string
+; constants whose C type comes from their suffixes, floating constants and string
 ; literals, + - * / %,
 ; & | ^ << >>, the six comparisons, &&, ||, the ternary, the comma,
-; unary - ~ ! & *, casts, subscripts, `.` and `->`, each in the kind C's
+; unary - ~ ! & *, casts, subscripts, `.` and `->`, each in the C type C's
 ; usual conversions give it, and calls into the C library -- six arguments
 ; at most, a variadic function's through its v- form; pointers to
 ; functions, which the C library can call back through; structs are passed
@@ -51,8 +51,8 @@
   proc-capture reverse sha256-hex-n string-append string-concat string=?
   substring)
 (import cc/lex cc-lex)
-(import cc/parse cc-parse kind-size kind-align round-up struct-entry)
-(import cc/eval common-c-type kind-elem library-c-type
+(import cc/parse cc-parse c-type-size c-type-align round-up struct-entry)
+(import cc/eval common-c-type c-type-elem library-c-type
   library-double-label library-variadic promoted-c-type signed? unsigned-divide)
 (import cc/real convert-real real-arith real-negate)
 (import cc/macho macho-write! macho-data-at)
@@ -223,19 +223,19 @@
 (def %cc-gen-two-63 0x43E0000000000000)   ; 2^63 as a double
 (def %cc-gen-one 0x3FF0000000000000)      ; 1.0
 
-; the value of real kind K in the general register X, as a double in D
+; the value of real C type K in the general register X, as a double in D
 (def %cc-gen-real-in!
   (fn (_ d x k)
     (do (%cc-gen! (lit fmov/d) d x)
         (if (eq? k (lit float)) (%cc-gen! (lit fcvt/d) d d) ()))))
 
-; the double in d0, as real kind K in x0
+; the double in d0, as real C type K in x0
 (def %cc-gen-real-out!
   (fn (_ k)
     (do (if (eq? k (lit float)) (%cc-gen! (lit fcvt/s) d0 d0) ())
         (%cc-gen! (lit fmov/x) x0 d0))))
 
-; x0, an integer of kind FROM, as real kind K, converted in one rounding
+; x0, an integer of C type FROM, as real C type K, converted in one rounding
 ; (scvtf, scvtf/s).  An unsigned long past the signed range converts
 ; halved, its last bit kept so it rounds as C does, and doubled, which
 ; is exact.
@@ -265,12 +265,12 @@
       (do (%cc-gen! cvt d0 x0)
           (%cc-gen! (lit fmov/x) x0 d0)))))
 
-; x0, of real kind FROM, as an integer of KIND, toward zero.  An unsigned
+; x0, of real C type FROM, as an integer of C-TYPE, toward zero.  An unsigned
 ; long at 2^63 or past it converts less 2^63 and takes the top bit back.
 (def %cc-gen-real->int!
-  (fn (_ kind from)
+  (fn (_ c-type from)
     (%cc-gen-real-in! d0 x0 from)
-    (if (eq? kind (lit ulong))
+    (if (eq? c-type (lit ulong))
       (let ((small (%cc-gen-label)) (done (%cc-gen-label)))
         (do (asm-load-imm64! %cc-gen-asm x2 %cc-gen-two-63)
             (%cc-gen! (lit fmov/d) d1 x2)
@@ -286,9 +286,9 @@
             (%cc-gen! (lit fcvtzs) x0 d0)
             (asm-label! %cc-gen-asm done)))
       (do (%cc-gen! (lit fcvtzs) x0 d0)
-          (%cc-gen-convert! kind (lit long))))))
+          (%cc-gen-convert! c-type (lit long))))))
 
-; x0 and x1, both of real kind K, put together by OP, into x0
+; x0 and x1, both of real C type K, put together by OP, into x0
 (def %cc-gen-real-bin!
   (fn (_ op k)
     (def f
@@ -305,7 +305,7 @@
 
 (def %cc-gen-real-name (fn (_ k) (if (eq? k (lit float)) "float" "double")))
 
-; x0 = 1 when x0 and x1, both of real kind K, compare as OP says, else 0:
+; x0 = 1 when x0 and x1, both of real C type K, compare as OP says, else 0:
 ; false for a NaN on either side but for !=
 (def %cc-gen-real-compare!
   (fn (_ op k)
@@ -329,14 +329,14 @@
             (%cc-gen! (lit orr) x0 x0 x1)))
       (#t (%cc-gen-no (string-append "the comparison " op))))))
 
-; x0, of real kind K, without its sign: zero at either zero, which is what
+; x0, of real C type K, without its sign: zero at either zero, which is what
 ; a test of it asks.  A float's sign is bit 31, with zeros above it.
 (def %cc-gen-drop-sign!
   (fn (_ k)
     (do (%cc-gen! (lit mov) x2 (imm (if (eq? k (lit float)) 33 1)))
         (%cc-gen! (lit lslv) x0 x0 x2))))
 
-; the unary OP on x0, of real kind K: - flips its sign, ! tests it
+; the unary OP on x0, of real C type K: - flips its sign, ! tests it
 (def %cc-gen-real-unary!
   (fn (_ op k)
     (match
@@ -350,7 +350,7 @@
             (%cc-gen-flag! (lit b/eq))))
       (#t (%cc-gen-no (string-append "the operator " op " on a " (%cc-gen-real-name k)))))))
 
-; x0, of real kind K, moved one step, up or down
+; x0, of real C type K, moved one step, up or down
 (def %cc-gen-real-step!
   (fn (_ up k)
     (do (%cc-gen-real-in! d0 x0 k)
@@ -359,12 +359,12 @@
         (%cc-gen! (if up (lit fadd) (lit fsub)) d0 d0 d1)
         (%cc-gen-real-out! k))))
 
-; --- integer kinds -----------------------------------------------------------
-; A value is held in a whole register in the form its kind reads it: an int,
+; --- integer C types -----------------------------------------------------------
+; A value is held in a whole register in the form its C type reads it: an int,
 ; and anything narrower, which C promotes to int, sign-extended from bit 31;
 ; an unsigned int zero-extended; a long or an unsigned long as all 64 bits.
-; An operator works in the kind C's usual conversions give its operands and
-; leaves its result in that kind's form.  Between the 64-bit kinds and from
+; An operator works in the C type C's usual conversions give its operands and
+; leaves its result in that C type's form.  Between the 64-bit C types and from
 ; either 32-bit one to them, the form already is the conversion: an int's
 ; sign-extension is the long, and the unsigned long, it converts to.  The
 ; C types C's promotions and usual conversions give are cc/eval.x's
@@ -376,12 +376,12 @@
 
 (def %cc-gen-unsigned? (fn (_ k) (if (eq? k (lit uint)) #t (eq? k (lit ulong)))))
 
-; x0 into the form KIND holds a value in, after an operation that can leave it
+; x0 into the form C-TYPE holds a value in, after an operation that can leave it
 (def %cc-gen-normalize!
-  (fn (_ kind)
+  (fn (_ c-type)
     (match
-      ((eq? kind (lit int)) (%cc-gen-int!))
-      ((eq? kind (lit uint)) (%cc-gen-uint!))
+      ((eq? c-type (lit int)) (%cc-gen-int!))
+      ((eq? c-type (lit uint)) (%cc-gen-uint!))
       (#t ()))))
 
 ; V as the int its low 32 bits make
@@ -394,23 +394,23 @@
 (def %cc-gen-const!
   (fn (_ v) (asm-load-imm64! %cc-gen-asm x0 (%cc-gen-int-of v))))
 
-; V in the form a value of KIND is held in: cut to the kind's width and
+; V in the form a value of C-TYPE is held in: cut to the C type's width and
 ; extended by its sign -- an int's from bit 31, an unsigned int's with
-; zeros -- and an eight-byte kind's as it is
+; zeros -- and an eight-byte C type's as it is
 (def %cc-gen-form
-  (fn (_ v kind)
-    (def size (kind-size kind))
+  (fn (_ v c-type)
+    (def size (c-type-size c-type))
     (if (>= size 8) v
       (let ((top (<< 1 (- (* 8 size) 1))))
         (def low (& v (- (* 2 top) 1)))
-        (if (if (signed? kind) (>= low top) #f) (- low (* 2 top)) low)))))
+        (if (if (signed? c-type) (>= low top) #f) (- low (* 2 top)) low)))))
 
-; a constant of KIND into x0, in that kind's form
-(def %cc-gen-const-kind!
-  (fn (_ v kind) (asm-load-imm64! %cc-gen-asm x0 (%cc-gen-form v kind))))
+; a constant of C-TYPE into x0, in that C type's form
+(def %cc-gen-const-c-type!
+  (fn (_ v c-type) (asm-load-imm64! %cc-gen-asm x0 (%cc-gen-form v c-type))))
 
-; the kind of a literal: the one the lexer read, an int when it read none
-(def %cc-gen-num-kind
+; the C type of a literal: the one the lexer read, an int when it read none
+(def %cc-gen-num-c-type
   (fn (_ node) (if (null? (rest (rest node))) (lit int) (first (rest (rest node))))))
 
 ; x0 = 1 if the flags satisfy BRANCH, else 0
@@ -425,28 +425,28 @@
         (%cc-gen! (lit mov) x0 (imm 1))
         (asm-label! %cc-gen-asm done))))
 
-; The left operand in x0, the right in x1, both in KIND's form, the result
+; The left operand in x0, the right in x1, both in C-TYPE's form, the result
 ; to x0 in it.  An unsigned int is zero-extended, so signed division and a
 ; right shift that brings in zeros are the unsigned ones on it.
 (def %cc-gen-bin!
-  (fn (_ op kind)
+  (fn (_ op c-type)
     (match
-      ((string=? op "+") (do (%cc-gen! (lit add) x0 x0 x1) (%cc-gen-normalize! kind)))
-      ((string=? op "-") (do (%cc-gen! (lit sub) x0 x0 x1) (%cc-gen-normalize! kind)))
-      ((string=? op "*") (do (%cc-gen! (lit mul) x0 x0 x1) (%cc-gen-normalize! kind)))
+      ((string=? op "+") (do (%cc-gen! (lit add) x0 x0 x1) (%cc-gen-normalize! c-type)))
+      ((string=? op "-") (do (%cc-gen! (lit sub) x0 x0 x1) (%cc-gen-normalize! c-type)))
+      ((string=? op "*") (do (%cc-gen! (lit mul) x0 x0 x1) (%cc-gen-normalize! c-type)))
       ((string=? op "/")
-        (if (eq? kind (lit ulong)) (%cc-gen-udiv64! #f)
-          (do (%cc-gen! (lit sdiv) x0 x0 x1) (%cc-gen-normalize! kind))))
+        (if (eq? c-type (lit ulong)) (%cc-gen-udiv64! #f)
+          (do (%cc-gen! (lit sdiv) x0 x0 x1) (%cc-gen-normalize! c-type))))
       ((string=? op "%")
-        (if (eq? kind (lit ulong)) (%cc-gen-udiv64! #t)
+        (if (eq? c-type (lit ulong)) (%cc-gen-udiv64! #t)
           (do (%cc-gen! (lit sdiv) x2 x0 x1)
               (%cc-gen! (lit msub) x0 x2 x1 x0))))
       ((string=? op "&") (%cc-gen! (lit and) x0 x0 x1))
       ((string=? op "|") (%cc-gen! (lit orr) x0 x0 x1))
       ((string=? op "^") (%cc-gen! (lit eor) x0 x0 x1))
-      ((string=? op "<<") (do (%cc-gen! (lit lslv) x0 x0 x1) (%cc-gen-normalize! kind)))
+      ((string=? op "<<") (do (%cc-gen! (lit lslv) x0 x0 x1) (%cc-gen-normalize! c-type)))
       ((string=? op ">>")
-        (%cc-gen! (if (%cc-gen-unsigned? kind) (lit lsrv) (lit asrv)) x0 x0 x1))
+        (%cc-gen! (if (%cc-gen-unsigned? c-type) (lit lsrv) (lit asrv)) x0 x0 x1))
       (#t (%cc-gen-no (string-append "the operator " op))))))
 
 ; x0 / x1, or x0 % x1, as unsigned 64-bit numbers, from signed division
@@ -494,13 +494,13 @@
         (asm-pop! %cc-gen-asm x8)
         (if rem? (%cc-gen! (lit mov) x0 x2) ()))))
 
-; x0 and x1, both in KIND's form, compared: an unsigned int's form is a
+; x0 and x1, both in C-TYPE's form, compared: an unsigned int's form is a
 ; non-negative 64-bit number, so a signed compare orders them; an unsigned
 ; long's top bits are flipped first, which makes the signed order the
 ; unsigned one
 (def %cc-gen-compare!
-  (fn (_ kind)
-    (do (if (eq? kind (lit ulong))
+  (fn (_ c-type)
+    (do (if (eq? c-type (lit ulong))
           (do (asm-load-imm64! %cc-gen-asm x2 (<< 1 63))
               (%cc-gen! (lit eor) x0 x0 x2)
               (%cc-gen! (lit eor) x1 x1 x2))
@@ -520,16 +520,16 @@
 ; is 64 bits, so nothing re-extends from bit 31.
 (def %cc-gen-addr-bin!
   (fn (_ op ka kb)
-    (def size (fn (_ k) (kind-size (kind-elem k))))
+    (def size (fn (_ k) (c-type-size (c-type-elem k))))
     (match
-      ((if (string=? op "-") (if (%cc-gen-addr-kind? ka) (%cc-gen-addr-kind? kb) #f) #f)
+      ((if (string=? op "-") (if (%cc-gen-addr-c-type? ka) (%cc-gen-addr-c-type? kb) #f) #f)
         (do (%cc-gen! (lit sub) x0 x0 x1)
             (if (= (size ka) 1) ()
               (do (%cc-gen! (lit mov) x1 (imm (size ka)))
                   (%cc-gen! (lit sdiv) x0 x0 x1)))))
-      ((if (string=? op "-") (%cc-gen-addr-kind? ka) #f)
+      ((if (string=? op "-") (%cc-gen-addr-c-type? ka) #f)
         (do (%cc-gen-scale! x1 (size ka)) (%cc-gen! (lit sub) x0 x0 x1)))
-      ((if (string=? op "+") (%cc-gen-addr-kind? ka) #f)
+      ((if (string=? op "+") (%cc-gen-addr-c-type? ka) #f)
         (do (%cc-gen-scale! x1 (size ka)) (%cc-gen! (lit add) x0 x0 x1)))
       ((string=? op "+")
         (do (%cc-gen-scale! x0 (size kb)) (%cc-gen! (lit add) x0 x0 x1)))
@@ -547,24 +547,24 @@
       (#t (%cc-gen-no (string-append "the comparison " op))))))
 
 ; --- the frame --------------------------------------------------------------
-; Every local and parameter has the size and alignment of its kind, at a
+; Every local and parameter has the size and alignment of its C type, at a
 ; fixed offset from x19, which the prologue points at the frame it took off
 ; x20.  A value loads at its width, extended by its sign -- a char
-; sign-extends, an unsigned char zero-extends -- into the form its kind
-; is held in (the integer kinds, above).  A store converts the value to its
-; place's kind, and so does the value an assignment answers.
+; sign-extends, an unsigned char zero-extends -- into the form its C type
+; is held in (the integer C types, above).  A store converts the value to its
+; place's C type, and so does the value an assignment answers.
 ;
 ; A pointer is an eight-byte address.  An array is its elements end to
 ; end, and where it is used as a value it stands for its first element's
 ; address, which is all a subscript or pointer arithmetic needs.
 
-(def %cc-gen-env ())        ; ((name offset . kind) ...)
+(def %cc-gen-env ())        ; ((name offset . c-type) ...)
 (def %cc-gen-frame-bytes 0) ; how much of the frame the named ones take
-(def %cc-gen-ret-kind ())   ; what the function being compiled returns
+(def %cc-gen-ret-c-type ())   ; what the function being compiled returns
 
 (def %cc-gen-ptr? (fn (_ k) (if (pair? k) (eq? (first k) (lit ptr)) #f)))
 (def %cc-gen-array? (fn (_ k) (if (pair? k) (eq? (first k) (lit array)) #f)))
-(def %cc-gen-addr-kind? (fn (_ k) (if (%cc-gen-ptr? k) #t (%cc-gen-array? k))))
+(def %cc-gen-addr-c-type? (fn (_ k) (if (%cc-gen-ptr? k) #t (%cc-gen-array? k))))
 
 ; A struct is its fields at the offsets the parser laid out, a union one
 ; whose fields all sit at 0.  Like an array, it is never loaded whole: where
@@ -572,7 +572,7 @@
 (def %cc-gen-struct? (fn (_ k) (if (pair? k) (eq? (first k) (lit struct)) #f)))
 (def %cc-gen-aggregate? (fn (_ k) (if (%cc-gen-array? k) #t (%cc-gen-struct? k))))
 
-; (OFFSET . KIND) of the field FNAME of the struct kind K
+; (OFFSET . C-TYPE) of the field FNAME of the struct C type K
 (def %cc-gen-field
   (fn (_ k fname)
     (def entry (struct-entry (first (rest k))))
@@ -589,75 +589,75 @@
 
 ; an array as the value it stands for: a pointer to its first element
 (def %cc-gen-decay
-  (fn (_ k) (if (%cc-gen-array? k) (list (lit ptr) (kind-elem k)) k)))
+  (fn (_ k) (if (%cc-gen-array? k) (list (lit ptr) (c-type-elem k)) k)))
 
-; KIND, if the compiled code holds it; WHAT names the holder in a refusal.
-; A pointer may point at any kind -- what a load through it reads is
+; C-TYPE, if the compiled code holds it; WHAT names the holder in a refusal.
+; A pointer may point at any C type -- what a load through it reads is
 ; checked where the load is -- and an array's elements are held as a
 ; value would be.
-(def %cc-gen-kind!
-  (fn (self kind what)
+(def %cc-gen-c-type!
+  (fn (self c-type what)
     (match
-      ((eq? kind (lit int)) kind)
-      ((eq? kind (lit char)) kind)
-      ((eq? kind (lit uchar)) kind)
-      ((eq? kind (lit short)) kind)
-      ((eq? kind (lit ushort)) kind)
-      ((eq? kind (lit long)) kind)
-      ((eq? kind (lit uint)) kind)
-      ((eq? kind (lit ulong)) kind)
-      ((eq? kind (lit double)) kind)
-      ((eq? kind (lit float)) kind)
-      ((%cc-gen-ptr? kind) kind)
-      ((%cc-gen-fnptr? kind) kind)
-      ((%cc-gen-bits? kind) (do (self (first (rest kind)) what) kind))
-      ((%cc-gen-array? kind) (do (self (kind-elem kind) "an array's element") kind))
-      ((%cc-gen-struct? kind)
+      ((eq? c-type (lit int)) c-type)
+      ((eq? c-type (lit char)) c-type)
+      ((eq? c-type (lit uchar)) c-type)
+      ((eq? c-type (lit short)) c-type)
+      ((eq? c-type (lit ushort)) c-type)
+      ((eq? c-type (lit long)) c-type)
+      ((eq? c-type (lit uint)) c-type)
+      ((eq? c-type (lit ulong)) c-type)
+      ((eq? c-type (lit double)) c-type)
+      ((eq? c-type (lit float)) c-type)
+      ((%cc-gen-ptr? c-type) c-type)
+      ((%cc-gen-fnptr? c-type) c-type)
+      ((%cc-gen-bits? c-type) (do (self (first (rest c-type)) what) c-type))
+      ((%cc-gen-array? c-type) (do (self (c-type-elem c-type) "an array's element") c-type))
+      ((%cc-gen-struct? c-type)
         (do (let ((go (fn (go fs)
                         (if (null? fs) ()
                           (do (self (first (rest (rest (first fs)))) "a struct's field")
                               (go (rest fs)))))))
-              (go (rest (rest (struct-entry (first (rest kind)))))))
-            kind))
+              (go (rest (rest (struct-entry (first (rest c-type)))))))
+            c-type))
       (#t (%cc-gen-no
             (string-append what
               " that is not an integer, a double, a float, a pointer, an array or a struct"))))))
 
-(def %cc-gen-byte? (fn (_ kind) (if (eq? kind (lit char)) #t (eq? kind (lit uchar)))))
-(def %cc-gen-half? (fn (_ kind) (if (eq? kind (lit short)) #t (eq? kind (lit ushort)))))
+(def %cc-gen-byte? (fn (_ c-type) (if (eq? c-type (lit char)) #t (eq? c-type (lit uchar)))))
+(def %cc-gen-half? (fn (_ c-type) (if (eq? c-type (lit short)) #t (eq? c-type (lit ushort)))))
 
-; what is left when a value of KIND is loaded or stored: the kinds a
+; what is left when a value of C-TYPE is loaded or stored: the C types a
 ; register holds, and a refusal naming any other
-(def %cc-gen-value-kind!
-  (fn (_ kind)
-    (do (%cc-gen-kind! kind "a value")
+(def %cc-gen-value-c-type!
+  (fn (_ c-type)
+    (do (%cc-gen-c-type! c-type "a value")
         (match
-          ((%cc-gen-array? kind) (%cc-gen-no "an array as a value"))
-          ((%cc-gen-struct? kind) (%cc-gen-no "a struct as a value"))
-          (#t kind)))))
+          ((%cc-gen-array? c-type) (%cc-gen-no "an array as a value"))
+          ((%cc-gen-struct? c-type) (%cc-gen-no "a struct as a value"))
+          (#t c-type)))))
 
-; the load that brings a value of KIND into a register, extended by its sign
+; the load that brings a value of C-TYPE into a register, extended by its sign
 (def %cc-gen-load-op
-  (fn (_ kind)
+  (fn (_ c-type)
     (match
-      ((eq? kind (lit char)) (lit ldrsb))
-      ((eq? kind (lit uchar)) (lit ldrb))
-      ((eq? kind (lit short)) (lit ldrsh))
-      ((eq? kind (lit ushort)) (lit ldrh))
-      ((eq? kind (lit uint)) (lit ldrw))
-      ((eq? kind (lit float)) (lit ldrw))
-      ((%cc-gen-wide? kind) (lit ldr))
-      (#t (do (%cc-gen-value-kind! kind) (lit ldrsw))))))
+      ((eq? c-type (lit char)) (lit ldrsb))
+      ((eq? c-type (lit uchar)) (lit ldrb))
+      ((eq? c-type (lit short)) (lit ldrsh))
+      ((eq? c-type (lit ushort)) (lit ldrh))
+      ((eq? c-type (lit uint)) (lit ldrw))
+      ((eq? c-type (lit float)) (lit ldrw))
+      ((%cc-gen-wide? c-type) (lit ldr))
+      (#t (do (%cc-gen-value-c-type! c-type) (lit ldrsw))))))
 
 (def %cc-gen-store-op
-  (fn (_ kind)
+  (fn (_ c-type)
     (match
-      ((%cc-gen-byte? kind) (lit strb))
-      ((%cc-gen-half? kind) (lit strh))
-      ((%cc-gen-wide? kind) (lit str))
-      (#t (do (%cc-gen-value-kind! kind) (lit strw))))))
+      ((%cc-gen-byte? c-type) (lit strb))
+      ((%cc-gen-half? c-type) (lit strh))
+      ((%cc-gen-wide? c-type) (lit str))
+      (#t (do (%cc-gen-value-c-type! c-type) (lit strw))))))
 
-; the kinds held in all 64 bits: an address, a long, an unsigned long, a
+; the C types held in all 64 bits: an address, a long, an unsigned long, a
 ; double
 (def %cc-gen-wide?
   (fn (_ k)
@@ -673,17 +673,17 @@
 ; call through it answers a RET from (parse.x)
 (def %cc-gen-fnptr? (fn (_ k) (if (pair? k) (eq? (first k) (lit fnptr)) #f)))
 
-; x0 as a value of KIND: shifted to the top of the register and back down,
-; arithmetically for a signed kind
+; x0 as a value of C-TYPE: shifted to the top of the register and back down,
+; arithmetically for a signed C type
 (def %cc-gen-narrow!
-  (fn (_ kind)
-    (def bits (match ((%cc-gen-byte? kind) 56) ((%cc-gen-half? kind) 48) (#t 32)))
+  (fn (_ c-type)
+    (def bits (match ((%cc-gen-byte? c-type) 56) ((%cc-gen-half? c-type) 48) (#t 32)))
     (do (%cc-gen! (lit mov) x2 (imm bits))
         (%cc-gen! (lit lslv) x0 x0 x2)
-        (%cc-gen! (if (signed? kind) (lit asrv) (lit lsrv)) x0 x0 x2))))
+        (%cc-gen! (if (signed? c-type) (lit asrv) (lit lsrv)) x0 x0 x2))))
 (def %cc-gen-loops ())      ; ((break-label . continue-label) ...), innermost first
 (def %cc-gen-funs ())       ; ((name . label) ...), every function in the program
-(def %cc-gen-rets ())       ; ((name . kind) ...), what each one returns
+(def %cc-gen-rets ())       ; ((name . c-type) ...), what each one returns
 
 (def %cc-gen-ret-find
   (fn (_ name)
@@ -693,7 +693,7 @@
                   (self (rest es))))))
     (go %cc-gen-rets)))
 
-(def %cc-gen-params ())     ; ((name . kinds) ...), what each one takes
+(def %cc-gen-params ())     ; ((name . c-types) ...), what each one takes
 
 (def %cc-gen-params-find
   (fn (_ name)
@@ -721,14 +721,14 @@
 
 ; The data a program carries, in the segment the container maps readable and
 ; writable on the page after the code: the globals first, each at the size
-; and alignment of its kind, then the string literals end to end and
+; and alignment of its C type, then the string literals end to end and
 ; NUL-terminated.  x22 holds where the data starts, taken
 ; program-counter-relatively by the entry, and everything in it is an offset
 ; from there.  The globals come first because their offsets are wanted while
 ; the bodies compile, and a literal's is not settled until one is met.
 (def %cc-gen-databytes 0)
 (def %cc-gen-data ())       ; ((offset . bytes) ...), the last laid first
-(def %cc-gen-globals ())    ; ((name offset . kind) ...)
+(def %cc-gen-globals ())    ; ((name offset . c-type) ...)
 (def %cc-gen-strings ())    ; ((text . offset) ...)
 
 ; room for BYTES in the data, at a multiple of ALIGN; answers where
@@ -753,7 +753,7 @@
           (do (set! %cc-gen-strings (pair (pair text off) %cc-gen-strings))
               off))))))
 
-; (OFFSET . KIND) for a global's name, or nil
+; (OFFSET . C-TYPE) for a global's name, or nil
 (def %cc-gen-global-find
   (fn (_ name)
     (def go (fn (self es)
@@ -762,7 +762,7 @@
                   (self (rest es))))))
     (go %cc-gen-globals)))
 
-; A global takes room of its kind, with its initializer's bytes in it.
+; A global takes room of its C type, with its initializer's bytes in it.
 ; The initializer is a constant, as C asks, so the bytes are worked out
 ; here.  An address in the data would move with the executable, which the
 ; kernel loads at a place of its choosing and nothing relocates, so a
@@ -771,14 +771,14 @@
 (def %cc-gen-global!
   (fn (_ node)
     (def name (first (rest node)))
-    (def kind (%cc-gen-kind! (first (rest (rest node))) "a global"))
+    (def c-type (%cc-gen-c-type! (first (rest (rest node))) "a global"))
     (if (not (null? (%cc-gen-global-find name)))
       (%cc-gen-no (string-append "a second declaration of " name)))
     (def init (first (rest (rest (rest node)))))
     (set! %cc-gen-pending ())
-    (def off (%cc-gen-data! (%cc-gen-const-bytes kind init 0) (kind-align kind)))
+    (def off (%cc-gen-data! (%cc-gen-const-bytes c-type init 0) (c-type-align c-type)))
     (%cc-gen-keep-fixups! off)
-    (set! %cc-gen-globals (pair (pair name (pair off kind)) %cc-gen-globals))))
+    (set! %cc-gen-globals (pair (pair name (pair off c-type)) %cc-gen-globals))))
 
 ; (OFFSET INIT . SCOPE) for each pointer in the data that starts at an
 ; address: where the pointer is, what names the address, and the static
@@ -839,10 +839,10 @@
           (if (not (if (string=? op "+") #t (if (string=? op "-") left? #f)))
             (%cc-gen-no (string-append "the operator " op " on an address")))
           (let ((p (self (if left? a b))) (n (%cc-gen-fold (if left? b a))))
-            (pair (+ (first p) (* (if (string=? op "-") (- 0 n) n) (kind-size (rest p))))
+            (pair (+ (first p) (* (if (string=? op "-") (- 0 n) n) (c-type-size (rest p))))
               (rest p)))))
       ((eq? t (lit cast))
-        (pair (first (self (first (rest (rest node))))) (kind-elem (first (rest node)))))
+        (pair (first (self (first (rest (rest node))))) (c-type-elem (first (rest node)))))
       ((if (eq? t (lit un)) (string=? (first (rest node)) "&") #f)
         (let ((x (first (rest (rest node)))))
           (def xt (first x))
@@ -864,7 +864,7 @@
       ; anything else names an object, which is an address only as an array
       (#t
         (let ((p (self (list (lit un) "&" node))))
-          (if (%cc-gen-array? (rest p)) (pair (first p) (kind-elem (rest p)))
+          (if (%cc-gen-array? (rest p)) (pair (first p) (c-type-elem (rest p)))
             (%cc-gen-no "a global pointer initialized with a value that is not an address")))))))
 
 ; where in the data the address INIT names lies
@@ -924,11 +924,11 @@
 ; in it can start at its own address.
 (def %cc-gen-static!
   (fn (_ node)
-    (def c-type (%cc-gen-kind! (first (rest (rest node))) "a local"))
+    (def c-type (%cc-gen-c-type! (first (rest (rest node))) "a local"))
     (set! %cc-gen-pending ())
     (def off
       (%cc-gen-data! (%cc-gen-const-bytes c-type (first (rest (rest (rest node)))) 0)
-        (kind-align c-type)))
+        (c-type-align c-type)))
     (set! %cc-gen-static-scope
       (pair (pair (first (rest node)) (pair off c-type)) %cc-gen-static-scope))
     (%cc-gen-keep-fixups! off)
@@ -965,13 +965,13 @@
     (def s (go %cc-gen-statics))
     (set! %cc-gen-env (pair (pair name (pair (pair x22 (first s)) (rest s))) %cc-gen-env))))
 
-; the little-endian bytes of V at KIND's width
+; the little-endian bytes of V at C-TYPE's width
 (def %cc-gen-value-bytes
-  (fn (_ kind v)
-    (%cc-gen-take (kind-size kind)
+  (fn (_ c-type v)
+    (%cc-gen-take (c-type-size c-type)
       (append (%cc-gen-le32 v) (%cc-gen-le32 (>> v 32))))))
 
-; the bytes a constant initializer INIT lays down for KIND
+; the bytes a constant initializer INIT lays down for C-TYPE
 ; AT is where in the object being laid out these bytes go: a pointer that
 ; starts at an address leaves zeros there and a note of the address,
 ; (AT . INIT), which the object's own placing turns into a fixup
@@ -999,13 +999,13 @@
       (#t #f))))
 
 (def %cc-gen-const-bytes
-  (fn (self kind init at)
+  (fn (self c-type init at)
     (def zeros
       (fn (zeros n acc) (if (<= n 0) acc (zeros (- n 1) (pair 0 acc)))))
     (match
-      ((null? init) (zeros (kind-size kind) ()))
-      ((%cc-gen-array? kind)
-        (let ((n (first (rest kind))) (ek (kind-elem kind)))
+      ((null? init) (zeros (c-type-size c-type) ()))
+      ((%cc-gen-array? c-type)
+        (let ((n (first (rest c-type))) (ek (c-type-elem c-type)))
           (match
             ((eq? (first init) (lit initlist))
               (let ((items (first (rest init))))
@@ -1014,7 +1014,7 @@
                 (def go
                   (fn (go i is)
                     (if (>= i n) ()
-                      (append (self ek (if (null? is) () (first is)) (+ at (* i (kind-size ek))))
+                      (append (self ek (if (null? is) () (first is)) (+ at (* i (c-type-size ek))))
                         (go (+ i 1) (if (null? is) () (rest is)))))))
                 (go 0 items)))
             ((if (eq? (first init) (lit str)) (%cc-gen-byte? ek) #f)
@@ -1032,11 +1032,11 @@
       ; ends overlaps it, which is a union's: it takes one initializer.  The
       ; bit-fields that share a unit are one value: each one's bits or'd in
       ; at its place.
-      ((%cc-gen-struct? kind)
+      ((%cc-gen-struct? c-type)
         (do (if (not (eq? (first init) (lit initlist)))
               (%cc-gen-no "a global struct initialized by something other than a list"))
             (let ((items (first (rest init)))
-                  (fields (rest (rest (struct-entry (first (rest kind)))))))
+                  (fields (rest (rest (struct-entry (first (rest c-type)))))))
               (if (> (length items) (length fields))
                 (%cc-gen-no "more initializers than a struct has fields"))
               (def go ())
@@ -1065,42 +1065,42 @@
                         cur)))))
               (set! go
                 (fn (go fs is cur)
-                  (if (null? is) (zeros (- (kind-size kind) cur) ())
+                  (if (null? is) (zeros (- (c-type-size c-type) cur) ())
                     (let ((foff (first (rest (first fs)))) (fk (first (rest (rest (first fs))))))
                       (if (%cc-gen-bits? fk)
-                        (unit fs is foff (first (rest fk)) 0 (kind-size (first (rest fk))) 0 cur)
+                        (unit fs is foff (first (rest fk)) 0 (c-type-size (first (rest fk))) 0 cur)
                         (do (if (< foff cur) (%cc-gen-no "more initializers than a union takes"))
                             (append (zeros (- foff cur) ())
                               (append (self fk (first is) (+ at foff))
-                                (go (rest fs) (rest is) (+ foff (kind-size fk)))))))))))
+                                (go (rest fs) (rest is) (+ foff (c-type-size fk)))))))))))
               (go fields items 0))))
       ; a pointer that starts at an address, a function's included
-      ((if (%cc-gen-ptr? kind) (%cc-gen-address-form? init) #f)
+      ((if (%cc-gen-ptr? c-type) (%cc-gen-address-form? init) #f)
         (do (set! %cc-gen-pending (pair (pair at init) %cc-gen-pending))
             (zeros 8 ())))
-      ((if (%cc-gen-fnptr? kind) (not (null? (%cc-gen-function-form init))) #f)
+      ((if (%cc-gen-fnptr? c-type) (not (null? (%cc-gen-function-form init))) #f)
         (do (set! %cc-gen-pending (pair (pair at init) %cc-gen-pending))
             (zeros 8 ())))
       ((eq? (first init) (lit initlist))
         (%cc-gen-no "a braced initializer for something that is not an array or a struct"))
       (#t (let ((v (%cc-gen-fold init)))
-            (%cc-gen-value-bytes kind (convert-real v (%cc-gen-kind-of init) kind)))))))
+            (%cc-gen-value-bytes c-type (convert-real v (%cc-gen-c-type-of init) c-type)))))))
 
 ; What a global starts out holding.  C asks for a constant here, so the
-; value is worked out now: each operation in the kind C's conversions give
-; it, its result in that kind's form, as the code for it would leave it.
+; value is worked out now: each operation in the C type C's conversions give
+; it, its result in that C type's form, as the code for it would leave it.
 ; The program starts with the value's low bytes, as many as the global's
-; kind has, in place.  A real value is worked out by run's own operations
+; C type has, in place.  A real value is worked out by run's own operations
 ; (cc/real.x), which are the machine's.
 (def %cc-gen-fold
   (fn (self node)
     (let ((t (first node)))
       (match
-        ((eq? t (lit num)) (%cc-gen-form (first (rest node)) (%cc-gen-num-kind node)))
-        ((if (eq? t (lit un)) (%cc-gen-real? (%cc-gen-kind-of node)) #f)
+        ((eq? t (lit num)) (%cc-gen-form (first (rest node)) (%cc-gen-num-c-type node)))
+        ((if (eq? t (lit un)) (%cc-gen-real? (%cc-gen-c-type-of node)) #f)
           (if (string=? (first (rest node)) "-")
-            (real-negate (self (first (rest (rest node)))) (%cc-gen-kind-of node))
-            (%cc-gen-no (string-append "a global " (%cc-gen-real-name (%cc-gen-kind-of node)) " initialized with " (first (rest node))))))
+            (real-negate (self (first (rest (rest node)))) (%cc-gen-c-type-of node))
+            (%cc-gen-no (string-append "a global " (%cc-gen-real-name (%cc-gen-c-type-of node)) " initialized with " (first (rest node))))))
         ((eq? t (lit un))
           (let ((op (first (rest node))) (v (self (first (rest (rest node))))))
             (%cc-gen-form
@@ -1109,35 +1109,35 @@
                 ((string=? op "~") (- (- 0 v) 1))
                 ((string=? op "!") (if (= v 0) 1 0))
                 (#t (%cc-gen-no (string-append "a global initialized with " op))))
-              (%cc-gen-kind-of node))))
+              (%cc-gen-c-type-of node))))
         ((eq? t (lit bin))
           (let ((l (first (rest (rest node)))) (r (first (rest (rest (rest node))))))
             (def op (first (rest node)))
-            (def k (%cc-gen-kind-of node))
+            (def k (%cc-gen-c-type-of node))
             (match
               ((not (%cc-gen-real? k)) (%cc-gen-fold-bin op (self l) (self r) k))
               ((if (string=? op "+") #t
                  (if (string=? op "-") #t (if (string=? op "*") #t (string=? op "/"))))
-                (real-arith op (convert-real (self l) (%cc-gen-kind-of l) k)
-                  (convert-real (self r) (%cc-gen-kind-of r) k) k))
+                (real-arith op (convert-real (self l) (%cc-gen-c-type-of l) k)
+                  (convert-real (self r) (%cc-gen-c-type-of r) k) k))
               (#t (%cc-gen-no (string-append "the operator " op " on a " (%cc-gen-real-name k)))))))
         ((eq? t (lit cast))
           (let ((k (first (rest node))) (e (first (rest (rest node)))))
             (if (if (eq? k (lit void)) #t (%cc-gen-aggregate? k))
               (%cc-gen-no "a global initialized by something other than a constant"))
-            (%cc-gen-form (convert-real (self e) (%cc-gen-kind-of e) k) k)))
+            (%cc-gen-form (convert-real (self e) (%cc-gen-c-type-of e) k) k)))
         (#t (%cc-gen-no "a global initialized by something other than a constant"))))))
 
-; OP on the constants A and B, in KIND: each operand converted to it first,
+; OP on the constants A and B, in C-TYPE: each operand converted to it first,
 ; but a shift's count, which keeps its own
 (def %cc-gen-fold-bin
-  (fn (_ op a b kind)
-    (if (%cc-gen-addr-kind? kind)
+  (fn (_ op a b c-type)
+    (if (%cc-gen-addr-c-type? c-type)
       (%cc-gen-no "a global initialized by arithmetic on an address"))
     (def shift? (if (string=? op "<<") #t (string=? op ">>")))
-    (def x (%cc-gen-form a kind))
-    (def y (if shift? b (%cc-gen-form b kind)))
-    (def wide? (eq? kind (lit ulong)))
+    (def x (%cc-gen-form a c-type))
+    (def y (if shift? b (%cc-gen-form b c-type)))
+    (def wide? (eq? c-type (lit ulong)))
     (%cc-gen-form
       (match
         ((string=? op "+") (+ x y))
@@ -1155,7 +1155,7 @@
             (& (>> x y) (- (<< 1 (- 64 y)) 1))
             (>> x y)))
         (#t (%cc-gen-no (string-append "a global initialized with " op))))
-      kind)))
+      c-type)))
 
 ; the bytes of the data: every piece at its offset, zeros between.  The
 ; pieces are listed last-laid first, so the bytes build from the end back.
@@ -1220,18 +1220,18 @@
                   (self (rest es))))))
     (go %cc-gen-env)))
 
-; a slot of KIND's size and alignment; answers its offset
+; a slot of C-TYPE's size and alignment; answers its offset
 (def %cc-gen-slot!
-  (fn (_ name kind)
+  (fn (_ name c-type)
     (if (not (null? (%cc-gen-find name)))
       (%cc-gen-no (string-append "a second declaration of " name)))
-    (def off (round-up %cc-gen-frame-bytes (kind-align kind)))
+    (def off (round-up %cc-gen-frame-bytes (c-type-align c-type)))
     ; a scalar loads and stores at its offset from x19, which reaches 4095
     ; of its widths; an array or a struct is reached through its address
-    (if (if (%cc-gen-aggregate? kind) #f (> off (* 4095 (kind-size kind))))
+    (if (if (%cc-gen-aggregate? c-type) #f (> off (* 4095 (c-type-size c-type))))
       (%cc-gen-no "more locals than a load reaches"))
-    (set! %cc-gen-frame-bytes (+ off (kind-size kind)))
-    (set! %cc-gen-env (pair (pair name (pair off kind)) %cc-gen-env))
+    (set! %cc-gen-frame-bytes (+ off (c-type-size c-type)))
+    (set! %cc-gen-env (pair (pair name (pair off c-type)) %cc-gen-env))
     off))
 
 ; A struct parameter, where the caller stored it: OFF bytes below the top of
@@ -1240,10 +1240,10 @@
 ; size.  A struct is reached through its address, from any distance.
 (def %cc-gen-frame-top 0)   ; the size of the frame being compiled
 (def %cc-gen-slot-above!
-  (fn (_ name kind off)
+  (fn (_ name c-type off)
     (if (not (null? (%cc-gen-find name)))
       (%cc-gen-no (string-append "a second declaration of " name)))
-    (set! %cc-gen-env (pair (pair name (pair (- 0 off) kind)) %cc-gen-env))))
+    (set! %cc-gen-env (pair (pair name (pair (- 0 off) c-type)) %cc-gen-env))))
 
 (def %cc-gen-sret-slot 0)   ; where a struct the function answers goes, a word
 
@@ -1257,12 +1257,12 @@
         (do (%cc-gen! op x20 x20 (imm step))
             (self op (- n step)))))))
 
-; Room for KIND in the frame, with no name: where a call puts the struct
+; Room for C-TYPE in the frame, with no name: where a call puts the struct
 ; it answers (%cc-gen-scan-calls!)
 (def %cc-gen-room!
-  (fn (_ kind)
-    (def off (round-up %cc-gen-frame-bytes (kind-align kind)))
-    (set! %cc-gen-frame-bytes (+ off (kind-size kind)))
+  (fn (_ c-type)
+    (def off (round-up %cc-gen-frame-bytes (c-type-align c-type)))
+    (set! %cc-gen-frame-bytes (+ off (c-type-size c-type)))
     off))
 
 ; Each call in the function that answers a struct has a slot of its own for
@@ -1292,12 +1292,12 @@
                 (#t (self (rest es))))))
     (go %cc-gen-rslots)))
 
-; A place is (BASE OFFSET . KIND): a register and a byte offset from it.
+; A place is (BASE OFFSET . C-TYPE): a register and a byte offset from it.
 ; A name's is a frame slot off x19 or a global's room off x22, and one
 ; worked out at run time is the register holding it, at offset 0.
-(def %cc-gen-place (fn (_ base off kind) (pair base (pair off kind))))
+(def %cc-gen-place (fn (_ base off c-type) (pair base (pair off c-type))))
 (def %cc-gen-place-mem (fn (_ p) (mem (first p) (first (rest p)))))
-(def %cc-gen-place-kind (fn (_ p) (rest (rest p))))
+(def %cc-gen-place-c-type (fn (_ p) (rest (rest p))))
 
 ; Where a name lives, or a refusal naming it.  A local of the same name
 ; wins, as C says.
@@ -1319,19 +1319,19 @@
               ((null? g) (%cc-gen-no (string-append "the name " name)))
               ; a load takes twelve bits of offset, in units of its width,
               ; and arm64's encoder masks a wider one
-              ((if (%cc-gen-array? (rest g)) #f (> (first g) (* 4095 (kind-size (rest g)))))
+              ((if (%cc-gen-array? (rest g)) #f (> (first g) (* 4095 (c-type-size (rest g)))))
                 (%cc-gen-no "more globals than a load reaches"))
               (#t (%cc-gen-place x22 (first g) (rest g))))))))))
 
 (def %cc-gen-load!
   (fn (_ place)
-    (def k (%cc-gen-place-kind place))
+    (def k (%cc-gen-place-c-type place))
     (if (%cc-gen-bits? k) (%cc-gen-bits-load! (%cc-gen-place-mem place) k)
       (%cc-gen! (%cc-gen-load-op k) x0 (%cc-gen-place-mem place)))))
 
 (def %cc-gen-put!
   (fn (_ place)
-    (def k (%cc-gen-place-kind place))
+    (def k (%cc-gen-place-c-type place))
     (if (%cc-gen-bits? k) (%cc-gen-bits-put! (%cc-gen-place-mem place) k)
       (%cc-gen! (%cc-gen-store-op k) x0 (%cc-gen-place-mem place)))))
 
@@ -1393,86 +1393,86 @@
         (asm-pop! %cc-gen-asm x0)
         (asm-pop! %cc-gen-asm x8))))
 
-; a kind whose values are held in an int's form: int, and the kinds C
+; a C type whose values are held in an int's form: int, and the C types C
 ; promotes to it
 (def %cc-gen-int-form?
   (fn (_ k) (if (pair? k) #f (eq? (promoted-c-type k) (lit int)))))
 
-; x0, a value of kind FROM, converted to KIND: narrowed to a char or short,
-; and into an int's or an unsigned int's form from any other kind, an
-; address included.  The eight-byte kinds need nothing: every value's form
+; x0, a value of C type FROM, converted to C-TYPE: narrowed to a char or short,
+; and into an int's or an unsigned int's form from any other C type, an
+; address included.  The eight-byte C types need nothing: every value's form
 ; is already its conversion to them.  A double and a float convert to each
 ; other and to and from the integers as C says (the real types, above).
 (def %cc-gen-convert!
-  (fn (_ kind from)
+  (fn (_ c-type from)
     (match
-      ((%cc-gen-real? kind)
+      ((%cc-gen-real? c-type)
         (match
-          ((eq? from kind) ())
-          ((%cc-gen-real? from) (do (%cc-gen-real-in! d0 x0 from) (%cc-gen-real-out! kind)))
-          (#t (%cc-gen-int->real! from kind))))
-      ((%cc-gen-real? from) (%cc-gen-real->int! kind from))
-      ((if (%cc-gen-byte? kind) #t (%cc-gen-half? kind)) (%cc-gen-narrow! kind))
-      ((eq? kind (lit int)) (if (%cc-gen-int-form? from) () (%cc-gen-int!)))
-      ((eq? kind (lit uint)) (if (eq? from (lit uint)) () (%cc-gen-uint!)))
+          ((eq? from c-type) ())
+          ((%cc-gen-real? from) (do (%cc-gen-real-in! d0 x0 from) (%cc-gen-real-out! c-type)))
+          (#t (%cc-gen-int->real! from c-type))))
+      ((%cc-gen-real? from) (%cc-gen-real->int! c-type from))
+      ((if (%cc-gen-byte? c-type) #t (%cc-gen-half? c-type)) (%cc-gen-narrow! c-type))
+      ((eq? c-type (lit int)) (if (%cc-gen-int-form? from) () (%cc-gen-int!)))
+      ((eq? c-type (lit uint)) (if (eq? from (lit uint)) () (%cc-gen-uint!)))
       (#t ()))))
 
-; an assignment's store, of a value of kind FROM: the value it answers is
+; an assignment's store, of a value of C type FROM: the value it answers is
 ; converted as the stored one was.  A real value's bits are not an
 ; integer's, so a store with one on either side converts first.
 (def %cc-gen-store!
   (fn (_ place from)
-    (def k (%cc-gen-place-kind place))
+    (def k (%cc-gen-place-c-type place))
     (if (if (%cc-gen-real? k) #t (%cc-gen-real? from))
       (do (%cc-gen-convert! k from) (%cc-gen-put! place))
       (do (%cc-gen-put! place) (%cc-gen-convert! k from)))))
 
-; x0, of kind FROM, as KIND when either is real; any other value is left
+; x0, of C type FROM, as C-TYPE when either is real; any other value is left
 ; as it is, for a store to cut
 (def %cc-gen-convert-real!
-  (fn (_ kind from)
-    (if (if (%cc-gen-real? kind) #t (%cc-gen-real? from)) (%cc-gen-convert! kind from) ())))
+  (fn (_ c-type from)
+    (if (if (%cc-gen-real? c-type) #t (%cc-gen-real? from)) (%cc-gen-convert! c-type from) ())))
 
 ; NODE's value into x0 and compared with zero, for a branch on whether it
 ; is true: a real value is false at either zero
 (def %cc-gen-cond!
   (fn (_ node)
-    (def k (%cc-gen-kind-of node))
+    (def k (%cc-gen-c-type-of node))
     (do (%cc-gen-expr! node)
         (if (%cc-gen-real? k) (%cc-gen-drop-sign! k) ())
         (%cc-gen! (lit cmp) x0 (imm 0)))))
 
-; A value of KIND whose address is in x0, into x0: loaded, unless it is an
+; A value of C-TYPE whose address is in x0, into x0: loaded, unless it is an
 ; array, whose value is that address.
 (def %cc-gen-load-at!
-  (fn (_ kind)
+  (fn (_ c-type)
     (match
-      ((%cc-gen-aggregate? kind) ())
-      ((%cc-gen-bits? kind) (%cc-gen-bits-load! (mem x0 0) kind))
-      (#t (%cc-gen! (%cc-gen-load-op kind) x0 (mem x0 0))))))
+      ((%cc-gen-aggregate? c-type) ())
+      ((%cc-gen-bits? c-type) (%cc-gen-bits-load! (mem x0 0) c-type))
+      (#t (%cc-gen! (%cc-gen-load-op c-type) x0 (mem x0 0))))))
 
-; The kind of what NODE computes, worked out without computing it: what a
+; The C type of what NODE computes, worked out without computing it: what a
 ; pointer's arithmetic scales by and what a load through it reads.
-(def %cc-gen-kind-of ())
-(set! %cc-gen-kind-of
+(def %cc-gen-c-type-of ())
+(set! %cc-gen-c-type-of
   (fn (self node)
     (let ((t (first node)))
       (match
         ; a function's name is a pointer to it
         ((if (eq? t (lit var)) (%cc-gen-function-name? (first (rest node))) #f)
           (list (lit fnptr) (%cc-gen-ret-find (first (rest node)))))
-        ((eq? t (lit var)) (%cc-gen-place-kind (%cc-gen-place-of (first (rest node)))))
-        ((eq? t (lit num)) (%cc-gen-num-kind node))
+        ((eq? t (lit var)) (%cc-gen-place-c-type (%cc-gen-place-of (first (rest node)))))
+        ((eq? t (lit num)) (%cc-gen-num-c-type node))
         ((eq? t (lit szof)) (lit ulong))
         ((eq? t (lit str))
           (list (lit array) (+ (byte-len (first (rest node))) 1) (lit char)))
         ((eq? t (lit idx))
           (let ((ka (self (first (rest node)))))
-            (kind-elem (if (%cc-gen-addr-kind? ka) ka (self (first (rest (rest node))))))))
+            (c-type-elem (if (%cc-gen-addr-c-type? ka) ka (self (first (rest (rest node))))))))
         ((eq? t (lit un))
           (let ((op (first (rest node))))
             (match
-              ((string=? op "*") (kind-elem (self (first (rest (rest node))))))
+              ((string=? op "*") (c-type-elem (self (first (rest (rest node))))))
               ; & of a function is the same pointer its name is
               ((string=? op "&")
                 (let ((x (self (first (rest (rest node))))))
@@ -1480,21 +1480,21 @@
               ((string=? op "!") (lit int))
               (#t (promoted-c-type (self (first (rest (rest node)))))))))
         ((eq? t (lit bin))
-          (%cc-gen-bin-kind (first (rest node))
+          (%cc-gen-bin-c-type (first (rest node))
             (self (first (rest (rest node)))) (self (first (rest (rest (rest node)))))))
         ((eq? t (lit assign)) (self (first (rest node))))
         ((%cc-gen-step? t) (self (first (rest node))))
         ((eq? t (lit ternary))
           (let ((ka (self (first (rest (rest node))))))
-            (if (%cc-gen-addr-kind? ka) (%cc-gen-decay ka)
+            (if (%cc-gen-addr-c-type? ka) (%cc-gen-decay ka)
               (let ((kb (self (first (rest (rest (rest node)))))))
-                (if (%cc-gen-addr-kind? kb) (%cc-gen-decay kb)
+                (if (%cc-gen-addr-c-type? kb) (%cc-gen-decay kb)
                   (common-c-type ka kb))))))
         ((eq? t (lit comma)) (self (first (rest (rest node)))))
         ((eq? t (lit dot))
           (rest (%cc-gen-field (self (first (rest node))) (first (rest (rest node))))))
         ((eq? t (lit arrow))
-          (rest (%cc-gen-field (kind-elem (self (first (rest node))))
+          (rest (%cc-gen-field (c-type-elem (self (first (rest node))))
                   (first (rest (rest node))))))
         ; a call through a pointer answers what the pointer says its function
         ; answers
@@ -1515,21 +1515,21 @@
   (fn (_ name)
     (if (null? (%cc-gen-find name)) (not (null? (%cc-gen-global-find name))) #t)))
 
-; The kind a binary operator answers: + and - keep an address one and make
+; The C type a binary operator answers: + and - keep an address one and make
 ; two of them a count (a long, as ptrdiff_t is); a shift answers its left
-; operand's kind; anything else, the kind its operands meet in.
-(def %cc-gen-bin-kind
+; operand's C type; anything else, the C type its operands meet in.
+(def %cc-gen-bin-c-type
   (fn (_ op ka kb)
     (match
       ((if (string=? op "+") #t (string=? op "-"))
-        (match ((if (%cc-gen-addr-kind? ka) (%cc-gen-addr-kind? kb) #f) (lit long))
-               ((%cc-gen-addr-kind? ka) (%cc-gen-decay ka))
-               ((if (string=? op "+") (%cc-gen-addr-kind? kb) #f) (%cc-gen-decay kb))
+        (match ((if (%cc-gen-addr-c-type? ka) (%cc-gen-addr-c-type? kb) #f) (lit long))
+               ((%cc-gen-addr-c-type? ka) (%cc-gen-decay ka))
+               ((if (string=? op "+") (%cc-gen-addr-c-type? kb) #f) (%cc-gen-decay kb))
                (#t (common-c-type ka kb))))
       ((if (string=? op "<<") #t (string=? op ">>")) (promoted-c-type ka))
       (#t (common-c-type ka kb)))))
 
-; The address of what NODE names, into x0, answering the kind there: a
+; The address of what NODE names, into x0, answering the C type there: a
 ; name's own place, the pointee of a `*`, or an element.
 (def %cc-gen-addr! ())
 (set! %cc-gen-addr!
@@ -1539,17 +1539,17 @@
         ((eq? t (lit var))
           (let ((at (%cc-gen-place-of (first (rest node)))))
             (do (%cc-gen-address! (first at) (first (rest at)))
-                (%cc-gen-place-kind at))))
+                (%cc-gen-place-c-type at))))
         ((if (eq? t (lit un)) (string=? (first (rest node)) "*") #f)
-          (let ((k (%cc-gen-kind-of (first (rest (rest node))))))
-            (if (not (%cc-gen-addr-kind? k))
+          (let ((k (%cc-gen-c-type-of (first (rest (rest node))))))
+            (if (not (%cc-gen-addr-c-type? k))
               (%cc-gen-no "the indirection of something that is not a pointer"))
             (do (%cc-gen-expr! (first (rest (rest node))))
-                (kind-elem k))))
+                (c-type-elem k))))
         ((eq? t (lit idx)) (%cc-gen-index! (first (rest node)) (first (rest (rest node)))))
         ; a call that answers a struct answers its address
-        ((if (eq? t (lit call)) (%cc-gen-struct? (%cc-gen-kind-of node)) #f)
-          (do (%cc-gen-expr! node) (%cc-gen-kind-of node)))
+        ((if (eq? t (lit call)) (%cc-gen-struct? (%cc-gen-c-type-of node)) #f)
+          (do (%cc-gen-expr! node) (%cc-gen-c-type-of node)))
         ; a field: the struct's address, or the one a pointer holds, and
         ; the field's offset on
         ((eq? t (lit dot))
@@ -1558,10 +1558,10 @@
             (let ((f (%cc-gen-field k (first (rest (rest node))))))
               (do (%cc-gen-bump! #t (first f)) (rest f)))))
         ((eq? t (lit arrow))
-          (let ((k (%cc-gen-kind-of (first (rest node)))))
-            (if (not (if (%cc-gen-addr-kind? k) (%cc-gen-struct? (kind-elem k)) #f))
+          (let ((k (%cc-gen-c-type-of (first (rest node)))))
+            (if (not (if (%cc-gen-addr-c-type? k) (%cc-gen-struct? (c-type-elem k)) #f))
               (%cc-gen-no "a -> of something that is not a pointer to a struct"))
-            (let ((f (%cc-gen-field (kind-elem k) (first (rest (rest node))))))
+            (let ((f (%cc-gen-field (c-type-elem k) (first (rest (rest node))))))
               (do (%cc-gen-expr! (first (rest node)))
                   (%cc-gen-bump! #t (first f))
                   (rest f)))))
@@ -1571,29 +1571,29 @@
 ; either operand be the address, so I[A] is the same element.
 (def %cc-gen-index!
   (fn (_ a i)
-    (def swap (not (%cc-gen-addr-kind? (%cc-gen-kind-of a))))
+    (def swap (not (%cc-gen-addr-c-type? (%cc-gen-c-type-of a))))
     (def at (if swap i a))
-    (def k (%cc-gen-kind-of at))
-    (if (not (%cc-gen-addr-kind? k))
+    (def k (%cc-gen-c-type-of at))
+    (if (not (%cc-gen-addr-c-type? k))
       (%cc-gen-no "a subscript of something that is not a pointer or an array"))
     (do (%cc-gen-expr! at)
         (asm-push! %cc-gen-asm x0)
         (%cc-gen-expr! (if swap a i))
-        (%cc-gen-scale! x0 (kind-size (kind-elem k)))
+        (%cc-gen-scale! x0 (c-type-size (c-type-elem k)))
         (%cc-gen! (lit mov) x1 x0)
         (asm-pop! %cc-gen-asm x0)
         (%cc-gen! (lit add) x0 x0 x1)
-        (kind-elem k))))
+        (c-type-elem k))))
 
 (def %cc-gen-expr! ())
 (set! %cc-gen-expr!
   (fn (self node)
     (let ((t (first node)))
       (match
-        ((eq? t (lit num)) (%cc-gen-const-kind! (first (rest node)) (%cc-gen-num-kind node)))
+        ((eq? t (lit num)) (%cc-gen-const-c-type! (first (rest node)) (%cc-gen-num-c-type node)))
         ((eq? t (lit str)) (%cc-gen-string-at! (first (rest node))))
         ((eq? t (lit szof))
-          (%cc-gen-const-kind! (kind-size (%cc-gen-kind-of (first (rest node)))) (lit ulong)))
+          (%cc-gen-const-c-type! (c-type-size (%cc-gen-c-type-of (first (rest node)))) (lit ulong)))
         ; a function's name, or & of it, is its address
         ((if (eq? t (lit var)) (%cc-gen-function-name? (first (rest node))) #f)
           (%cc-gen-function-address! (first (rest node))))
@@ -1611,7 +1611,7 @@
           (%cc-gen-load-at! (%cc-gen-index! (first (rest node)) (first (rest (rest node))))))
         ((eq? t (lit un))
           (let ((op (first (rest node))))
-            (def k (promoted-c-type (%cc-gen-kind-of (first (rest (rest node))))))
+            (def k (promoted-c-type (%cc-gen-c-type-of (first (rest (rest node))))))
             (do (self (first (rest (rest node))))
                 (match
                   ((%cc-gen-real? k) (%cc-gen-real-unary! op k))
@@ -1626,8 +1626,8 @@
                   (#t (%cc-gen-no (string-append "the unary operator " op)))))))
         ((if (eq? t (lit bin)) #t (eq? t (lit cmp)))
           (let ((op (first (rest node))))
-            (def ka (%cc-gen-kind-of (first (rest (rest node)))))
-            (def kb (%cc-gen-kind-of (first (rest (rest (rest node))))))
+            (def ka (%cc-gen-c-type-of (first (rest (rest node)))))
+            (def kb (%cc-gen-c-type-of (first (rest (rest (rest node))))))
             (if (if (%cc-gen-struct? ka) #t (%cc-gen-struct? kb))
               (%cc-gen-no (string-append "the operator " op " on a struct")))
             ; a pointer to a function compares as the address it is, and
@@ -1635,9 +1635,9 @@
             (def fn? (if (%cc-gen-fnptr? ka) #t (%cc-gen-fnptr? kb)))
             (if (if fn? (eq? t (lit bin)) #f)
               (%cc-gen-no "arithmetic on a pointer to a function"))
-            (def addr? (if (%cc-gen-addr-kind? ka) #t (if (%cc-gen-addr-kind? kb) #t fn?)))
-            ; a shift works in its left operand's kind, anything else in the
-            ; kind its two operands meet in
+            (def addr? (if (%cc-gen-addr-c-type? ka) #t (if (%cc-gen-addr-c-type? kb) #t fn?)))
+            ; a shift works in its left operand's C type, anything else in the
+            ; C type its two operands meet in
             (def k (if (if (string=? op "<<") #t (string=? op ">>"))
                      (promoted-c-type ka)
                      (common-c-type ka kb)))
@@ -1656,7 +1656,7 @@
                   (self (first (rest (rest (rest node)))))
                   (%cc-gen! (lit mov) x1 x0)
                   (asm-pop! %cc-gen-asm x0)
-                  ; an int converted to an unsigned int takes that kind's form
+                  ; an int converted to an unsigned int takes that C type's form
                   (if (if (eq? k (lit uint)) (not addr?) #f)
                     (do (%cc-gen-uint!) (%cc-gen-uint-x1!))
                     ())
@@ -1668,15 +1668,15 @@
                     (#t (%cc-gen-bin! op k)))))))
         ((eq? t (lit var))
           (let ((at (%cc-gen-place-of (first (rest node)))))
-            (if (%cc-gen-aggregate? (%cc-gen-place-kind at))
+            (if (%cc-gen-aggregate? (%cc-gen-place-c-type at))
               (%cc-gen-address! (first at) (first (rest at)))
               (%cc-gen-load! at))))
         ((if (eq? t (lit dot)) #t (eq? t (lit arrow)))
           (%cc-gen-load-at! (%cc-gen-addr! node)))
         ((eq? t (lit assign))
           (let ((lv (first (rest node))))
-            (def k (%cc-gen-kind-of lv))
-            (def from (%cc-gen-kind-of (first (rest (rest node)))))
+            (def k (%cc-gen-c-type-of lv))
+            (def from (%cc-gen-c-type-of (first (rest (rest node)))))
             (if (%cc-gen-array? k)
               (%cc-gen-no "an assignment to an array"))
             (match
@@ -1687,7 +1687,7 @@
               ; any other place is an address worked out at run time: it
               ; waits on the stack while the value is
               (#t
-                (let ((k (%cc-gen-value-kind! (%cc-gen-addr! lv))))
+                (let ((k (%cc-gen-value-c-type! (%cc-gen-addr! lv))))
                   (do (asm-push! %cc-gen-asm x0)
                       (self (first (rest (rest node))))
                       (asm-pop! %cc-gen-asm x1)
@@ -1695,10 +1695,10 @@
         ((%cc-gen-step? t) (%cc-gen-step! t node))
         ((eq? t (lit ternary))
           (let ((else- (%cc-gen-label)) (done (%cc-gen-label)))
-            ; each arm converts to the kind the two meet in
-            (def k (%cc-gen-kind-of node))
+            ; each arm converts to the C type the two meet in
+            (def k (%cc-gen-c-type-of node))
             (def arm
-              (fn (_ n) (do (self n) (%cc-gen-convert! k (%cc-gen-kind-of n)))))
+              (fn (_ n) (do (self n) (%cc-gen-convert! k (%cc-gen-c-type-of n)))))
             (do (%cc-gen-cond! (first (rest node)))
                 (%cc-gen! (lit b/eq) (label else-))
                 (arm (first (rest (rest node))))
@@ -1726,7 +1726,7 @@
         ((eq? t (lit callx)) (%cc-gen-call-through! (first (rest node)) (first (rest (rest node)))))
         ((eq? t (lit cast))
           (let ((k (first (rest node))) (e (first (rest (rest node)))))
-            (def from (%cc-gen-kind-of e))
+            (def from (%cc-gen-c-type-of e))
             (if (%cc-gen-aggregate? k) (%cc-gen-no "a cast to an array or a struct"))
             (if (%cc-gen-struct? from) (%cc-gen-no "a cast of a struct"))
             (do (self e) (%cc-gen-convert! k from))))
@@ -1755,13 +1755,13 @@
         (let ((k (%cc-gen-addr! lv)))
           (do (%cc-gen! (lit mov) x1 x0)
               (%cc-gen-place x1 0 k)))))
-    (def k (%cc-gen-value-kind! (%cc-gen-place-kind at)))
+    (def k (%cc-gen-value-c-type! (%cc-gen-place-c-type at)))
     (do (%cc-gen-load! at)
         ; the old value waits in x8 for the postfix forms: x2 is the
         ; re-extension's shift amount
         (%cc-gen! (lit mov) x8 x0)
         (match
-          ((%cc-gen-ptr? k) (%cc-gen-bump! up (kind-size (kind-elem k))))
+          ((%cc-gen-ptr? k) (%cc-gen-bump! up (c-type-size (c-type-elem k))))
           ((%cc-gen-real? k) (%cc-gen-real-step! up k))
           (#t (do (%cc-gen-bump! up 1) (%cc-gen-normalize! (promoted-c-type k)))))
         (%cc-gen-store! at k)
@@ -1846,7 +1846,7 @@
         (if (null? as) ()
           (do (%cc-gen-expr! (first as))
               ; a float goes as a double, C's default promotion
-              (let ((k (%cc-gen-kind-of (first as))))
+              (let ((k (%cc-gen-c-type-of (first as))))
                 (if (if doubles? #t (eq? k (lit float))) (%cc-gen-convert! (lit double) k) ()))
               (asm-push! %cc-gen-asm x0)
               (self (rest as))))))
@@ -1951,24 +1951,24 @@
 (def %cc-gen-gate-len
   (fn (_ target) (if (eq? target (lit macho-arm64)) 60 50)))
 
-; Where each argument of a call goes, by the kinds of the callee's
+; Where each argument of a call goes, by the C types of the callee's
 ; parameters: (reg . R) for one of the first four that is not a struct,
 ; else (above . OFF), the argument starting OFF bytes below the top of the
 ; frame the callee takes -- each in whole words, in order, under the word
 ; that says where a struct the callee answers goes (%cc-gen-fun!).  Caller
-; and callee both lay it out from the same kinds.
+; and callee both lay it out from the same C types.
 (def %cc-gen-homes
-  (fn (_ kinds sret?)
+  (fn (_ c-types sret?)
     (def go
       (fn (self ks regs used)
         (if (null? ks) ()
           (let ((k (first ks)))
             (if (if (null? regs) #f (not (%cc-gen-struct? k)))
               (pair (pair (lit reg) (first regs)) (self (rest ks) (rest regs) used))
-              (let ((off (+ used (round-up (kind-size k) 8))))
+              (let ((off (+ used (round-up (c-type-size k) 8))))
                 (pair (pair (lit above) off)
                   (self (rest ks) (if (null? regs) () (rest regs)) off))))))))
-    (go kinds %cc-gen-args (if sret? 8 0))))
+    (go c-types %cc-gen-args (if sret? 8 0))))
 
 ; how many bytes the homes above take, whole sixteens
 (def %cc-gen-above-size
@@ -2018,14 +2018,14 @@
 ; which three arguments leave free.  It answers what the pointer's RET says.
 (def %cc-gen-call-through!
   (fn (_ target args)
-    (if (not (%cc-gen-fnptr? (%cc-gen-kind-of target)))
+    (if (not (%cc-gen-fnptr? (%cc-gen-c-type-of target)))
       (%cc-gen-no "a call through something that is not a pointer to a function"))
     (if (> (length args) 3)
       (%cc-gen-no "a call through a pointer with more than three arguments"))
     (def push-all
       (fn (self as)
         (if (null? as) ()
-          (do (if (%cc-gen-struct? (%cc-gen-kind-of (first as)))
+          (do (if (%cc-gen-struct? (%cc-gen-c-type-of (first as)))
                 (%cc-gen-no "a struct handed to a function through a pointer"))
               (%cc-gen-expr! (first as))
               (asm-push! %cc-gen-asm x0)
@@ -2050,12 +2050,12 @@
     (def to (%cc-gen-fun-label name))
     (def params (%cc-gen-params-find name))
     (def sret? (%cc-gen-struct? (%cc-gen-ret-find name)))
-    ; (ARG KIND . HOME) per argument; past the parameters, an argument's
-    ; own kind says where it goes
-    (def kinds
+    ; (ARG C-TYPE . HOME) per argument; past the parameters, an argument's
+    ; own C type says where it goes
+    (def c-types
       (let ((go (fn (self as ps)
                   (if (null? as) ()
-                    (pair (if (null? ps) (%cc-gen-kind-of (first as)) (first ps))
+                    (pair (if (null? ps) (%cc-gen-c-type-of (first as)) (first ps))
                       (self (rest as) (if (null? ps) () (rest ps))))))))
         (go args params)))
     (def triples
@@ -2063,7 +2063,7 @@
                   (if (null? as) ()
                     (pair (pair (first as) (pair (first ks) (first hs)))
                       (self (rest as) (rest ks) (rest hs)))))))
-        (go args kinds (%cc-gen-homes kinds sret?))))
+        (go args c-types (%cc-gen-homes c-types sret?))))
     (def home (fn (_ t) (rest (rest t))))
     (def in-reg? (fn (_ t) (eq? (first (home t)) (lit reg))))
     (def regs (filter in-reg? triples))
@@ -2074,11 +2074,11 @@
           (let ((t (first ts)))
             (do (if (%cc-gen-struct? (first (rest t)))
                   (%cc-gen-same-struct! (first (rest t)) (first t) "a struct argument")
-                  (if (%cc-gen-struct? (%cc-gen-kind-of (first t)))
+                  (if (%cc-gen-struct? (%cc-gen-c-type-of (first t)))
                     (%cc-gen-no "a struct passed for a parameter that is not one")
                     ()))
                 (%cc-gen-expr! (first t))
-                (%cc-gen-convert-real! (first (rest t)) (%cc-gen-kind-of (first t)))
+                (%cc-gen-convert-real! (first (rest t)) (%cc-gen-c-type-of (first t)))
                 (asm-push! %cc-gen-asm x0)
                 (self (rest ts)))))))
     ; the last pushed is on top
@@ -2089,7 +2089,7 @@
             (do (asm-pop! %cc-gen-asm x0)
                 (%cc-gen! (lit sub) x1 x20 (imm (rest (home t))))
                 (if (%cc-gen-struct? (first (rest t)))
-                  (%cc-gen-copy! (kind-size (first (rest t))))
+                  (%cc-gen-copy! (c-type-size (first (rest t))))
                   (%cc-gen! (lit str) x0 (mem x1 0)))
                 (self (rest ts)))))))
     (def pop-each
@@ -2163,10 +2163,10 @@
   (fn (self at init)
     (def base (first at))
     (def off (first (rest at)))
-    (def k (%cc-gen-place-kind at))
+    (def k (%cc-gen-place-c-type at))
     (def n (first (rest k)))
-    (def ek (kind-elem k))
-    (def es (kind-size ek))
+    (def ek (c-type-elem k))
+    (def es (c-type-size ek))
     (def elem (fn (_ i) (%cc-gen-place base (+ off (* i es)) ek)))
     (match
       ((eq? (first init) (lit initlist))
@@ -2181,7 +2181,7 @@
                         (if (%cc-gen-aggregate? ek)
                           (%cc-gen-init-aggregate! (elem i) item)
                           (do (%cc-gen-expr! item)
-                              (%cc-gen-convert-real! ek (%cc-gen-kind-of item))
+                              (%cc-gen-convert-real! ek (%cc-gen-c-type-of item))
                               (%cc-gen-put! (elem i))))))
                     (fill (+ i 1) (if (null? is) () (rest is)))))))
           (fill 0 items)))
@@ -2200,20 +2200,20 @@
 ; An aggregate in the frame, from its initializer.
 (def %cc-gen-init-aggregate!
   (fn (_ at init)
-    (if (%cc-gen-struct? (%cc-gen-place-kind at))
+    (if (%cc-gen-struct? (%cc-gen-place-c-type at))
       (%cc-gen-init-struct! at init)
       (%cc-gen-init-array! at init))))
 
 ; A struct in the frame, from its initializer: a braced list stores its
 ; items in the fields' order, a nested list filling a nested aggregate, and
 ; the fields it does not reach are zero, as C says -- so the struct is
-; zeroed first, which also leaves a union's other members as its first one's
+; zeroed first, which also leaves a union's other fields as its first one's
 ; bytes make them.  An expression of the same struct is copied.
 (def %cc-gen-init-struct!
   (fn (_ at init)
     (def base (first at))
     (def off (first (rest at)))
-    (def k (%cc-gen-place-kind at))
+    (def k (%cc-gen-place-c-type at))
     (def fields (rest (rest (struct-entry (first (rest k))))))
     (if (not (eq? (first init) (lit initlist)))
       (%cc-gen-copy-into! at init)
@@ -2232,48 +2232,48 @@
                 ; a unit
                 (def start (+ (* 8 foff) (if (%cc-gen-bits? fk) (first (rest (rest fk))) 0)))
                 (def size
-                  (if (%cc-gen-bits? fk) (first (rest (rest (rest fk)))) (* 8 (kind-size fk))))
+                  (if (%cc-gen-bits? fk) (first (rest (rest (rest fk)))) (* 8 (c-type-size fk))))
                 ; a field that starts before the last one ends overlaps it,
                 ; which is a union's: it takes one
                 (if (< start end) (%cc-gen-no "more initializers than a union takes"))
                 (do (if (%cc-gen-aggregate? fk)
                       (%cc-gen-init-aggregate! fat (first is))
                       (do (%cc-gen-expr! (first is))
-                          (%cc-gen-convert-real! fk (%cc-gen-kind-of (first is)))
+                          (%cc-gen-convert-real! fk (%cc-gen-c-type-of (first is)))
                           (%cc-gen-put! fat)))
                     (fill (rest fs) (rest is) (+ start size)))))))
         (fill fields items 0)))))
 
-; the same struct kind, or a refusal saying what the value was not
+; the same struct C type, or a refusal saying what the value was not
 (def %cc-gen-same-struct!
   (fn (_ k node what)
-    (let ((ks (%cc-gen-kind-of node)))
+    (let ((ks (%cc-gen-c-type-of node)))
       (if (if (%cc-gen-struct? ks) (string=? (first (rest ks)) (first (rest k))) #f) ()
         (%cc-gen-no (string-append what " of something other than the same struct"))))))
 
 ; the struct at AT, a copy of the one SRC stands for
 (def %cc-gen-copy-into!
   (fn (_ at src)
-    (%cc-gen-same-struct! (%cc-gen-place-kind at) src "a struct initialized by")
+    (%cc-gen-same-struct! (%cc-gen-place-c-type at) src "a struct initialized by")
     (do (%cc-gen-expr! src)
         (asm-push! %cc-gen-asm x0)
         (%cc-gen-address! (first at) (first (rest at)))
         (%cc-gen! (lit mov) x1 x0)
         (asm-pop! %cc-gen-asm x0)
-        (%cc-gen-copy! (kind-size (%cc-gen-place-kind at))))))
+        (%cc-gen-copy! (c-type-size (%cc-gen-place-c-type at))))))
 
 ; A struct assigned: the right one's bytes copied over the left's.  The
 ; left's address waits on the stack while the right's is worked out, and
 ; the answer is the left's address, which stands for the struct.
 (def %cc-gen-struct-assign!
   (fn (_ lv rhs)
-    (def k (%cc-gen-kind-of lv))
+    (def k (%cc-gen-c-type-of lv))
     (%cc-gen-same-struct! k rhs "an assignment to a struct")
     (do (%cc-gen-addr! lv)
         (asm-push! %cc-gen-asm x0)
         (%cc-gen-expr! rhs)
         (asm-pop! %cc-gen-asm x1)
-        (%cc-gen-copy! (kind-size k))
+        (%cc-gen-copy! (c-type-size k))
         (%cc-gen! (lit mov) x0 x1))))
 
 ; SIZE bytes from the address in x0 to the one in x1, through x2, the widest
@@ -2299,16 +2299,16 @@
 ; zeros over the place AT, element by element or field by field
 (def %cc-gen-zero!
   (fn (self at)
-    (def k (%cc-gen-place-kind at))
+    (def k (%cc-gen-place-c-type at))
     (def base (first at))
     (def off (first (rest at)))
     (match
       ((%cc-gen-array? k)
-        (let ((ek (kind-elem k)))
+        (let ((ek (c-type-elem k)))
           (def go
             (fn (go i)
               (if (>= i (first (rest k))) ()
-                (do (self (%cc-gen-place base (+ off (* i (kind-size ek))) ek))
+                (do (self (%cc-gen-place base (+ off (* i (c-type-size ek))) ek))
                     (go (+ i 1))))))
           (go 0)))
       ((%cc-gen-struct? k)
@@ -2337,13 +2337,13 @@
         (#t (rest (first %cc-gen-loops)))))
     (if (null? to) (%cc-gen-no (string-append which " outside a loop")) to)))
 
-; a case label's value, in KIND: a constant, worked out now as a global's
+; a case label's value, in C-TYPE: a constant, worked out now as a global's
 ; initializer is
 (def %cc-gen-case-value
-  (fn (_ node kind)
+  (fn (_ node c-type)
     (%cc-gen-form
       (guard (e (%cc-gen-no "a case label that is not a constant")) (%cc-gen-fold node))
-      kind)))
+      c-type)))
 
 (def %cc-gen-stmt! ())
 (set! %cc-gen-stmt!
@@ -2362,11 +2362,11 @@
           ; local of the name wins over a global of it
           (let ((at (%cc-gen-place-of (first (rest node)))))
             (def init (first (rest (rest (rest node)))))
-            (if (%cc-gen-aggregate? (%cc-gen-place-kind at))
+            (if (%cc-gen-aggregate? (%cc-gen-place-c-type at))
               (if (null? init) () (%cc-gen-init-aggregate! at init))
               (do (if (null? init) (%cc-gen-const! 0)
                     (do (%cc-gen-expr! init)
-                        (%cc-gen-convert-real! (%cc-gen-place-kind at) (%cc-gen-kind-of init))))
+                        (%cc-gen-convert-real! (%cc-gen-place-c-type at) (%cc-gen-c-type-of init))))
                   (%cc-gen-put! at)))))
         ((eq? t (lit expr)) (%cc-gen-expr! (first (rest node))))
         ((eq? t (lit if))
@@ -2418,11 +2418,11 @@
         ; a struct is copied to where the caller asked for it, in the word
         ; the prologue brought down from the frame's top, and that address
         ; answers
-        ((if (eq? t (lit return)) (%cc-gen-struct? %cc-gen-ret-kind) #f)
-          (do (%cc-gen-same-struct! %cc-gen-ret-kind (first (rest node)) "a return")
+        ((if (eq? t (lit return)) (%cc-gen-struct? %cc-gen-ret-c-type) #f)
+          (do (%cc-gen-same-struct! %cc-gen-ret-c-type (first (rest node)) "a return")
               (%cc-gen-expr! (first (rest node)))
               (%cc-gen! (lit ldr) x1 (mem x19 %cc-gen-sret-slot))
-              (%cc-gen-copy! (kind-size %cc-gen-ret-kind))
+              (%cc-gen-copy! (c-type-size %cc-gen-ret-c-type))
               (%cc-gen! (lit mov) x0 x1)
               (%cc-gen! (lit b) (label %cc-gen-epilogue))))
         ((eq? t (lit return))
@@ -2430,8 +2430,8 @@
                 (%cc-gen-const! 0)
                 (%cc-gen-expr! (first (rest node))))
               ; the value converts to what the function returns
-              (%cc-gen-convert! %cc-gen-ret-kind
-                (if (null? (first (rest node))) (lit int) (%cc-gen-kind-of (first (rest node)))))
+              (%cc-gen-convert! %cc-gen-ret-c-type
+                (if (null? (first (rest node))) (lit int) (%cc-gen-c-type-of (first (rest node)))))
               (%cc-gen! (lit b) (label %cc-gen-epilogue))))
         ((eq? t (lit break))
           (%cc-gen! (lit b) (label (%cc-gen-loop-label "break"))))
@@ -2441,10 +2441,10 @@
           ; the value is compared with each case label in turn: the first
           ; to match, else the default, else nothing, is where the body is
           ; entered, and the clauses after it run on until a break.  C
-          ; promotes the value, and each label converts to its kind.
+          ; promotes the value, and each label converts to its C type.
           (let ((out (%cc-gen-label)))
             (def e (first (rest node)))
-            (def k (promoted-c-type (%cc-gen-kind-of e)))
+            (def k (promoted-c-type (%cc-gen-c-type-of e)))
             ; ((LABEL VALUE stmt ...) ...), a label for each clause
             (def clauses
               (let ((go (fn (go cs)
@@ -2551,7 +2551,7 @@
           ((eq? t (lit decl))
             (if (%cc-gen-static-decl? node)
               (if aggregates? () (%cc-gen-bind-static! node))
-              (let ((c-type (%cc-gen-kind! (first (rest (rest node))) "a local")))
+              (let ((c-type (%cc-gen-c-type! (first (rest (rest node))) "a local")))
                 (if (eq? (%cc-gen-aggregate? c-type) aggregates?)
                   (%cc-gen-slot! (first (rest node)) c-type)
                   ()))))
@@ -2582,13 +2582,13 @@
   (fn (_ f)
     (def params (first (rest (rest f))))
     (def body (first (rest (rest (rest f)))))
-    (def kinds (first (rest (rest (rest (rest f))))))
+    (def c-types (first (rest (rest (rest (rest f))))))
     (def ret (first (rest (rest (rest (rest (rest f)))))))
-    (set! %cc-gen-ret-kind
+    (set! %cc-gen-ret-c-type
       (match
         ((eq? ret (lit void)) ret)
-        (#t (%cc-gen-kind! ret "a function returning something"))))
-    (def sret? (%cc-gen-struct? %cc-gen-ret-kind))
+        (#t (%cc-gen-c-type! ret "a function returning something"))))
+    (def sret? (%cc-gen-struct? %cc-gen-ret-c-type))
     (set! %cc-gen-env ())
     (set! %cc-gen-frame-bytes 0)
     (set! %cc-gen-loops ())
@@ -2606,8 +2606,8 @@
     (def pkinds
       (let ((go (fn (self ks)
                   (if (null? ks) ()
-                    (pair (%cc-gen-kind! (first ks) "a parameter") (self (rest ks)))))))
-        (go kinds)))
+                    (pair (%cc-gen-c-type! (first ks) "a parameter") (self (rest ks)))))))
+        (go c-types)))
     (def homes (%cc-gen-homes pkinds sret?))
     ; (MEM C-TYPE . HOME) for each parameter but a struct stored above,
     ; which stays where the caller put it

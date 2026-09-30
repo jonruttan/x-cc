@@ -73,7 +73,7 @@ a[j+1] = t;` -- two loads captured before either store.
 0
 ```
 
-### two sequential loops are not the shape yet
+### two sequential loops, not yet merged
 
 The sieve fills its table in one loop and sieves in another; the
 split takes one loop -- the recorded pending.

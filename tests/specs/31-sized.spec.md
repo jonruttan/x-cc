@@ -1,12 +1,12 @@
 # @weight 2
 # @timeout-scale 3
 
-Compiled storage at the size of its kind.  A local, a parameter and a
-global each take the size and alignment of their kind, and a value loads
+Compiled storage at the size of its C type.  A local, a parameter and a
+global each take the size and alignment of their C type, and a value loads
 at that width, extended by its sign.  Arithmetic happens in int, which is
 what C's promotions make of `char` and `short`; a store narrows the value
-back to its kind, and so does the value an assignment answers and the
-value a `char` or `short` function returns.  The kinds of int's width or
+back to its C type, and so does the value an assignment answers and the
+value a `char` or `short` function returns.  The C types of int's width or
 more have specs of their own.  Each case below prints what the same
 source prints through /usr/bin/cc, and exits as it does.
 

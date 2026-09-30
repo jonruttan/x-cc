@@ -2,10 +2,10 @@
 # @timeout-scale 3
 
 Compiled structs.  A struct is its fields at the offsets the parser lays
-out -- each at its kind's alignment, the whole padded to the widest -- and
+out -- each at its C type's alignment, the whole padded to the widest -- and
 a union is one whose fields all sit at 0.  Like an array it is never
 loaded whole: `s.f` and `p->f` are its address, or the one a pointer
-holds, plus the field's offset, loaded or stored at the field's kind.
+holds, plus the field's offset, loaded or stored at the field's C type.
 Assigning a struct copies its bytes; a braced initializer fills its
 fields in order and zeroes the rest.  Each case below prints what the same
 source prints through /usr/bin/cc, and exits as it does.
@@ -44,7 +44,7 @@ source prints through /usr/bin/cc, and exits as it does.
 ---
     12
 
-### a union's members share their bytes
+### a union's fields share their bytes
 
 ```cc
 (display (cc-exe-run "union U { int i; char c; };\nint main(void) { union U u; u.i = 0x41424344; return u.c + sizeof(u); }"))

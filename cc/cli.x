@@ -37,19 +37,19 @@
 (def cc-main
   (fn (_ raw-args)
     (def argv (cc-argv raw-args))
-    (def mode
+    (def label
       (if (null? argv) ()
         (if (string=? (first argv) "run") (lit run)
           (if (string=? (first argv) "build") (lit build) ()))))
     (def usage "usage: cc run FILE.c [ARG ...] | cc build FILE.c [-o OUT]\n")
-    (if (null? mode)
+    (if (null? label)
       (do (file-write 2 usage) (sys-exit 2))
       (if (null? (rest argv))
         (do (file-write 2 usage) (sys-exit 2))
         (let ((path (first (rest argv))))
           (if (file-exists? path)
             (sys-exit
-              (if (eq? mode (lit build))
+              (if (eq? label (lit build))
                 (let ((opts (rest (rest argv))))
                   (def out
                     (if (if (pair? opts)

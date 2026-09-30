@@ -24,29 +24,29 @@
 (def %cc-strip-comments
   (fn (_ src)
     (def end (byte-len src))
-    ; mode: 0 code, 1 string, 2 char, 3 line comment, 4 block comment
+    ; label: 0 code, 1 string, 2 char, 3 line comment, 4 block comment
     (def go
-      (fn (self i mode acc)
+      (fn (self i label acc)
         (if (>= i end) (string-concat (reverse acc))
           (let ((b (byte-at src i)))
-            (if (= mode 3)                                 ; // ... eol
+            (if (= label 3)                                 ; // ... eol
               (if (= b 10)
                 (self (+ i 1) 0 (pair "\n" acc))
                 (self (+ i 1) 3 acc))
-              (if (= mode 4)                               ; /* ... */
+              (if (= label 4)                               ; /* ... */
                 (if (if (= b 42)
                       (if (< (+ i 1) end) (= (byte-at src (+ i 1)) 47) #f)
                       #f)
                   (self (+ i 2) 0 (pair " " acc))
                   (self (+ i 1) 4 acc))
-                (if (= mode 1)                             ; "..."
+                (if (= label 1)                             ; "..."
                   (if (= b 92)
                     (self (+ i 2)
                       1 (pair (substring src i (+ i 2)) acc))
                     (self (+ i 1)
                       (if (= b 34) 0 1)
                       (pair (substring src i (+ i 1)) acc)))
-                  (if (= mode 2)                           ; '...'
+                  (if (= label 2)                           ; '...'
                     (if (= b 92)
                       (self (+ i 2)
                         2 (pair (substring src i (+ i 2)) acc))

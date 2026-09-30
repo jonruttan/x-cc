@@ -26,7 +26,7 @@
   map mem-make mem-ptr mem-ref-at mem-set-at! ptr-int reverse string-append
   string-concat string=? substring word-set! x-write)
 (import cc/lex cc-lex)
-(import cc/parse cc-parse kind-size round-up struct-entry struct-table)
+(import cc/parse cc-parse c-type-size round-up struct-entry struct-table)
 (import cc/real convert-real real-arith real-compare real-negate real-step real-stub
   real-zero? real?)
 
@@ -48,7 +48,7 @@
     (mem-set-at! %cc-memp (- a %cc-base) v w)))
 (def %cc-sp 0)          ; stack pointer, grows down
 (def %cc-hp 0)          ; the bump for literals and globals, grows up
-(def %cc-genv ())       ; ((name addr . kind) ...)
+(def %cc-genv ())       ; ((name addr . c-type) ...)
 (def %cc-funs ())       ; ((name params . body) ...)
 (def %cc-strtab ())     ; ((text . addr) ...), interned
 (def %cc-exit-code ())  ; set when exit() raises its sentinel
@@ -208,11 +208,11 @@
   (fn (_ msg)
     (Err raise (lit cc) (string-append "cc: run: " msg) ())))
 
-; How wide a value of this kind is in memory, and whether it carries a
+; How wide a value of this C type is in memory, and whether it carries a
 ; sign.  An aggregate never loads -- its name is its address -- so its
 ; width is only ever the fallback.
 (def %cc-width
-  (fn (_ k) (if (%cc-kind-decays? k) 8 (kind-size k))))
+  (fn (_ k) (if (%cc-c-type-decays? k) 8 (c-type-size k))))
 
 (def signed?
   (fn (_ k)
@@ -234,20 +234,20 @@
       (if (>= v top) (- v (* 2 top)) v))))
 
 (def %cc-load
-  (fn (_ addr kind)
+  (fn (_ addr c-type)
     (match
       ((<= addr 0) (%cc-oops "null or negative address read"))
-      ((%cc-bits? kind) (%cc-bits-read addr kind))
-      (#t (let ((w (%cc-width kind)))
+      ((%cc-bits? c-type) (%cc-bits-read addr c-type))
+      (#t (let ((w (%cc-width c-type)))
             (let ((v (%cc-raw-ref addr w)))
-              (if (if (signed? kind) (< w 8) #f) (%cc-sext v w) v)))))))
+              (if (if (signed? c-type) (< w 8) #f) (%cc-sext v w) v)))))))
 
 (def %cc-store
-  (fn (_ addr v kind)
+  (fn (_ addr v c-type)
     (match
       ((<= addr 0) (%cc-oops "null or negative address write"))
-      ((%cc-bits? kind) (%cc-bits-write! addr v kind))
-      (#t (%cc-raw-set! addr v (%cc-width kind))))))
+      ((%cc-bits? c-type) (%cc-bits-write! addr v c-type))
+      (#t (%cc-raw-set! addr v (%cc-width c-type))))))
 
 ; A bit-field, (bits C-TYPE BIT WIDTH): WIDTH bits from bit BIT of the unit
 ; of C-TYPE at the field's address.  A read takes the unit whole and its
@@ -260,7 +260,7 @@
     (def unit (first (rest k)))
     (def bit (first (rest (rest k))))
     (def width (first (rest (rest (rest k)))))
-    (def v (& (>> (%cc-raw-ref addr (kind-size unit)) bit) (- (<< 1 width) 1)))
+    (def v (& (>> (%cc-raw-ref addr (c-type-size unit)) bit) (- (<< 1 width) 1)))
     (if (if (signed? unit) (>= v (<< 1 (- width 1))) #f) (- v (<< 1 width)) v)))
 
 (def %cc-bits-write!
@@ -268,23 +268,23 @@
     (def unit (first (rest k)))
     (def bit (first (rest (rest k))))
     (def width (first (rest (rest (rest k)))))
-    (def size (kind-size unit))
+    (def size (c-type-size unit))
     (def mask (<< (- (<< 1 width) 1) bit))
     (def old (%cc-raw-ref addr size))
     (%cc-raw-set! addr (+ (- old (& old mask)) (& (<< v bit) mask)) size)))
 
-; V converted to KIND, as a cast does: cut to the kind's width and read
-; back with its sign.  An address and the 64-bit kinds keep every bit, and
+; V converted to C-TYPE, as a cast does: cut to the C type's width and read
+; back with its sign.  An address and the 64-bit C types keep every bit, and
 ; void keeps nothing.
 (def %cc-convert
-  (fn (_ v kind)
+  (fn (_ v c-type)
     (match
-      ((eq? kind (lit void)) 0)
-      ((%cc-kind-decays? kind) (%cc-oops "a cast to an array or a struct"))
-      (#t (let ((w (%cc-width kind)))
+      ((eq? c-type (lit void)) 0)
+      ((%cc-c-type-decays? c-type) (%cc-oops "a cast to an array or a struct"))
+      (#t (let ((w (%cc-width c-type)))
             (if (>= w 8) v
               (let ((low (& v (- (<< 1 (* 8 w)) 1))))
-                (if (signed? kind) (%cc-sext low w) low))))))))
+                (if (signed? c-type) (%cc-sext low w) low))))))))
 
 ; --- the real types ------------------------------------------------------------
 ; V of the C type FROM as the C type TO takes it where C converts, when
@@ -378,32 +378,32 @@
     (def v (%cc-eval node env))
     (def t (first node))
     (if (if (eq? t (lit cmp)) #f (if (eq? t (lit and)) #f (not (eq? t (lit or)))))
-      (let ((k (%cc-kind-of node env)))
+      (let ((k (%cc-c-type-of node env)))
         (if (real? k) (not (real-zero? v k)) (not (= v 0))))
       (not (= v 0)))))
 
-; --- kinds -------------------------------------------------------------------
-; kind: scalar | (array N) | (array N K) | (struct S) | (ptr K)  (see
+; --- C types -------------------------------------------------------------------
+; C type: scalar | (array N) | (array N K) | (struct S) | (ptr K)  (see
 ; parse.x: the parser owns the struct and typedef tables; they are
 ; complete before anything runs).  A struct value has no other life
 ; than its address: an array or struct NAME "decays" to where it lives,
-; a field of struct kind answers its address, and assignment into a
+; a field of struct C type answers its address, and assignment into a
 ; struct-kinded place copies bytes.
 
-(def %cc-kind-decays?
+(def %cc-c-type-decays?
   (fn (_ k)
     (if (not (pair? k)) #f
       (if (eq? (first k) (lit array)) #t (eq? (first k) (lit struct))))))
 
-; the kind an element or pointee has: (array N K) -> K, (ptr K) -> K
-(def kind-elem
+; the C type an element or pointee has: (array N K) -> K, (ptr K) -> K
+(def c-type-elem
   (fn (_ k)
     (if (not (pair? k)) (lit int)
       (if (eq? (first k) (lit array))
         (if (null? (rest (rest k))) (lit int) (first (rest (rest k))))
         (if (eq? (first k) (lit ptr)) (first (rest k)) (lit int))))))
 
-; a struct's field, (off . kind), by struct name; nil when absent
+; a struct's field, (off . c-type), by struct name; nil when absent
 (def %cc-field
   (fn (_ sname fname)
     (def e (struct-entry sname))
@@ -416,7 +416,7 @@
         (go (rest (rest e)))))))
 
 ; the struct owning field FNAME, when exactly one does -- the fallback
-; when a chain's kind is not known (a call's result, an untyped pointer)
+; when a chain's C type is not known (a call's result, an untyped pointer)
 (def %cc-struct-with-field
   (fn (_ fname)
     (def go (fn (self es hit)
@@ -434,11 +434,11 @@
       (first (rest k))
       (%cc-struct-with-field fname))))
 
-(def %cc-kind-of ())
+(def %cc-c-type-of ())
 
 ; --- names -------------------------------------------------------------------
-; env: ((name addr . kind) ...) locals, then the globals table.
-; kind: scalar | (array N) | (array N K) | (struct S) | (ptr K)
+; env: ((name addr . c-type) ...) locals, then the globals table.
+; C type: scalar | (array N) | (array N K) | (struct S) | (ptr K)
 
 (def %cc-find
   (fn (_ name env)
@@ -602,7 +602,7 @@
 (def %cc-exec-block ())
 
 ; The C type of what NODE computes, worked out without computing it.
-(set! %cc-kind-of
+(set! %cc-c-type-of
   (fn (self node env)
     (def t (first node))
     (match
@@ -617,17 +617,17 @@
                    (first (rest (rest node))))))
           (if (null? f) (%cc-oops (string-append "no field: " (first (rest (rest node))))) (rest f))))
       ((eq? t (lit arrow))
-        (let ((f (%cc-field (%cc-struct-name (kind-elem (self (first (rest node)) env))
+        (let ((f (%cc-field (%cc-struct-name (c-type-elem (self (first (rest node)) env))
                               (first (rest (rest node))))
                    (first (rest (rest node))))))
           (if (null? f) (%cc-oops (string-append "no field: " (first (rest (rest node))))) (rest f))))
       ; A[I] is what A + I points at
       ((eq? t (lit idx))
-        (kind-elem (self (list (lit bin) "+" (first (rest node)) (first (rest (rest node)))) env)))
+        (c-type-elem (self (list (lit bin) "+" (first (rest node)) (first (rest (rest node)))) env)))
       ((eq? t (lit un))
         (let ((op (first (rest node))))
           (match
-            ((string=? op "*") (kind-elem (self (first (rest (rest node))) env)))
+            ((string=? op "*") (c-type-elem (self (first (rest (rest node))) env)))
             ((string=? op "&") (list (lit ptr) (self (first (rest (rest node))) env)))
             ((string=? op "!") (lit int))
             ; - and ~ answer their operand's C type, promoted
@@ -666,7 +666,7 @@
           (match
             ((%cc-address? ka) (%cc-decay ka))
             ((%cc-address? kb) (%cc-decay kb))
-            ((%cc-kind-decays? ka) ka)
+            ((%cc-c-type-decays? ka) ka)
             (#t (common-c-type ka kb)))))
       ((eq? t (lit szof)) (lit ulong))
       ((eq? t (lit cast)) (first (rest node)))
@@ -692,7 +692,7 @@
   (fn (_ k) (if (pair? k) (if (eq? (first k) (lit ptr)) #t (eq? (first k) (lit array))) #f)))
 
 ; the pointer an address K is, to what it points at
-(def %cc-decay (fn (_ k) (if (eq? (first k) (lit ptr)) k (list (lit ptr) (kind-elem k)))))
+(def %cc-decay (fn (_ k) (if (eq? (first k) (lit ptr)) k (list (lit ptr) (c-type-elem k)))))
 
 ; The C type a binary operator answers on operands of KA and KB: + and -
 ; with an address on either side of + or the left of - a pointer to what
@@ -822,49 +822,49 @@
   (fn (_ op a b ka kb)
     (match
       ((if (string=? op "-") (if (%cc-address? ka) (%cc-address? kb) #f) #f)
-        (%cc-div (- a b) (kind-size (kind-elem ka))))
-      ((if (string=? op "-") (%cc-address? ka) #f) (- a (* b (kind-size (kind-elem ka)))))
-      ((if (string=? op "+") (%cc-address? ka) #f) (+ a (* b (kind-size (kind-elem ka)))))
-      ((string=? op "+") (+ (* a (kind-size (kind-elem kb))) b))
+        (%cc-div (- a b) (c-type-size (c-type-elem ka))))
+      ((if (string=? op "-") (%cc-address? ka) #f) (- a (* b (c-type-size (c-type-elem ka)))))
+      ((if (string=? op "+") (%cc-address? ka) #f) (+ a (* b (c-type-size (c-type-elem ka)))))
+      ((string=? op "+") (+ (* a (c-type-size (c-type-elem kb))) b))
       (#t (%cc-oops (string-append "the operator " op " on an address"))))))
 
 ; What `+ 1` moves an expression by: a pointer or an array steps by its
 ; element's size, and everything else by one.  Only an address scales.
 (def %cc-step-of
   (fn (_ node env)
-    (let ((k (%cc-kind-of node env)))
+    (let ((k (%cc-c-type-of node env)))
       (if (not (pair? k)) 1
         (if (if (eq? (first k) (lit ptr)) #t (eq? (first k) (lit array)))
-          (kind-size (kind-elem k))
+          (c-type-size (c-type-elem k))
           1)))))
 
-; an initializer laid into memory at A by KIND: a braced list fills an
+; an initializer laid into memory at A by C-TYPE: a braced list fills an
 ; array's elements or a struct's fields in order (nested lists recurse;
 ; missing trailing items stay zero); a string fills a char array with
 ; its bytes and a NUL; a struct value copies; a scalar stores
 (def %cc-init-into! ())
 (set! %cc-init-into!
-  (fn (self a kind init env)
+  (fn (self a c-type init env)
     (if (eq? (first init) (lit initlist))
       (let ((items (first (rest init))))
-        (if (if (pair? kind) (eq? (first kind) (lit array)) #f)
-          (let ((ek (kind-elem kind)))
-            (def es (kind-size ek))
+        (if (if (pair? c-type) (eq? (first c-type) (lit array)) #f)
+          (let ((ek (c-type-elem c-type)))
+            (def es (c-type-size ek))
             (def go (fn (self2 is i)
                       (if (null? is) ()
                         (do (self (+ a (* i es)) ek (first is) env)
                             (self2 (rest is) (+ i 1))))))
             (go items 0))
-          (if (if (pair? kind) (eq? (first kind) (lit struct)) #f)
-            (let ((e (struct-entry (first (rest kind)))))
+          (if (if (pair? c-type) (eq? (first c-type) (lit struct)) #f)
+            (let ((e (struct-entry (first (rest c-type)))))
               (def go (fn (self2 is fs)
                         (if (null? is) ()
                           (if (null? fs) (%cc-oops "too many initializers for a struct")
                             (do (self (+ a (first (rest (first fs)))) (first (rest (rest (first fs)))) (first is) env)
                                 (self2 (rest is) (rest fs)))))))
               (go items (rest (rest e))))
-            (if (null? items) () (self a kind (first items) env)))))
-      (if (if (eq? (first init) (lit str)) (if (pair? kind) (eq? (first kind) (lit array)) #f) #f)
+            (if (null? items) () (self a c-type (first items) env)))))
+      (if (if (eq? (first init) (lit str)) (if (pair? c-type) (eq? (first c-type) (lit array)) #f) #f)
         (let ((text (first (rest init))))
           (def n (byte-len text))
           (def go (fn (self2 i)
@@ -872,10 +872,10 @@
                       (do (%cc-raw-set! (+ a i) (+ 0 (byte-at text i)) 1)
                           (self2 (+ i 1))))))
           (go 0))
-        (if (if (pair? kind) (eq? (first kind) (lit struct)) #f)
-          (%cc-copy-bytes! a (%cc-eval init env) (kind-size kind))
-          (%cc-store a (%cc-convert-from (%cc-eval init env) (%cc-kind-of init env) kind)
-            kind))))))
+        (if (if (pair? c-type) (eq? (first c-type) (lit struct)) #f)
+          (%cc-copy-bytes! a (%cc-eval init env) (c-type-size c-type))
+          (%cc-store a (%cc-convert-from (%cc-eval init env) (%cc-c-type-of init env) c-type)
+            c-type))))))
 
 (def %cc-copy-bytes!
   (fn (_ dst src n)
@@ -901,7 +901,7 @@
                 (do (%cc-raw-set! (+ dst i) (first vs) 1) (self (+ i 1) (rest vs))))))
     (go 0 vals)))
 
-(def %cc-struct-kind?
+(def %cc-struct-c-type?
   (fn (_ k) (if (pair? k) (eq? (first k) (lit struct)) #f)))
 
 (def %cc-lval
@@ -916,14 +916,14 @@
         (if (eq? t (lit idx))
           (%cc-eval (list (lit bin) "+" (first (rest node)) (first (rest (rest node)))) env)
           (if (eq? t (lit dot))
-            (let ((f (%cc-field (%cc-struct-name (%cc-kind-of (first (rest node)) env)
+            (let ((f (%cc-field (%cc-struct-name (%cc-c-type-of (first (rest node)) env)
                                   (first (rest (rest node))))
                        (first (rest (rest node))))))
               (if (null? f) (%cc-oops (string-append "no field: " (first (rest (rest node)))))
                 (+ (%cc-lval (first (rest node)) env) (first f))))
             (if (eq? t (lit arrow))
               (let ((f (%cc-field (%cc-struct-name
-                                    (kind-elem (%cc-kind-of (first (rest node)) env))
+                                    (c-type-elem (%cc-c-type-of (first (rest node)) env))
                                     (first (rest (rest node))))
                          (first (rest (rest node))))))
                 (if (null? f) (%cc-oops (string-append "no field: " (first (rest (rest node)))))
@@ -949,7 +949,7 @@
             ; not a variable: a function's name is its value (or undefined)
             (%cc-fun-id (first (rest node)))
             ; an array or struct NAME decays to its address; a scalar loads
-            (if (%cc-kind-decays? (rest (rest e)))
+            (if (%cc-c-type-decays? (rest (rest e)))
               (first (rest e))
               (%cc-load (first (rest e)) (rest (rest e))))))
       (if (eq? t (lit str)) (%cc-intern (first (rest node)))
@@ -957,8 +957,8 @@
         (let ((op (first (rest node))))
           (let ((a (%cc-eval (first (rest (rest node))) env)))
             (let ((b (%cc-eval (first (rest (rest (rest node)))) env)))
-              (def ka (%cc-kind-of (first (rest (rest node))) env))
-              (def kb (%cc-kind-of (first (rest (rest (rest node)))) env))
+              (def ka (%cc-c-type-of (first (rest (rest node))) env))
+              (def kb (%cc-c-type-of (first (rest (rest (rest node)))) env))
               (if (if (%cc-address? ka) #t (%cc-address? kb))
                 (%cc-address-arith op a b ka kb)
                 (%cc-arith op a b ka kb)))))
@@ -966,8 +966,8 @@
         (let ((op (first (rest node))))
           (let ((a (%cc-eval (first (rest (rest node))) env)))
             (let ((b (%cc-eval (first (rest (rest (rest node)))) env)))
-              (def ka (%cc-kind-of (first (rest (rest node))) env))
-              (def kb (%cc-kind-of (first (rest (rest (rest node)))) env))
+              (def ka (%cc-c-type-of (first (rest (rest node))) env))
+              (def kb (%cc-c-type-of (first (rest (rest (rest node)))) env))
               ; the operands in the C type they meet in, an address as it is
               (def k (if (if (%cc-address? ka) #t (%cc-address? kb)) (lit long) (common-c-type ka kb)))
               (%cc-b
@@ -987,8 +987,8 @@
           (if (string=? op "*")
             ; *p of a pointer to a struct is the struct: its address
             (let ((a (%cc-eval (first (rest (rest node))) env)))
-              (let ((ek (kind-elem (%cc-kind-of (first (rest (rest node))) env))))
-                (if (%cc-kind-decays? ek) a (%cc-load a ek))))
+              (let ((ek (c-type-elem (%cc-c-type-of (first (rest (rest node))) env))))
+                (if (%cc-c-type-decays? ek) a (%cc-load a ek))))
             (if (string=? op "&")
               ; &f of a function name is the function's value
               (let ((sub (first (rest (rest node)))))
@@ -998,7 +998,7 @@
               ; - and ~ in the operand's C type, promoted; ~v is -v-1.  A
               ; real value negates by its sign bit and is false at either zero
               (let ((v (%cc-eval (first (rest (rest node))) env)))
-                (def k (promoted-c-type (%cc-kind-of (first (rest (rest node))) env)))
+                (def k (promoted-c-type (%cc-c-type-of (first (rest (rest node))) env)))
                 (match
                   ((real? k)
                     (match
@@ -1010,42 +1010,42 @@
                   (#t (%cc-convert (if (string=? op "-") (- 0 v) (- (- 0 v) 1)) k)))))))
       (if (eq? t (lit idx))
         (let ((addr (%cc-lval node env)))
-          (let ((k (%cc-kind-of node env)))
-            (if (%cc-kind-decays? k) addr (%cc-load addr k))))
+          (let ((k (%cc-c-type-of node env)))
+            (if (%cc-c-type-decays? k) addr (%cc-load addr k))))
       (if (if (eq? t (lit dot)) #t (eq? t (lit arrow)))
         (let ((addr (%cc-lval node env)))
-          (let ((k (%cc-kind-of node env)))
-            (if (%cc-kind-decays? k) addr (%cc-load addr k))))
+          (let ((k (%cc-c-type-of node env)))
+            (if (%cc-c-type-decays? k) addr (%cc-load addr k))))
       (if (eq? t (lit assign))
         (let ((v (%cc-eval (first (rest (rest node))) env)))
-          (def k (%cc-kind-of (first (rest node)) env))
+          (def k (%cc-c-type-of (first (rest node)) env))
           (if (if (pair? k) (eq? (first k) (lit struct)) #f)
             ; a struct-kinded place: copy the bytes from the value's address
             (let ((dst (%cc-lval (first (rest node)) env)))
-              (do (%cc-copy-bytes! dst v (kind-size k)) dst))
+              (do (%cc-copy-bytes! dst v (c-type-size k)) dst))
             ; an assignment answers what its place holds after it: the
             ; value converted to the place's C type
             (let ((a (%cc-lval (first (rest node)) env)))
-              (do (%cc-store a (%cc-convert-from v (%cc-kind-of (first (rest (rest node))) env) k) k)
+              (do (%cc-store a (%cc-convert-from v (%cc-c-type-of (first (rest (rest node))) env) k) k)
                   (%cc-load a k)))))
       (if (eq? t (lit preinc))
         (let ((a (%cc-lval (first (rest node)) env)))
-          (def k (%cc-kind-of (first (rest node)) env))
+          (def k (%cc-c-type-of (first (rest node)) env))
           (let ((v (%cc-step (%cc-load a k) (first (rest node)) k env "+")))
             (do (%cc-store a v k) (%cc-load a k))))
       (if (eq? t (lit predec))
         (let ((a (%cc-lval (first (rest node)) env)))
-          (def k (%cc-kind-of (first (rest node)) env))
+          (def k (%cc-c-type-of (first (rest node)) env))
           (let ((v (%cc-step (%cc-load a k) (first (rest node)) k env "-")))
             (do (%cc-store a v k) (%cc-load a k))))
       (if (eq? t (lit postinc))
         (let ((a (%cc-lval (first (rest node)) env)))
-          (def k (%cc-kind-of (first (rest node)) env))
+          (def k (%cc-c-type-of (first (rest node)) env))
           (let ((v (%cc-load a k)))
             (do (%cc-store a (%cc-step v (first (rest node)) k env "+") k) v)))
       (if (eq? t (lit postdec))
         (let ((a (%cc-lval (first (rest node)) env)))
-          (def k (%cc-kind-of (first (rest node)) env))
+          (def k (%cc-c-type-of (first (rest node)) env))
           (let ((v (%cc-load a k)))
             (do (%cc-store a (%cc-step v (first (rest node)) k env "-") k) v)))
       (if (eq? t (lit ternary))
@@ -1054,13 +1054,13 @@
                      (first (rest (rest node)))
                      (first (rest (rest (rest node)))))))
           (def v (%cc-eval arm env))
-          (def k (%cc-kind-of node env))
-          (if (real? k) (%cc-convert-from v (%cc-kind-of arm env) k) v))
+          (def k (%cc-c-type-of node env))
+          (if (real? k) (%cc-convert-from v (%cc-c-type-of arm env) k) v))
       (if (eq? t (lit comma))
         (do (%cc-eval (first (rest node)) env)
             (%cc-eval (first (rest (rest node))) env))
       (if (eq? t (lit szof))
-        (kind-size (%cc-kind-of (first (rest node)) env))
+        (c-type-size (%cc-c-type-of (first (rest node)) env))
       (if (eq? t (lit call))
         ; a named call -- unless the name is a variable holding a function
         (let ((e (%cc-find (first (rest node)) env)))
@@ -1079,7 +1079,7 @@
           (%cc-call name (%cc-args name (first (rest (rest node))) env)))
         (if (eq? t (lit cast))
           (let ((sub (first (rest (rest node)))) (to (first (rest node))))
-            (%cc-convert (%cc-convert-from (%cc-eval sub env) (%cc-kind-of sub env) to) to))
+            (%cc-convert (%cc-convert-from (%cc-eval sub env) (%cc-c-type-of sub env) to) to))
           (%cc-oops "unknown expression")))))))))))))))))))))))))
 
 ; V moved one step by OP, + or -, as ++ and -- move the place NODE of C
@@ -1108,7 +1108,7 @@
     (def go
       (fn (self ns ks)
         (if (null? ns) ()
-          (let ((v (%cc-eval (first ns) env)) (k (%cc-kind-of (first ns) env)))
+          (let ((v (%cc-eval (first ns) env)) (k (%cc-c-type-of (first ns) env)))
             (pair
               (match
                 ((not (null? ks)) (%cc-convert-from v k (first ks)))
@@ -1133,15 +1133,15 @@
           (fn (self ps ks as env)
             (if (null? ps) env
               (let ((k (if (null? ks) (lit int) (first ks))))
-                (def size (kind-size k))
+                (def size (c-type-size k))
                 (def a (%cc-alloca size))
-                (do (if (%cc-struct-kind? k)
+                (do (if (%cc-struct-c-type? k)
                       (if (null? as) () (%cc-copy-bytes! a (first as) size))
                       (%cc-store a (if (null? as) 0 (first as)) k))
                     (self (rest ps) (if (null? ks) () (rest ks))
                       (if (null? as) () (rest as))
                       (pair (pair (first ps) (pair a k)) env)))))))
-        ; f is (params body kinds ret)
+        ; f is (params body c-types ret)
         (def env (bind (first f) (first (rest (rest f))) args ()))
         (def ret (let ((r (rest (rest (rest f))))) (if (null? r) (lit int) (first r))))
         (def c (%cc-exec-block (first (rest f)) env))
@@ -1153,10 +1153,10 @@
           (if (%cc-ctrl? c (lit return))
             (%cc-convert-from (first (rest c)) (first (rest (rest c))) ret)
             0))
-        (if (%cc-struct-kind? ret)
-          (let ((vals (%cc-read-bytes v (kind-size ret))))
+        (if (%cc-struct-c-type? ret)
+          (let ((vals (%cc-read-bytes v (c-type-size ret))))
             (set! %cc-sp saved-sp)
-            (let ((tmp (%cc-alloca (kind-size ret))))
+            (let ((tmp (%cc-alloca (c-type-size ret))))
               (do (%cc-write-bytes! tmp vals) tmp)))
           (do (set! %cc-sp saved-sp) v)))
       ; exit leaves through the interpreter, once the C library has written
@@ -1220,7 +1220,7 @@
       (if (eq? t (lit return))
         (let ((e (first (rest stmt))))
           (if (null? e) (list (lit return) 0 (lit int))
-            (list (lit return) (%cc-eval e env) (%cc-kind-of e env))))
+            (list (lit return) (%cc-eval e env) (%cc-c-type-of e env))))
       (if (eq? t (lit switch))
         ; the matched clause and every clause after it run as one block
         ; (fallthrough); a break ends the switch, return and continue
@@ -1364,12 +1364,12 @@
 (def %cc-declare
   (fn (_ item env init?)
     (def name (first (rest item)))
-    (def kind (first (rest (rest item))))
+    (def c-type (first (rest (rest item))))
     (def init (first (rest (rest (rest item)))))
     (def static? (not (null? (rest (rest (rest (rest item)))))))
-    (def a (if static? (%cc-static-address item kind init env) (%cc-alloca (kind-size kind))))
-    (def inner (pair (pair name (pair a kind)) env))
-    (do (if (if init? (if static? #f (not (null? init))) #f) (%cc-init-into! a kind init inner) ())
+    (def a (if static? (%cc-static-address item c-type init env) (%cc-alloca (c-type-size c-type))))
+    (def inner (pair (pair name (pair a c-type)) env))
+    (do (if (if init? (if static? #f (not (null? init))) #f) (%cc-init-into! a c-type init inner) ())
         inner)))
 
 ; a block: declarations extend the env as they pass
@@ -1387,7 +1387,7 @@
                 (#t (self (rest es))))))
     (def found (go %cc-statics))
     (if (not (null? found)) found
-      (let ((a (%cc-heap (kind-size c-type))))
+      (let ((a (%cc-heap (c-type-size c-type))))
         (do (if (null? init) ()
               (%cc-init-into! a c-type init
                 (pair (pair (first (rest node)) (pair a c-type)) env)))
@@ -1435,17 +1435,17 @@
         (if (null? items) ()
           (let ((item (first items)))
             (do (if (eq? (first item) (lit fun))
-                  ; (fun NAME PARAMS BODY KINDS) -> (NAME PARAMS BODY KINDS)
+                  ; (fun NAME PARAMS BODY C-TYPES) -> (NAME PARAMS BODY C-TYPES)
                   (set! %cc-funs (pair (rest item) %cc-funs))
                   (let ((name (first (rest item))))
-                    (def kind (first (rest (rest item))))
+                    (def c-type (first (rest (rest item))))
                     (def init (first (rest (rest (rest item)))))
-                    (def size (kind-size kind))
+                    (def size (c-type-size c-type))
                     (def a (%cc-heap size))
                     ; in scope in its own initializer, as a local is
-                    (do (set! %cc-genv (pair (pair name (pair a kind)) %cc-genv))
+                    (do (set! %cc-genv (pair (pair name (pair a c-type)) %cc-genv))
                         (if (null? init) ()
-                          (%cc-init-into! a kind init ())))))
+                          (%cc-init-into! a c-type init ())))))
                 (self (rest items)))))))
     (load! prog)
     (%cc-scan-program! prog)
@@ -1531,6 +1531,6 @@
 
 (def cc-run (fn (_ src) (%cc-run-core src () (list "a.out"))))
 
-(provide cc/eval cc-run cc-run-with common-c-type kind-elem
+(provide cc/eval cc-run cc-run-with common-c-type c-type-elem
   library-c-type library-double-fns library-double-label library-variadic
   promoted-c-type signed? unsigned-divide)

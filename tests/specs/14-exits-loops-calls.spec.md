@@ -23,7 +23,7 @@ from /usr/bin/cc.
 
 ## sequential loops
 
-### two loops, two over memory, three of mixed kinds
+### two loops, two over memory, three mixing loop forms
 
 ```cc
 (display (cc-run "#include <stdio.h>\nint sumsq(int n) { int i; int s; s = 0; for (i = 1; i <= n; i++) s = s + i * i; for (i = 0; i < 3; i++) s = s * 2; return s; }\nint prefix(int *a, int n) { int i; for (i = 0; i < n; i++) a[i] = i * 3; for (i = 1; i < n; i++) a[i] = a[i] + a[i - 1]; return a[n - 1]; }\nint count3(int n) { int i; int c; c = 0; while (n > 0) { c = c + n % 10; n = n / 10; } for (i = 0; i < 2; i++) c = c + 1; while (c > 20) c = c - 20; return c; }\nint main() { int a[5]; int p = prefix(a, 5); printf(\"%d %d %d %d\\n\", sumsq(4), p, a[2], count3(9876)); return 0; }"))

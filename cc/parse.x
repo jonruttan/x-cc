@@ -11,11 +11,11 @@
 ; levels, each level one flat function.
 ;
 ; The AST:
-;   toplevel  (fun NAME PARAMS BODY KINDS RET-KIND) (gdecl NAME KIND INIT|())
+;   toplevel  (fun NAME PARAMS BODY C-TYPES RET-C-TYPE) (gdecl NAME C-TYPE INIT|())
 ;   stmts     (block ITEMS) (if C T E|()) (while C B) (do B C)
 ;             (for I|() C|() U|() B) (return E|()) (break) (continue)
-;             (expr E) (decl NAME KIND INIT|())
-;   KIND      scalar | (array N)
+;             (expr E) (decl NAME C-TYPE INIT|())
+;   C-TYPE      scalar | (array N)
 ;   exprs     (num N) (str S) (var NAME) (call NAME ARGS) (idx A I)
 ;             (un "op" E) (preinc LV) (predec LV) (postinc LV)
 ;             (postdec LV) (bin "op" A B) (cmp "op" A B) (and A B)
@@ -83,7 +83,7 @@
         #f))))
 
 ; a type-specifier keyword?
-(def %cc-p-type-kw?
+(def %cc-p-c-type-kw?
   (fn (_ toks)
     (if (null? toks) #f
       (if (eq? (first (first toks)) (lit kw))
@@ -103,7 +103,7 @@
             (#t (eq? k (lit extern)))))
         #f))))
 
-; The scalar the specifiers name.  `unsigned`/`signed` pick the flavour and
+; The scalar the specifiers name.  `unsigned`/`signed` pick the signedness and
 ; the width keyword picks the width; `long long` is `long`, and specifiers
 ; that say nothing about either (const, static, extern) are swallowed.  Plain
 ; `char` is signed, as it is on the platforms this compiles for.
@@ -111,7 +111,7 @@
   (fn (_ toks)
     (def go
       (fn (self ts width unsigned?)
-        (if (not (%cc-p-type-kw? ts)) (pair (pair width unsigned?) ts)
+        (if (not (%cc-p-c-type-kw? ts)) (pair (pair width unsigned?) ts)
           (let ((k (first (rest (first ts)))))
             (match
               ((eq? k (lit unsigned)) (self (rest ts) width #t))
@@ -144,7 +144,7 @@
       (rest got))))
 
 ; --- types, as far as the memory model needs them --------------------------
-; Kinds: a scalar's own name (char uchar short ushort int uint long ulong
+; C types: a scalar's own name (char uchar short ushort int uint long ulong
 ; void) | (fnptr RET) | (array N K) | (struct S) | (ptr K).  Sizes are bytes, as the
 ; platforms this compiles for count them; a struct is its fields at aligned
 ; offsets, padded; an array of K is N*size(K); a pointer is 8 and keeps its
@@ -152,8 +152,8 @@
 ; its width from, and where `->` finds its fields.  The parser keeps the
 ; struct and typedef tables (the evaluator reads them; parse always precedes
 ; load in a process).
-(def %cc-p-structs ())     ; ((name size . ((fname off kind) ...)) ...)
-(def %cc-p-typedefs ())    ; ((name . kind) ...)
+(def %cc-p-structs ())     ; ((name size . ((fname off c-type) ...)) ...)
+(def %cc-p-typedefs ())    ; ((name . c-type) ...)
 (def %cc-p-anon 0)
 
 (def struct-entry
@@ -172,50 +172,50 @@
 ; Sizes in bytes, as the platforms this compiles for count them (LP64):
 ; char 1, short 2, int 4, long 8, and every pointer 8.  An array is its
 ; count times its element; a struct is what its layout came to.
-(def kind-size
-  (fn (self kind)
-    (if (not (pair? kind))
+(def c-type-size
+  (fn (self c-type)
+    (if (not (pair? c-type))
       (match
-        ((eq? kind (lit char)) 1)
-        ((eq? kind (lit uchar)) 1)
-        ((eq? kind (lit short)) 2)
-        ((eq? kind (lit ushort)) 2)
-        ((eq? kind (lit int)) 4)
-        ((eq? kind (lit uint)) 4)
-        ((eq? kind (lit float)) 4)
-        ((eq? kind (lit void)) 1)
+        ((eq? c-type (lit char)) 1)
+        ((eq? c-type (lit uchar)) 1)
+        ((eq? c-type (lit short)) 2)
+        ((eq? c-type (lit ushort)) 2)
+        ((eq? c-type (lit int)) 4)
+        ((eq? c-type (lit uint)) 4)
+        ((eq? c-type (lit float)) 4)
+        ((eq? c-type (lit void)) 1)
         (#t 8))
       (match
-        ((eq? (first kind) (lit array))
-          (* (first (rest kind))
-            (if (null? (rest (rest kind))) 4
-              (self (first (rest (rest kind)))))))
-        ((eq? (first kind) (lit struct))
-          (let ((e (struct-entry (first (rest kind)))))
+        ((eq? (first c-type) (lit array))
+          (* (first (rest c-type))
+            (if (null? (rest (rest c-type))) 4
+              (self (first (rest (rest c-type)))))))
+        ((eq? (first c-type) (lit struct))
+          (let ((e (struct-entry (first (rest c-type)))))
             (if (null? e)
-              (%cc-p-err (string-append "unknown struct: " (first (rest kind))))
+              (%cc-p-err (string-append "unknown struct: " (first (rest c-type))))
               (first (rest e)))))
         ; a bit-field's unit
-        ((eq? (first kind) (lit bits)) (self (first (rest kind))))
+        ((eq? (first c-type) (lit bits)) (self (first (rest c-type))))
         (#t 8)))))
 
-; What an address of this kind must be a multiple of: a scalar its own size,
-; an array its element's, a struct its widest member's.
-(def kind-align
-  (fn (self kind)
-    (if (not (pair? kind)) (kind-size kind)
+; What an address of this C type must be a multiple of: a scalar its own size,
+; an array its element's, a struct its widest field's.
+(def c-type-align
+  (fn (self c-type)
+    (if (not (pair? c-type)) (c-type-size c-type)
       (match
-        ((eq? (first kind) (lit array))
-          (if (null? (rest (rest kind))) 4 (self (first (rest (rest kind))))))
-        ((eq? (first kind) (lit struct))
-          (let ((e (struct-entry (first (rest kind)))))
+        ((eq? (first c-type) (lit array))
+          (if (null? (rest (rest c-type))) 4 (self (first (rest (rest c-type))))))
+        ((eq? (first c-type) (lit struct))
+          (let ((e (struct-entry (first (rest c-type)))))
             (if (null? e) 1
               (let ((go (fn (self2 fs a)
                           (if (null? fs) a
                             (let ((fa (self (first (rest (rest (first fs)))))))
                               (self2 (rest fs) (if (> fa a) fa a)))))))
                 (go (rest (rest e)) 1)))))
-        ((eq? (first kind) (lit bits)) (self (first (rest kind))))
+        ((eq? (first c-type) (lit bits)) (self (first (rest c-type))))
         (#t 8)))))
 
 (def round-up (fn (_ n a) (let ((m (+ n (- a 1)))) (- m (% m a)))))
@@ -230,7 +230,7 @@
                       (if (string=? (first (first es)) n) #t (self (rest es))))))
           (go %cc-p-typedefs))
         #f))))
-(def %cc-p-typedef-kind
+(def %cc-p-typedef-c-type
   (fn (_ n)
     (def go (fn (self es)
               (if (null? es) (lit int)
@@ -239,9 +239,9 @@
 
 ; a declaration starts with a type keyword, `struct`/`union`/`enum`,
 ; or a typedef name
-(def %cc-p-type-start?
+(def %cc-p-c-type-start?
   (fn (_ toks)
-    (if (%cc-p-type-kw? toks) #t
+    (if (%cc-p-c-type-kw? toks) #t
       (if (%cc-p-kw? toks (lit struct)) #t
         (if (%cc-p-kw? toks (lit union)) #t
           (if (%cc-p-kw? toks (lit enum)) #t
@@ -338,12 +338,12 @@
 ; (C-TYPE . rest)
 (def %cc-p-stars
   (fn (self k ts)
-    (if (%cc-p-type-kw? ts) (self k (rest ts))
+    (if (%cc-p-c-type-kw? ts) (self k (rest ts))
       (if (%cc-p-op? ts "*") (self (%cc-p-pointer-to k) (rest ts))
         (pair k ts)))))
 
-; TYPE: specifiers, then *s.  Answers (KIND . rest).
-(def %cc-p-type
+; TYPE: specifiers, then *s.  Answers (C-TYPE . rest).
+(def %cc-p-c-type
   (fn (_ toks)
     (def based (%cc-p-specifiers toks))
     (%cc-p-stars (first based) (rest based))))
@@ -355,7 +355,7 @@
 ; (C-TYPE . rest).
 (def %cc-p-specifiers
   (fn (_ toks)
-    (def skip-kws (fn (self ts) (if (%cc-p-type-kw? ts) (self (rest ts)) ts)))
+    (def skip-kws (fn (self ts) (if (%cc-p-c-type-kw? ts) (self (rest ts)) ts)))
     (def ts (skip-kws toks))
     ; after `struct` or `union`: NAME [{...}] | {...}; a union is a
     ; struct whose fields overlap
@@ -381,7 +381,7 @@
             (pair (lit int)
               (if (%cc-p-op? ts2 "{") (%cc-p-enum-body (rest ts2)) ts2)))
           (if (%cc-p-typedef-name? ts)
-            (pair (%cc-p-typedef-kind (first (rest (first ts)))) (rest ts))
+            (pair (%cc-p-typedef-c-type (first (rest (first ts)))) (rest ts))
             (%cc-p-scalar-of toks)))))))
 
 ; the array suffix after a declarator's name: (C-TYPE . rest).  Each [N]
@@ -402,7 +402,7 @@
 ; array or (*)[N]... for a pointer to one.  (C-TYPE . rest)
 (def %cc-p-type-name
   (fn (_ toks)
-    (def tr (%cc-p-type toks))
+    (def tr (%cc-p-c-type toks))
     (def ts (rest tr))
     (if (if (%cc-p-op? ts "(") (%cc-p-op? (rest ts) "*") #f)
       (let ((after (%cc-p-eat (rest (rest ts)) ")")))
@@ -437,10 +437,10 @@
   (fn (_ toks)
     (if (null? toks) (%cc-p-err "expected an expression")
       (let ((tok (first toks)))
-        (def tag (first tok))
-        (if (eq? tag (lit num)) (pair tok (rest toks))
-          (if (eq? tag (lit str)) (pair tok (rest toks))
-            (if (eq? tag (lit id))
+        (def label (first tok))
+        (if (eq? label (lit num)) (pair tok (rest toks))
+          (if (eq? label (lit str)) (pair tok (rest toks))
+            (if (eq? label (lit id))
               (if (%cc-p-op? (rest toks) "(")
                 (let ((r (%cc-p-args (rest (rest toks)))))
                   (pair (list (lit call) (first (rest tok)) (first r))
@@ -495,11 +495,11 @@
                     (pair ast ts)))))))))
     (go (first r) (rest r))))
 
-; a parenthesized type-name means a cast: (cast KIND E)
+; a parenthesized type-name means a cast: (cast C-TYPE E)
 (def %cc-cast?
   (fn (_ toks)
     (if (%cc-p-op? toks "(")
-      (%cc-p-type-start? (rest toks))
+      (%cc-p-c-type-start? (rest toks))
       #f)))
 
 (def %cc-e-unary
@@ -531,7 +531,7 @@
                       (if (%cc-cast? (rest toks))
                         ; a size_t, which is an unsigned long here
                         (let ((tr (%cc-p-type-name (rest (rest toks)))))
-                          (pair (list (lit num) (kind-size (first tr)) (lit ulong))
+                          (pair (list (lit num) (c-type-size (first tr)) (lit ulong))
                             (%cc-p-eat (rest tr) ")")))
                         (let ((r (self (rest toks))))
                           (pair (list (lit szof) (first r)) (rest r))))
@@ -702,17 +702,17 @@
   (fn (_ toks base)
     (def head (%cc-p-declarator-head toks base))
     (def name (first head))
-    (def kind (first (rest head)))
+    (def c-type (first (rest head)))
     (def ts3 (rest (rest head)))
     (if (%cc-p-op? ts3 "=")
       (let ((ir (if (%cc-p-op? (rest ts3) "{")
                   (%cc-p-initlist (rest (rest ts3)))
                   (%cc-e-assign (rest ts3)))))
-        (pair (list (lit decl) name (%cc-p-size-kind kind (first ir)) (first ir))
+        (pair (list (lit decl) name (%cc-p-size-c-type c-type (first ir)) (first ir))
           (rest ir)))
-      (if (if (pair? kind) (if (eq? (first kind) (lit array)) (null? (first (rest kind))) #f) #f)
+      (if (if (pair? c-type) (if (eq? (first c-type) (lit array)) (null? (first (rest c-type))) #f) #f)
         (%cc-p-err "an array without a size needs an initializer")
-        (pair (list (lit decl) name kind ()) ts3)))))
+        (pair (list (lit decl) name c-type ()) ts3)))))
 
 ; { init (, init)* [,] } -> (initlist ITEMS), items nested lists or exprs
 (def %cc-p-initlist
@@ -731,21 +731,21 @@
 
 ; an unsized array takes its size from the initializer: the list's
 ; length, or a string's bytes plus its NUL
-(def %cc-p-size-kind
-  (fn (_ kind init)
-    (if (if (pair? kind) (if (eq? (first kind) (lit array)) (null? (first (rest kind))) #f) #f)
+(def %cc-p-size-c-type
+  (fn (_ c-type init)
+    (if (if (pair? c-type) (if (eq? (first c-type) (lit array)) (null? (first (rest c-type))) #f) #f)
       (let ((n (if (eq? (first init) (lit initlist)) (length (first (rest init)))
                  (if (eq? (first init) (lit str)) (+ 1 (byte-len (first (rest init))))
                    (%cc-p-err "an unsized array needs a list or string initializer")))))
-        (if (null? (rest (rest kind))) (list (lit array) n) (list (lit array) n (first (rest (rest kind))))))
-      kind)))
+        (if (null? (rest (rest c-type))) (list (lit array) n) (list (lit array) n (first (rest (rest c-type))))))
+      c-type)))
 
 ; do the specifiers at the front of TOKS say static?  A local that is
 ; static is kept once for the program, not made again per call, so its decl
 ; nodes carry `static` as a fifth element.
 (def %cc-p-static?
   (fn (self toks)
-    (if (%cc-p-type-kw? toks)
+    (if (%cc-p-c-type-kw? toks)
       (if (%cc-p-kw? toks (lit static)) #t (self (rest toks)))
       #f)))
 
@@ -805,7 +805,7 @@
       ((if (eq? k (lit long)) #t (eq? k (lit ulong)))
         (%cc-p-err "not built yet: a bit-field of a long"))
       ((pair? k) (%cc-p-err "a bit-field that is not an integer"))
-      ((> w (* 8 (kind-size k))) (%cc-p-err "a bit-field wider than its type"))
+      ((> w (* 8 (c-type-size k))) (%cc-p-err "a bit-field wider than its type"))
       ((< w 0) (%cc-p-err "a bit-field of negative width"))
       ((if (= w 0) (not (null? name)) #f) (%cc-p-err "a bit-field of width 0 with a name"))
       (#t (list (lit bits) k bit w)))))
@@ -813,8 +813,8 @@
 (set! %cc-p-struct-body
   (fn (_ name toks union?)
     ; A field sits at the next offset its own alignment allows, and the
-    ; struct's size rounds up to the widest member's, so an array of them
-    ; keeps every member aligned.  A union's fields all sit at 0.  A
+    ; struct's size rounds up to the widest field's, so an array of them
+    ; keeps every field aligned.  A union's fields all sit at 0.  A
     ; bit-field takes the next WIDTH bits of a unit of its C type, the unit
     ; at a multiple of that type's size; when they would run past the
     ; unit's end it starts the next one, and width 0 starts the next one
@@ -836,12 +836,12 @@
                     (def fname (first d))
                     (def k (first (rest d)))
                     (def w (first (rest (rest d))))
-                    (def sz (kind-size k))
+                    (def sz (c-type-size k))
                     (def unit (* 8 sz))
                     (match
                       ((null? w)
-                        (let ((at (if union? 0 (round-up (bytes b) (kind-align k)))))
-                          (self2 (rest ds) (most b (* 8 (+ at sz))) (most a (kind-align k))
+                        (let ((at (if union? 0 (round-up (bytes b) (c-type-align k)))))
+                          (self2 (rest ds) (most b (* 8 (+ at sz))) (most a (c-type-align k))
                             (pair (list fname at k) fs))))
                       (#t
                         (let ((start (match
@@ -853,7 +853,7 @@
                           (match
                             ((null? fname) (self2 (rest ds) (most b (+ start w)) a fs))
                             (#t (self2 (rest ds) (most b (if union? unit (+ start w)))
-                                  (most a (kind-align k))
+                                  (most a (c-type-align k))
                                   (pair (list fname (* sz (/ start unit)) bk) fs)))))))))))
             (def l (lay (first r) bits align fields))
             (self (rest r) (first l) (first (rest l)) (first (rest (rest l))))))))
@@ -951,7 +951,7 @@
                             (convert (first (rest (first toks))) %string)))
                         (if (%cc-p-kw? toks (lit typedef))
                           (pair (list (lit block) ()) (%cc-p-typedef (rest toks)))
-                        (if (%cc-p-type-start? toks)
+                        (if (%cc-p-c-type-start? toks)
                           (let ((r (%cc-p-decl-line toks)))
                             (pair (pair (lit decls)
                                     (if (%cc-p-static? toks)
@@ -1008,7 +1008,7 @@
 
 ; --- top level ---------------------------------------------------------------
 
-; parameters: (void) | (type name, ...) -- names and kinds
+; parameters: (void) | (type name, ...) -- names and C types
 (def %cc-p-params
   (fn (_ toks)
     (if (%cc-p-op? toks ")")
@@ -1017,7 +1017,7 @@
         (pair (pair () ()) (rest (rest toks)))
         (let ((go ()))
           (set! go
-            (fn (self ts names kinds)
+            (fn (self ts names c-types)
               (def tr (%cc-p-specifiers ts))
               (def sr (%cc-p-stars (first tr) (rest tr)))
               ; (NAME C-TYPE . rest), as a declarator gives it; a
@@ -1029,15 +1029,15 @@
               (let ((name (first head)))
                 ; a parameter declared an array is a pointer to its
                 ; element, as C adjusts it
-                (def kind
+                (def c-type
                   (let ((k (first (rest head))))
                     (if (if (pair? k) (eq? (first k) (lit array)) #f)
                       (%cc-p-pointer-to (first (rest (rest k))))
                       k)))
                 (def ts3 (rest (rest head)))
                 (if (%cc-p-op? ts3 ",")
-                  (self (rest ts3) (pair name names) (pair kind kinds))
-                  (pair (pair (reverse (pair name names)) (reverse (pair kind kinds)))
+                  (self (rest ts3) (pair name names) (pair c-type c-types))
+                  (pair (pair (reverse (pair name names)) (reverse (pair c-type c-types)))
                     (%cc-p-eat ts3 ")"))))))
           (go toks () ()))))))
 
@@ -1057,7 +1057,7 @@
                 (convert (first (rest (first ts))) %string)))
           (if (%cc-p-kw? ts (lit typedef))
             (self (%cc-p-typedef (rest ts)) acc)
-            (let ((tr (%cc-p-type ts)))
+            (let ((tr (%cc-p-c-type ts)))
               (def ts2 (rest tr))
               (if (%cc-p-op? ts2 ";")
                 ; `struct S { ... };` -- a definition, nothing declared
@@ -1072,7 +1072,7 @@
                         (self (rest (rest pr)) acc)
                         (let ((b (%cc-p-block
                                    (%cc-p-eat (rest pr) "{"))))
-                          ; (fun NAME PARAMS BODY KINDS RET-KIND)
+                          ; (fun NAME PARAMS BODY C-TYPES RET-C-TYPE)
                           (self (rest b)
                             (pair (list (lit fun) name (first (first pr))
                                     (first b) (rest (first pr)) (first tr))
@@ -1090,5 +1090,5 @@
                           acc)))))))))))))
     (go toks ())))
 
-(provide cc/parse cc-parse kind-size kind-align round-up struct-entry
+(provide cc/parse cc-parse c-type-size c-type-align round-up struct-entry
   struct-table)
