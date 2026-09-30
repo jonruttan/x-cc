@@ -6,7 +6,7 @@ and the first to match -- else the default, wherever it sits, else
 nothing -- is where the body is entered; the clauses after it run on
 until a `break`, which leaves the switch.  A `continue` in a switch is
 the enclosing loop's.  C promotes the value, and each label converts to
-its kind.  Each case below prints what the same source prints through
+its C type.  Each case below prints what the same source prints through
 /usr/bin/cc, and exits as it does, under `run` and compiled.
 
 ## switch

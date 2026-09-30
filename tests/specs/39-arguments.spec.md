@@ -21,7 +21,7 @@ compiled executable agree.
 ---
     (91 91)
 
-### a parameter past the fourth takes its own kind
+### a parameter past the fourth takes its own C type
 
 ```cc
 (display (cc-exe-run "long f(char a, short b, int c, long d, char e, long f2, unsigned char g) { return a + b + c + d + e + f2 + g; }\nint main(void) { return (f(1, 2, 3, 4, 511, 10000000000L, 511) == 10000000264L) + (f(0, 0, 0, 0, -1, 0, -1) == 254) * 2; }"))

@@ -80,7 +80,7 @@ string literal's size counts its NUL.
 
 ### an array of arrays, and the sizes of both, interpreted and compiled
 
-Each `[N]` of a declarator wraps the kind the dimensions after it make,
+Each `[N]` of a declarator wraps the C type the dimensions after it make,
 so `int m[2][3]` is two arrays of three ints; `m[i]` is one of them, and
 stands for its first element's address in turn.
 
