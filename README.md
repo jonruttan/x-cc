@@ -203,8 +203,11 @@ Doubles and floats run as they compile: each is its IEEE bits, and each
 operation on one is the machine's, through the platform's stubs
 (x/num/float), made in cc/real.x.
 
-Refused loudly, each a recorded pending: `long double`, casts to
-function-pointer C types.
+A cast or `sizeof` takes a pointer to a function as a declaration does:
+`(int (*)(const void *, const void *))cmp` is a pointer a call answers an
+`int` through.
+
+Refused loudly, a recorded pending: `long double`.
 
 Paired with x-lang v0.18.0 (`lang.xon` is the checkable row).
 

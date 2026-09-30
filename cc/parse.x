@@ -399,17 +399,22 @@
       (pair k ts))))
 
 ; a type name, as a cast or sizeof takes it: TYPE, then [N]... for an
-; array or (*)[N]... for a pointer to one.  (C-TYPE . rest)
+; array, (*)[N]... for a pointer to one, or (*)(params) for a pointer to a
+; function, (fnptr RET) with TYPE its RET and the parameters' types not
+; kept, as a declarator's.  (C-TYPE . rest)
 (def %cc-p-type-name
   (fn (_ toks)
     (def tr (%cc-p-c-type toks))
     (def ts (rest tr))
     (if (if (%cc-p-op? ts "(") (%cc-p-op? (rest ts) "*") #f)
       (let ((after (%cc-p-eat (rest (rest ts)) ")")))
-        (if (not (%cc-p-op? after "["))
-          (%cc-p-err "not built yet: a cast to a pointer to a function"))
-        (let ((ar (%cc-p-array-suffix (first tr) after)))
-          (pair (%cc-p-pointer-to (first ar)) (rest ar))))
+        (match
+          ((%cc-p-op? after "(")
+            (pair (list (lit fnptr) (first tr)) (%cc-p-skip-parens after)))
+          ((%cc-p-op? after "[")
+            (let ((ar (%cc-p-array-suffix (first tr) after)))
+              (pair (%cc-p-pointer-to (first ar)) (rest ar))))
+          (#t (%cc-p-err "expected ( or [ after (*) in a type name"))))
       (%cc-p-array-suffix (first tr) ts))))
 
 ; --- the expression ladder ---------------------------------------------------
