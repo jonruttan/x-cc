@@ -206,7 +206,7 @@ operation on one is the machine's, through the platform's stubs
 Refused loudly, each a recorded pending: `long double`, casts to
 function-pointer C types.
 
-Paired with x-lang v0.17.0 (`lang.xon` is the checkable row).
+Paired with x-lang v0.18.0 (`lang.xon` is the checkable row).
 
 ## Tests
 
