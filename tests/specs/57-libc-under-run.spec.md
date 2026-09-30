@@ -5,9 +5,9 @@ run calls the C library: a function the program does not define is the
 library's, found by name, and handed real addresses.  printf, fprintf,
 sprintf, snprintf, dprintf, scanf, fscanf and sscanf go through their v-
 forms with the arguments laid out as a va_list, and the answer is converted
-to the C type the function's header
-declares.  Each case runs the program under `run`; every expectation is
-what the same source prints through /usr/bin/cc.
+to the C type the function's header declares.  Each case runs the program
+under `run`; every expectation is what the same source prints through
+/usr/bin/cc.
 
 ## the library under run
 
