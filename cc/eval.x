@@ -1439,7 +1439,11 @@
                 (self (rest items)))))))
     (load! prog)
     (%cc-scan-program! prog)
-    (def saved (if (null? input) () (%cc-stdin-from! input)))
+    (def saved
+      (match
+        ((null? input) ())
+        ((eq? input (lit caller)) (do (%cc-stdin-reclaim!) ()))
+        (#t (%cc-stdin-from! input))))
     (def status
       (guard (e
                (if (null? %cc-exit-code)
@@ -1473,6 +1477,19 @@
     (def stdin (%cc-raw-ref (first (rest (%cc-libc-stream "stdin"))) 8))
     (%cc-libc-do "clearerr" stdin)
     (%cc-libc-do (if os-darwin? "fpurge" "__fpurge") stdin)))
+
+; The command line's caller's standard input as fd 0.  Under the command
+; line the boot stream holds fd 0 and the caller's stdin waits on fd 3, the
+; platform's arrangement (lib/x/repl/loop.x; x-os's launcher); it goes back
+; on 0 when 3 is open.  Through the C library, which has dup2 on every
+; platform this runs on.
+(def %cc-stdin-reclaim!
+  (fn (_)
+    (if (>= (%cc-libc-do "fcntl" 3 1) 0)               ; F_GETFD
+      (do (%cc-libc-do "dup2" 3 0)
+          (%cc-libc-do "close" 3)
+          (%cc-stdin-reset!))
+      ())))
 
 ; TEXT as fd 0 for the program's run, from a temporary file the library
 ; makes; answers the fd 0 it replaced, kept on another descriptor
@@ -1516,7 +1533,8 @@
         (list (length argv) table)))))
 
 ; SRC's program with INPUT as its standard input and ARGV its arguments,
-; the program's name first; with INPUT nil, standard input is fd 0
+; the program's name first; with INPUT nil, standard input is fd 0, and
+; with INPUT caller, the command line's caller's (%cc-stdin-reclaim!)
 (def cc-run-with (fn (_ src input argv) (%cc-run-core src input argv)))
 
 (def cc-run (fn (_ src) (%cc-run-core src () (list "a.out"))))
