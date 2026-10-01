@@ -15,7 +15,7 @@
 ; one level, self-reference guarded by the in-expansion name list.
 (module cc/lex)
 
-(import cc/prims byte-at byte-len convert integer->char length list->string
+(import cc/prims byte-at byte-len convert length
   map reverse string-append string-concat string=? substring)
 (import cc/pp cc-preprocess)
 (import x/num/float Float)
@@ -57,9 +57,6 @@
       (if (if (>= b 65) (<= b 90) #f) #t (= b 95)))))
 (def %cc-id-char?
   (fn (_ b) (if (%cc-id-start? b) #t (%cc-digit? b))))
-
-(def %cc-b->s
-  (fn (_ b) (list->string (list (integer->char b)))))
 
 ; an escape at i (past the backslash): (code . next-i) -- one of C's
 ; simple escapes, up to three octal digits, or x and hex digits; the code
@@ -180,19 +177,23 @@
       (decimal? (match (int? (lit int)) (long? (lit long)) (#t (lit ulong))))
       (#t (match (int? (lit int)) (uint? (lit uint)) (long? (lit long)) (#t (lit ulong)))))))
 
+; A string literal's bytes, from I to its closing quote: (TEXT . next-i).
+; TEXT holds each byte as it is -- the source's own, or an escape's code --
+; so a byte past 127 stays one byte rather than becoming the character with
+; that code, which a string would hold in two.
 (def %cc-lex-str
   (fn (_ src end i)
     (def go
       (fn (self j acc)
         (if (>= j end)
           (Err raise (lit cc) "cc: unterminated string literal" ())
-          (let ((b (byte-at src j)))
+          (let ((b (+ 0 (byte-at src j))))
             (if (= b 34)                                   ; "
-              (pair (list->string (reverse acc)) (+ j 1))
+              (pair (bytes->str (reverse acc)) (+ j 1))
               (if (= b 92)
                 (let ((e (%cc-escape src end (+ j 1))))
-                  (self (rest e) (pair (integer->char (first e)) acc)))
-                (self (+ j 1) (pair (integer->char b) acc))))))))
+                  (self (rest e) (pair (first e) acc)))
+                (self (+ j 1) (pair b acc))))))))
     (go i ())))
 
 ; the three-char, two-char, one-char operator ladders
