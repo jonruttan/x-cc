@@ -49,7 +49,7 @@ where both columns show, `run` and the compiled executable agree.
 ### to the 64-bit C types, through printf
 
 ```cc
-(display (cc-exe-run "#include <stdio.h>\nint main(void) { int n = -2; printf(\"%lu %ld %u\\n\", (unsigned long)n, (long)(unsigned)n, (unsigned)(char)-3); return 0; }"))
+(display (cc-exe-run "#include <stdio.h>\nint main(void) { int n = -2; printf(\"%lu %ld %u\\n\", (unsigned long)n, (long)(unsigned)n, (unsigned)(signed char)-3); return 0; }"))
 ```
 ---
 ```output
