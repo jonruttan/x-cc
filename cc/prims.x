@@ -86,6 +86,10 @@
 (def file-exists? (fn (_ path) (File exists? path)))
 ; up to N bytes from FD into BUF, a string; how many, 0 at the end
 (def file-read (fn (_ fd buf n) (File read fd buf n)))
+; PATH opened for reading: its fd, or below zero; FD moved to OFFSET; FD closed
+(def file-open-read (fn (_ path) (File open path (lit rdonly))))
+(def file-seek (fn (_ fd offset) (File seek fd offset)))
+(def file-close (fn (_ fd) (File close fd)))
 (def file-write
   (fn (_ fd s) (File write fd s (string-length s))))
 ; N bytes of a buffer to PATH, created or truncated, mode 0755
@@ -110,6 +114,7 @@
   vec-make vec-ref vec-set!
   mem-make mem-ptr ptr-int word-ref word-set! mem-set-byte! mem-ref-byte
   mem-ref-at mem-set-at!
-  file-read file-read-all file-exists? file-write file-write-exec!
+  file-close file-open-read file-read file-read-all file-seek file-exists? file-write
+  file-write-exec!
   sha256-hex-n sha256-jit! proc-capture
   sys-exit sys-getenv x-write)

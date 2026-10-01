@@ -24,6 +24,15 @@ Hi! ~0
 (140 140)
 ```
 
+### a character constant is the value its byte has as a plain char
+
+```cc
+(def src "int main(void) { char c = '\\xff'; return ('\\xe9' == (char)0xe9) + 2 * (c == '\\xff') + 4 * ('\\377' == (char)255); }\n")
+(display (list (cc-run src) (cc-exe-run src)))
+```
+---
+    (7 7)
+
 ### string literals side by side are one
 
 ```cc

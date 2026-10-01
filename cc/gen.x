@@ -10,7 +10,7 @@
 ; through the platform assembler, x/tool/asm, whose mnemonics encode for
 ; arm64 and x86-64 alike; the assembler encodes for the machine it runs on,
 ; so the executable is for the platform the compiler runs on: an arm64
-; Mach-O on macOS, an x86-64 ELF on Linux.
+; Mach-O on macOS, an x86-64 or arm64 ELF on Linux.
 ;
 ; Expressions evaluate on a stack machine.  Each leaves its value in x0; a
 ; binary operator evaluates its left operand and pushes it, evaluates the
@@ -51,12 +51,12 @@
   proc-capture reverse sha256-hex-n string-append string-concat string=?
   substring)
 (import cc/lex cc-lex)
-(import cc/parse cc-parse c-type-size c-type-align round-up struct-entry)
+(import cc/parse cc-parse c-type-size c-type-align plain-char round-up struct-entry)
 (import cc/eval common-c-type c-type-elem library-c-type
   library-double-label library-variadic promoted-c-type signed? unsigned-divide)
 (import cc/real convert-real real-arith real-negate)
 (import cc/macho macho-write! macho-data-at)
-(import cc/elf elf-write! elf-data-at elf-machine-x86-64)
+(import cc/elf elf-write! elf-data-at elf-machine-aarch64 elf-machine-x86-64)
 
 ; The type handles this file asks convert for, fetched by name through the
 ; platform's public door and private to this module.
@@ -73,7 +73,15 @@
     (match
       ((if os-darwin? arch-arm64? #f) (lit macho-arm64))
       ((if os-linux? arch-x86-64? #f) (lit elf-x86-64))
+      ((if os-linux? arch-arm64? #f) (lit elf-arm64))
       (#t (Err raise (lit cc) "cc: compile: no executable format for this platform yet" ())))))
+
+; whether TARGET's code is arm64's, a Mach-O's or an ELF's
+(def %cc-gen-arm64? (fn (_ target) (not (eq? target (lit elf-x86-64)))))
+
+; the e_machine of an ELF target
+(def %cc-gen-elf-machine
+  (fn (_ target) (if (eq? target (lit elf-arm64)) elf-machine-aarch64 elf-machine-x86-64)))
 
 ; --- the entry ---------------------------------------------------------------
 ; Calls main, then exits with what it answered.  The assembler has no
@@ -120,8 +128,9 @@
 ;
 ; main is handed argc in x0 and argv in x1, as any call's first two
 ; arguments: dyld calls a Mach-O's entry as it would main, with the two
-; already there, and the ELF's entry loads them from the stack the kernel
-; starts it on, argc on top and the pointers after it.
+; already there, and an ELF's entry loads them from the stack the kernel
+; starts it on, argc on top and the pointers after it.  arm64's ELF entry
+; is the Mach-O's after those two loads.
 ;
 ; x22 gets the address of the data, which the container puts on the page
 ; after the code.  DATAAT is how far that is from the entry's first byte,
@@ -129,7 +138,8 @@
 ; the two instructions that take the address know where they stand.
 (def %cc-gen-entry
   (fn (_ target dataat)
-    (if (eq? target (lit macho-arm64))
+    (if (%cc-gen-arm64? target)
+      ; for an ELF, ldr x0, [sp] (argc); add x1, sp, #8 (argv); then
       ; seventeen words: adr x21, the trampoline; adr x22, the data;
       ; mov x20, sp; sub sp, #4M; bl main (thirteen words on);
       ; ldr x16, [x22]; br x16 -- exit, with main's answer in x0; then the
@@ -137,16 +147,18 @@
       ; [x9]; ldp x2, x3, [x9, #16]; ldp x4, x5, [x9, #32]; ldp d0, d1,
       ; [x9, #48]; ldp d2, d3, [x9, #64]; blr x8; ldp x29, x30, [sp], #16;
       ; ret
-      (%cc-gen-cat
-        (map %cc-gen-le32
-          (list (%cc-gen-adr 21 28)
-                (%cc-gen-adr 22 (- dataat 4))
-                0x910003F4
-                (| 0xD14003FF (<< (/ %cc-gen-region 4096) 10))
-                0x9400000D
-                0xF94002D0 0xD61F0200
-                0xA9BF7BFD 0xAA0003E9 0xA9400520 0xA9410D22 0xA9421524
-                0x6D430520 0x6D440D22 0xD63F0100 0xA8C17BFD 0xD65F03C0)))
+      (let ((args (if (eq? target (lit elf-arm64)) (list 0xF94003E0 0x910023E1) ())))
+        (%cc-gen-cat
+          (map %cc-gen-le32
+            (append args
+              (list (%cc-gen-adr 21 28)
+                    (%cc-gen-adr 22 (- dataat (+ (* 4 (length args)) 4)))
+                    0x910003F4
+                    (| 0xD14003FF (<< (/ %cc-gen-region 4096) 10))
+                    0x9400000D
+                    0xF94002D0 0xD61F0200
+                    0xA9BF7BFD 0xAA0003E9 0xA9400520 0xA9410D22 0xA9421524
+                    0x6D430520 0x6D440D22 0xD63F0100 0xA8C17BFD 0xD65F03C0)))))
       ; a hundred and nineteen bytes: mov rax, [rsp] (argc); lea rsi,
       ; [rsp+8] (argv); lea r13, [rip+35] (the trampoline); lea r14,
       ; [rip+...] (the data); mov r12, rsp; sub rsp, 4M; call main
@@ -174,14 +186,26 @@
 
 ; how long the entry is; the container lays the code out from here
 (def %cc-gen-entry-len
-  (fn (_ target) (if (eq? target (lit macho-arm64)) 68 119)))
+  (fn (_ target)
+    (match
+      ((eq? target (lit macho-arm64)) 68)
+      ((eq? target (lit elf-arm64)) 76)
+      (#t 119))))
+
+; where the trampoline is, as a distance from the entry's start
+(def %cc-gen-tramp-at
+  (fn (_ target)
+    (match
+      ((eq? target (lit macho-arm64)) 28)
+      ((eq? target (lit elf-arm64)) 36)
+      (#t 51))))
 
 ; where the container puts the data, as a distance from the entry's start
 (def %cc-gen-data-at
   (fn (_ target codelen)
     (if (eq? target (lit macho-arm64))
       (macho-data-at codelen)
-      (elf-data-at codelen))))
+      (elf-data-at codelen (%cc-gen-elf-machine target)))))
 
 ; --- expressions -------------------------------------------------------------
 
@@ -706,18 +730,19 @@
 
 ; A function that calls into the C library has an area in its frame for the
 ; calls: six eight-byte integer arguments and four doubles, which the
-; trampoline loads where the C calling convention takes them; then
-; x86-64's va_list record, whose offsets say the argument registers are
-; used up; then a slot for each argument a variadic call passes past its
-; fixed ones, which the va_list points at -- directly on arm64 macOS,
-; through the record on x86-64.  The arguments are all evaluated before any
-; goes into the area, so a call among another's arguments does not disturb
-; it.
+; trampoline loads where the C calling convention takes them; then a
+; Linux va_list record, whose offsets say the argument registers are used
+; up; then a slot for each argument a variadic call passes past its fixed
+; ones, which the va_list points at -- directly on arm64 macOS, through
+; the record on Linux: x86-64's two offsets and then the slots, arm64's
+; slots, the two register areas' ends, and then two offsets.  The
+; arguments are all evaluated before any goes into the area, so a call
+; among another's arguments does not disturb it.
 (def %cc-gen-ca 0)          ; where the area starts
 (def %cc-gen-ca-doubles 48) ; the four doubles
-(def %cc-gen-ca-record 80)  ; x86-64's va_list record
-(def %cc-gen-ca-vars 104)   ; the variable arguments
-(def %cc-gen-sysv? #f)      ; whether the target takes x86-64's va_list
+(def %cc-gen-ca-record 80)  ; a Linux va_list record, 32 bytes at most
+(def %cc-gen-ca-vars 112)   ; the variable arguments
+(def %cc-gen-va-record ())  ; the target's record: (lit sysv), (lit aapcs) or nil
 
 ; The data a program carries, in the segment the container maps readable and
 ; writable on the page after the code: the globals first, each at the size
@@ -830,7 +855,7 @@
         (let ((f (%cc-gen-field (rest s) fname)))
           (pair (+ (first s) (first f)) (rest f)))))
     (match
-      ((eq? t (lit str)) (pair (%cc-gen-string! (first (rest node))) (lit char)))
+      ((eq? t (lit str)) (pair (%cc-gen-string! (first (rest node))) plain-char))
       ((eq? t (lit bin))
         (let ((op (first (rest node)))
               (a (first (rest (rest node))))
@@ -1465,7 +1490,7 @@
         ((eq? t (lit num)) (%cc-gen-num-c-type node))
         ((eq? t (lit szof)) (lit ulong))
         ((eq? t (lit str))
-          (list (lit array) (+ (byte-len (first (rest node))) 1) (lit char)))
+          (list (lit array) (+ (byte-len (first (rest node))) 1) plain-char))
         ((eq? t (lit idx))
           (let ((ka (self (first (rest node)))))
             (c-type-elem (if (%cc-gen-addr-c-type? ka) ka (self (first (rest (rest node))))))))
@@ -1862,14 +1887,23 @@
         (pop-into (- fixed 1) (if doubles? %cc-gen-ca-doubles 0))
         (if (null? v) ()
           (do (%cc-gen-address! x19 (+ %cc-gen-ca %cc-gen-ca-vars))
-              (if %cc-gen-sysv?
-                (do (%cc-gen! (lit str) x0 (at (+ %cc-gen-ca-record 8)))
-                    (%cc-gen! (lit mov) x0 (imm 48))
-                    (%cc-gen! (lit strw) x0 (at %cc-gen-ca-record))
-                    (%cc-gen! (lit mov) x0 (imm 304))
-                    (%cc-gen! (lit strw) x0 (at (+ %cc-gen-ca-record 4)))
-                    (%cc-gen-address! x19 (+ %cc-gen-ca %cc-gen-ca-record)))
-                ())
+              (match
+                ((eq? %cc-gen-va-record (lit sysv))
+                  (do (%cc-gen! (lit str) x0 (at (+ %cc-gen-ca-record 8)))
+                      (%cc-gen! (lit mov) x0 (imm 48))
+                      (%cc-gen! (lit strw) x0 (at %cc-gen-ca-record))
+                      (%cc-gen! (lit mov) x0 (imm 304))
+                      (%cc-gen! (lit strw) x0 (at (+ %cc-gen-ca-record 4)))
+                      (%cc-gen-address! x19 (+ %cc-gen-ca %cc-gen-ca-record))))
+                ; an offset of zero or more says its register area is used up
+                ((eq? %cc-gen-va-record (lit aapcs))
+                  (do (%cc-gen! (lit str) x0 (at %cc-gen-ca-record))
+                      (%cc-gen! (lit mov) x0 (imm 0))
+                      (%cc-gen! (lit str) x0 (at (+ %cc-gen-ca-record 8)))
+                      (%cc-gen! (lit str) x0 (at (+ %cc-gen-ca-record 16)))
+                      (%cc-gen! (lit str) x0 (at (+ %cc-gen-ca-record 24)))
+                      (%cc-gen-address! x19 (+ %cc-gen-ca %cc-gen-ca-record))))
+                (#t ()))
               (%cc-gen! (lit str) x0 (at (* 8 fixed)))))
         (asm-load-imm64! %cc-gen-asm x8
           (%cc-gen-import-slot (if (null? v) name (first v))))
@@ -1931,25 +1965,25 @@
 ; DATAAT are the gate's and the data's distance from the entry's start.
 (def %cc-gen-gate-bytes
   (fn (_ target gatepos dataat)
-    (if (eq? target (lit macho-arm64))
+    (if (%cc-gen-arm64? target)
       (%cc-gen-cat
         (map %cc-gen-le32
           (list 0xA9BF7BFD 0xA9BF53F3 0xA9BF5BF5
                 (%cc-gen-adr 22 (- dataat (+ gatepos 12)))
-                (%cc-gen-adr 21 (- 28 (+ gatepos 16)))
+                (%cc-gen-adr 21 (- (%cc-gen-tramp-at target) (+ gatepos 16)))
                 0xF94006D4 0xF94006C9 0xF81F0FE9 0xD63F0100 0xF84107E9 0xF90006C9
                 0xA8C15BF5 0xA8C153F3 0xA8C17BFD 0xD65F03C0)))
       (%cc-gen-cat
         (list (list 0x53 0x41 0x54 0x41 0x55 0x41 0x56)
               (list 0x4C 0x8D 0x35) (%cc-gen-le32 (- dataat (+ gatepos 14)))
-              (list 0x4C 0x8D 0x2D) (%cc-gen-le32 (- 51 (+ gatepos 21)))
+              (list 0x4C 0x8D 0x2D) (%cc-gen-le32 (- (%cc-gen-tramp-at target) (+ gatepos 21)))
               (list 0x4D 0x8B 0x66 0x08 0x41 0xFF 0x76 0x08 0x48 0x89 0xF8
                     0x48 0x89 0xD1 0x41 0xFF 0xD2 0x41 0x8F 0x46 0x08
                     0x41 0x5E 0x41 0x5D 0x41 0x5C 0x5B 0xC3))))))
 
 ; how long the gate is
 (def %cc-gen-gate-len
-  (fn (_ target) (if (eq? target (lit macho-arm64)) 60 50)))
+  (fn (_ target) (if (%cc-gen-arm64? target) 60 50)))
 
 ; Where each argument of a call goes, by the C types of the callee's
 ; parameters: (reg . R) for one of the first four that is not a struct,
@@ -2725,9 +2759,13 @@
     (def a (asm-new 262144))
     (set! %cc-gen-asm a)
     (set! %cc-gen-nlabels 0)
-    (set! %cc-gen-link (if (eq? target (lit macho-arm64)) %cc-gen-lr ()))
-    (set! %cc-gen-callop (if (eq? target (lit macho-arm64)) (lit bl) (lit call)))
-    (set! %cc-gen-sysv? (eq? target (lit elf-x86-64)))
+    (set! %cc-gen-link (if (%cc-gen-arm64? target) %cc-gen-lr ()))
+    (set! %cc-gen-callop (if (%cc-gen-arm64? target) (lit bl) (lit call)))
+    (set! %cc-gen-va-record
+      (match
+        ((eq? target (lit elf-x86-64)) (lit sysv))
+        ((eq? target (lit elf-arm64)) (lit aapcs))
+        (#t ())))
     ; every function gets its label before any code, so a call can name one
     ; that has not been compiled yet
     (set! %cc-gen-funs ())
@@ -2777,7 +2815,7 @@
     (def imports (map (fn (_ i) (pair (rest i) (first i))) (reverse %cc-gen-imports)))
     (if (eq? target (lit macho-arm64))
       (macho-write! path (first image) (rest image) imports)
-      (elf-write! path (first image) (rest image) elf-machine-x86-64 imports))))
+      (elf-write! path (first image) (rest image) (%cc-gen-elf-machine target) imports))))
 
 ; compile SRC and run the executable with INPUT as its standard input and
 ; the rest of ARGV after its name, which is its path; print what it wrote,

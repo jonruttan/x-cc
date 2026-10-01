@@ -9,14 +9,19 @@ generator on the platform assembler, and Mach-O and ELF writers, so
     x -l cc -- build prog.c -o prog
 
 writes an executable that the operating system runs directly: an arm64
-Mach-O on macOS, an x86-64 ELF on Linux, for the platform the compiler
-runs on.  No external assembler, linker or `codesign` is involved: the
-instructions are encoded by x/tool/asm, the container is laid out, and
-the Mach-O's ad-hoc code signature is hashed in x.
+Mach-O on macOS, an x86-64 or arm64 ELF on Linux, for the platform the
+compiler runs on.  No external assembler, linker or `codesign` is
+involved: the instructions are encoded by x/tool/asm, the container is
+laid out, and the Mach-O's ad-hoc code signature is hashed in x.
 
-Both are dynamic executables that the system's C library is loaded into:
-the Mach-O names dyld and libSystem, and the ELF names ld-linux and
-libc.so.6.  The code generator
+They are dynamic executables that the system's C library is loaded into:
+the Mach-O names dyld and libSystem, and the ELF names the loader that
+started x itself -- glibc's ld-linux or musl's, read from x's own
+executable -- and libc.so.6, which musl answers to as well.  On arm64
+the ELF's data is mapped 64 KB past its code, so a kernel with 4, 16 or
+64 KB pages loads it.  Plain `char` is signed on macOS and x86-64 and
+unsigned on arm64 Linux, as each platform's C ABI has it, under `run`
+and compiled alike.  The code generator
 evaluates expressions on a stack machine, and keeps every value in a
 whole register in its C type's form -- an `int` sign-extended from bit
 31, an `unsigned int` zero-extended, a `long` or an `unsigned long` as

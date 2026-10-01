@@ -103,10 +103,14 @@
             (#t (eq? k (lit extern)))))
         #f))))
 
+; Plain `char`'s C type, which each platform's C ABI picks: signed on macOS
+; and on x86-64, unsigned on arm64 Linux.
+(def plain-char (if (if os-linux? arch-arm64? #f) (lit uchar) (lit char)))
+
 ; The scalar the specifiers name.  `unsigned`/`signed` pick the signedness and
 ; the width keyword picks the width; `long long` is `long`, and specifiers
-; that say nothing about either (const, static, extern) are swallowed.  Plain
-; `char` is signed, as it is on the platforms this compiles for.
+; that say nothing about either (const, static, extern) are swallowed.  A
+; `char` that says neither `signed` nor `unsigned` is plain-char.
 (def %cc-p-scalar-of
   (fn (_ toks)
     (def go
@@ -129,15 +133,18 @@
                   (%cc-p-err "not built yet: long double")
                   (self (rest ts) (lit double) unsigned?)))
               (#t (self (rest ts) width unsigned?)))))))
-    (def got (go toks () #f))
+    ; the signedness: #t unsigned, #f signed, plain when neither is said
+    (def got (go toks () (lit plain)))
     (def width (first (first got)))
-    (def unsigned? (rest (first got)))
+    (def sign (rest (first got)))
+    (def unsigned? (eq? sign #t))
     (pair
       (match
         ((eq? width (lit void)) (lit void))
         ((eq? width (lit double)) (lit double))
         ((eq? width (lit float)) (lit float))
-        ((eq? width (lit char)) (if unsigned? (lit uchar) (lit char)))
+        ((eq? width (lit char))
+          (match ((eq? sign #t) (lit uchar)) ((eq? sign #f) (lit char)) (#t plain-char)))
         ((eq? width (lit short)) (if unsigned? (lit ushort) (lit short)))
         ((eq? width (lit long)) (if unsigned? (lit ulong) (lit long)))
         (#t (if unsigned? (lit uint) (lit int))))
@@ -1095,5 +1102,5 @@
                           acc)))))))))))))
     (go toks ())))
 
-(provide cc/parse cc-parse c-type-size c-type-align round-up struct-entry
+(provide cc/parse cc-parse c-type-size c-type-align plain-char round-up struct-entry
   struct-table)
