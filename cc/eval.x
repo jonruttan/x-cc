@@ -26,7 +26,7 @@
   map mem-make mem-ptr mem-ref-at mem-set-at! ptr-int reverse string-append
   string-concat string=? substring word-set! x-write)
 (import cc/lex cc-lex)
-(import cc/parse cc-parse c-type-size round-up struct-entry struct-table)
+(import cc/parse cc-parse c-type-size plain-char round-up struct-entry struct-table)
 (import cc/real convert-real real-arith real-compare real-negate real-step real-stub
   real-zero? real?)
 
@@ -101,7 +101,7 @@
         (each (list (lit ptr) (lit void))
           (list "malloc" "calloc" "realloc" "memcpy" "memmove" "memset" "memchr"
                 "bsearch" "fopen" "fdopen" "freopen" "tmpfile" "popen"))
-        (each (list (lit ptr) (lit char))
+        (each (list (lit ptr) plain-char)
           (list "strcpy" "strncpy" "strcat" "strncat" "strchr" "strrchr" "strstr"
                 "strpbrk" "strtok" "strdup" "strndup" "strerror" "getenv" "fgets"
                 "gets" "setlocale" "ctime" "asctime" "realpath" "basename"
@@ -610,7 +610,7 @@
         (let ((e (%cc-find (first (rest node)) env)))
           (if (null? e) (%cc-function-c-type (first (rest node))) (rest (rest e)))))
       ((eq? t (lit num)) (if (null? (rest (rest node))) (lit int) (first (rest (rest node)))))
-      ((eq? t (lit str)) (list (lit array) (+ (byte-len (first (rest node))) 1) (lit char)))
+      ((eq? t (lit str)) (list (lit array) (+ (byte-len (first (rest node))) 1) plain-char))
       ((eq? t (lit dot))
         (let ((f (%cc-field (%cc-struct-name (self (first (rest node)) env)
                               (first (rest (rest node))))

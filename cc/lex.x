@@ -20,6 +20,7 @@
 (import cc/pp cc-preprocess)
 (import x/num/float Float)
 (import cc/real single)
+(import cc/parse plain-char)
 
 ; The type handle this file asks convert for, fetched by name through the
 ; platform's public door and private to this module.
@@ -395,8 +396,13 @@
                            (pair (+ 0 (byte-at src (+ i 1))) (+ i 2)))))
                   (if (not (= (byte-at src (rest e)) 39))
                     (Err raise (lit cc) "cc: bad character constant" ())
+                    ; an int, of the value the byte has as a plain char
                     (self src end (+ (rest e) 1) macros expanding
-                      (pair (list (lit num) (first e)) acc))))
+                      (pair (list (lit num)
+                              (if (if (eq? plain-char (lit char)) (>= (first e) 128) #f)
+                                (- (first e) 256)
+                                (first e)))
+                        acc))))
                 (if (%cc-id-start? b)
                   (let ((idr (let ((go (fn (self2 j)
                                          (if (>= j end) j
