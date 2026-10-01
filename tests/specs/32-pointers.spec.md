@@ -25,7 +25,7 @@ through /usr/bin/cc, and exits as it does.
 ### a pointer loads at the width and sign of what it points at
 
 ```cc
-(display (cc-exe-run "int main(void) { char c = -1; char *p = &c; unsigned char *u = (unsigned char *)&c; return (*p == -1) + (*u == 255) * 2; }"))
+(display (cc-exe-run "int main(void) { signed char c = -1; signed char *p = &c; unsigned char *u = (unsigned char *)&c; return (*p == -1) + (*u == 255) * 2; }"))
 ```
 ---
     3

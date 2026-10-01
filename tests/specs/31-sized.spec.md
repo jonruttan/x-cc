@@ -37,7 +37,7 @@ source prints through /usr/bin/cc, and exits as it does.
 ### an assignment answers the value it stored
 
 ```cc
-(display (cc-exe-run "int main(void) { char c; int n = (c = 200); return n == -56; }"))
+(display (cc-exe-run "int main(void) { signed char c; int n = (c = 200); return n == -56; }"))
 ```
 ---
     1
@@ -59,8 +59,8 @@ source prints through /usr/bin/cc, and exits as it does.
 
 ```cc
 (display (list
-  (cc-exe-run "char half(char c) { return c / 2; }\nint main(void) { return half(-100) + 100; }")
-  (cc-exe-run "char wrap(int v) { return v; }\nint main(void) { return wrap(300); }")))
+  (cc-exe-run "signed char half(signed char c) { return c / 2; }\nint main(void) { return half(-100) + 100; }")
+  (cc-exe-run "signed char wrap(int v) { return v; }\nint main(void) { return wrap(300); }")))
 ```
 ---
     (50 44)

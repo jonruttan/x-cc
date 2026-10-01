@@ -50,7 +50,7 @@ its C type.  Each case below prints what the same source prints through
 ### a char's value promotes, and a long's labels are longs
 
 ```cc
-(def src "int main(void) { char c = -1; long big = 4294967296L; int r = 0; switch (c) { case -1: r = 1; break; case 255: r = 2; break; } switch (big) { case 4294967296L: r += 10; break; case 0: r += 20; } return r; }")
+(def src "int main(void) { signed char c = -1; long big = 4294967296L; int r = 0; switch (c) { case -1: r = 1; break; case 255: r = 2; break; } switch (big) { case 4294967296L: r += 10; break; case 0: r += 20; } return r; }")
 (display (list (cc-run src) (cc-exe-run src)))
 ```
 ---
