@@ -33,6 +33,21 @@ Hi! ~0
 ---
     (7 7)
 
+### a string literal holds each byte as it is: escapes past 127, and UTF-8 text
+
+```cc
+(def src "#include <stdio.h>\n#include <string.h>\nint main(void) {\n  char *s = \"\\xff\\377\\x80h\\xc3\\xa9\";\n  const char *u = \"é\";\n  unsigned char *p = (unsigned char *)s;\n  printf(\"%d %d %d %d\\n\", (int)strlen(s), (int)strlen(u), p[0], p[2]);\n  printf(\"%d %d %d\\n\", (int)sizeof \"\\xff\", (unsigned char)u[1], strcmp(s + 4, u));\n  return (unsigned char)s[1];\n}\n")
+(display (list (cc-run src) (cc-exe-run src)))
+```
+---
+```output
+6 2 255 128
+2 169 0
+6 2 255 128
+2 169 0
+(255 255)
+```
+
 ### string literals side by side are one
 
 ```cc

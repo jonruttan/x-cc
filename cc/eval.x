@@ -22,7 +22,7 @@
 ; library, found by name (%cc-libc-call).
 (module cc/eval)
 
-(import cc/prims append byte-at byte-len integer->char length list->string
+(import cc/prims append byte-at byte-len length
   map mem-make mem-ptr mem-ref-at mem-set-at! ptr-int reverse string-append
   string-concat string=? substring word-set! x-write)
 (import cc/lex cc-lex)
@@ -352,16 +352,6 @@
           (do (%cc-raw-set! (+ addr i) (+ 0 (byte-at text i)) 1)
               (self (+ i 1))))))
     (go 0)))
-
-; a C string out of memory (bytes to the NUL)
-(def %cc-cstr
-  (fn (_ addr)
-    (def go
-      (fn (self a acc)
-        (let ((b (%cc-raw-ref a 1)))
-          (if (= b 0) (list->string (reverse acc))
-            (self (+ a 1) (pair (integer->char b) acc))))))
-    (go addr ())))
 
 ; division and remainder, with the evaluator's own report for a zero divisor
 (def %cc-div
