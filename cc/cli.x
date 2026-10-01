@@ -60,7 +60,7 @@
                   (guard (e (do (display "cc: build failed: ") (x-write e)
                                 (newline) 1))
                     (do (cc-compile (file-read-all path) out) 0)))
-                (cc-run-with (file-read-all path) () (pair path (rest (rest argv))))))
+                (cc-run-with (file-read-all path) (lit caller) (pair path (rest (rest argv))))))
             (do (file-write 2
                   (string-append "cc: no such file: "
                     (string-append path "\n")))
