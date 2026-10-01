@@ -98,13 +98,13 @@ where both columns show, `run` and the compiled executable agree.
 ---
     15
 
-## the refusals
+## pointers to functions
 
-### a cast to a pointer to a function
+### a function's name cast to a pointer to one, then called through it
 
 ```cc
 (def src "int f(void) { return 1; }\nint main(void) { int (*g)(void) = (int (*)(void))f; return g(); }")
-(write (list (guard (e (e msg)) (cc-run src)) (guard (e (e msg)) (cc-exe-run src))))
+(write (list (cc-run src) (cc-exe-run src)))
 ```
 ---
-    ("cc: parse: not built yet: a cast to a pointer to a function" "cc: parse: not built yet: a cast to a pointer to a function")
+    (1 1)
