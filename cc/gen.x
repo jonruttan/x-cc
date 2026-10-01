@@ -1486,6 +1486,8 @@
         ; a function's name is a pointer to it
         ((if (eq? t (lit var)) (%cc-gen-function-name? (first (rest node))) #f)
           (list (lit fnptr) (%cc-gen-ret-find (first (rest node)))))
+        ((if (eq? t (lit var)) (%cc-gen-stream? (first (rest node))) #f)
+          (list (lit ptr) (lit void)))
         ((eq? t (lit var)) (%cc-gen-place-c-type (%cc-gen-place-of (first (rest node)))))
         ((eq? t (lit num)) (%cc-gen-num-c-type node))
         ((eq? t (lit szof)) (lit ulong))
@@ -1539,6 +1541,26 @@
 (def %cc-gen-variable?
   (fn (_ name)
     (if (null? (%cc-gen-find name)) (not (null? (%cc-gen-global-find name))) #t)))
+
+; stdin, stdout and stderr, when the program has no name of its own like
+; them: the C library's variables, each holding its FILE pointer --
+; __stdinp and the like on macOS
+(def %cc-gen-stream?
+  (fn (_ name)
+    (if (if (string=? name "stdin") #t (if (string=? name "stdout") #t (string=? name "stderr")))
+      (not (%cc-gen-variable? name))
+      #f)))
+
+; the stream NAME's FILE pointer into x0: its variable's address from the
+; import slot the loader fills, then what the variable holds
+(def %cc-gen-stream-load!
+  (fn (_ name)
+    (def sym (if os-darwin? (string-append "__" (string-append name "p")) name))
+    (if (not (%cc-gen-libc-has? sym)) (%cc-gen-no (string-append "the name " name)))
+    (do (asm-load-imm64! %cc-gen-asm x0 (%cc-gen-import-slot sym))
+        (%cc-gen! (lit add) x0 x0 x22)
+        (%cc-gen! (lit ldr) x0 (mem x0 0))
+        (%cc-gen! (lit ldr) x0 (mem x0 0)))))
 
 ; The C type a binary operator answers: + and - keep an address one and make
 ; two of them a count (a long, as ptrdiff_t is); a shift answers its left
@@ -1691,6 +1713,8 @@
                           (%cc-gen-flag! (%cc-gen-branch op))))
                     (addr? (%cc-gen-addr-bin! op ka kb))
                     (#t (%cc-gen-bin! op k)))))))
+        ((if (eq? t (lit var)) (%cc-gen-stream? (first (rest node))) #f)
+          (%cc-gen-stream-load! (first (rest node))))
         ((eq? t (lit var))
           (let ((at (%cc-gen-place-of (first (rest node)))))
             (if (%cc-gen-aggregate? (%cc-gen-place-c-type at))
