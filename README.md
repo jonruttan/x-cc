@@ -180,14 +180,22 @@ the field's name when exactly one struct has it.
 
 `switch` runs its matched clause and every clause after it as one
 block -- fallthrough -- until a `break`; `return` and `continue` pass
-through to the function or the enclosing loop.  Function-like macros
-collect their arguments as text across balanced parentheses,
-substitute at identifier boundaries, and rescan with the macro open;
-no parentheses are added, as in C.
+through to the function or the enclosing loop.
 
-`#ifdef`/`#ifndef`/`#elif`/`#else`/`#endif`/`#undef` and the `#if`
-forms a build header needs (`0`, `1`, `defined`) select lines; an
-inactive region still tracks its nesting.  Initializer lists lay
+The source is read into tokens once, by a Lexer (x-lang's
+x/reader/lexer) whose states are compiled to native code; a character
+no C token begins with refuses by name.  The preprocessor works on those
+tokens a line at a time.  Function-like macros collect their arguments
+as tokens across balanced parentheses, substitute them for the
+parameters, and rescan with the macro open; no parentheses are added,
+as in C.  The lines between two directives expand under the macros
+defined so far, so a call may run over lines.
+
+`#if`/`#ifdef`/`#ifndef`/`#elif`/`#else`/`#endif`/`#undef` select
+lines; an inactive region still tracks its nesting.  An `#if` or
+`#elif` condition is C's: `defined NAME` and `defined (NAME)` are 1 or
+0, then the macros expand, a name left over is 0, and what is left is
+a constant expression, folded as an enumerator's is.  Initializer lists lay
 values into memory by C type -- `int a[] = {…}` sized by the list,
 `struct P p = {…}`, nested lists for arrays of structs, missing
 trailing items zero, `char s[] = "…"` from the string's bytes.
@@ -223,7 +231,7 @@ A cast or `sizeof` takes a pointer to a function as a declaration does:
 
 Refused loudly, a recorded pending: `long double`.
 
-Paired with x-lang v0.20.0 (`lang.xon` is the checkable row).
+Paired with x-lang v0.21.0 (`lang.xon` is the checkable row).
 
 ## Tests
 
@@ -234,8 +242,8 @@ Paired with x-lang v0.20.0 (`lang.xon` is the checkable row).
 
     lang.xon          what this bundle IS (self-contained)
     run.x             the entry: operands mean "be cc"
-    cc/pp.x           comments out, #include dropped, #define collected
-    cc/lex.x          C tokens, macros spliced token-wise
+    cc/tokens.x       C text to tokens: a Lexer (x/reader/lexer), compiled
+    cc/pp.x           directives, macros and #if, on tokens; cc-lex
     cc/parse.x        the fifteen-level ladder, declarations, statements
     cc/eval.x         the machine: memory, frames, calls, builtins
     cc/real.x         float and double: conversions and operations

@@ -278,25 +278,47 @@
                 (if (string=? (first (first es)) name) (rest (first es)) (self (rest es))))))
     (go %cc-p-enums)))
 
-; an enumerator's value: a constant expression over numbers (enum
-; names already folded to numbers by the primary level)
+; a constant expression's value, over numbers (enum names already folded
+; to numbers by the primary level), as an enumerator and #if take one: a
+; comparison, `!`, `&&` and `||` are 1 or 0, and `&&`, `||` and `?:` leave
+; the side they do not take unevaluated, so 0 && 1 / 0 is 0
 (def %cc-p-const
   (fn (self node)
+    (def no (fn (_) (%cc-p-err "expected a constant expression")))
+    (def b01 (fn (_ x) (if x 1 0)))
+    (def arg (fn (_ i) (first (%cc-p-const-drop i node))))
     (let ((t (first node)))
       (match
         ((eq? t (lit num)) (first (rest node)))
         ((eq? t (lit un))
-          (let ((v (self (first (rest (rest node))))))
+          (let ((v (self (arg 2))))
             (def op (first (rest node)))
             (match
               ((string=? op "-") (- 0 v))
-              ((string=? op "!") (if (= v 0) 1 0))
+              ((string=? op "!") (b01 (= v 0)))
               ((string=? op "~") (- (- 0 v) 1))
-              (#t (%cc-p-err "an enumerator needs a constant expression")))))
+              (#t (no)))))
+        ((eq? t (lit and)) (b01 (if (= (self (arg 1)) 0) #f (not (= (self (arg 2)) 0)))))
+        ((eq? t (lit or)) (b01 (if (= (self (arg 1)) 0) (not (= (self (arg 2)) 0)) #t)))
+        ((eq? t (lit ternary)) (if (= (self (arg 1)) 0) (self (arg 3)) (self (arg 2))))
+        ((eq? t (lit cmp))
+          (let ((op (first (rest node))))
+            (def a (self (arg 2)))
+            (def b (self (arg 3)))
+            (b01
+              (match
+                ((string=? op "<")  (< a b))
+                ((string=? op ">")  (> a b))
+                ((string=? op "<=") (<= a b))
+                ((string=? op ">=") (>= a b))
+                ((string=? op "==") (= a b))
+                (#t (not (= a b)))))))
         ((eq? t (lit bin))
           (let ((op (first (rest node))))
-            (def a (self (first (rest (rest node)))))
-            (def b (self (first (rest (rest (rest node))))))
+            (def a (self (arg 2)))
+            (def b (self (arg 3)))
+            (if (if (= b 0) (if (string=? op "/") #t (string=? op "%")) #f)
+              (%cc-p-err "division by zero in a constant expression"))
             (match
               ((string=? op "+")  (+ a b))
               ((string=? op "-")  (- a b))
@@ -308,8 +330,12 @@
               ((string=? op "&")  (& a b))
               ((string=? op "|")  (| a b))
               ((string=? op "^")  (^ a b))
-              (#t (%cc-p-err "an enumerator needs a constant expression")))))
-        (#t (%cc-p-err "an enumerator needs a constant expression"))))))
+              (#t (no)))))
+        (#t (no))))))
+
+; what follows the first N of a list
+(def %cc-p-const-drop
+  (fn (self n xs) (if (<= n 0) xs (self (- n 1) (rest xs)))))
 
 ; { NAME [= const] (, NAME [= const])* [,] }: each registers, counting
 ; up from the last; answers the rest
@@ -1185,5 +1211,13 @@
                           acc)))))))))))))
     (go toks ())))
 
-(provide cc/parse cc-parse c-type-size c-type-align plain-char round-up struct-entry
-  struct-table)
+; the value of TOKS, the whole of them a constant expression, as #if
+; takes one
+(def cc-parse-const
+  (fn (_ toks)
+    (def r (%cc-e-tern toks))
+    (if (not (null? (rest r))) (%cc-p-err "expected a constant expression"))
+    (%cc-p-const (first r))))
+
+(provide cc/parse cc-parse cc-parse-const c-type-size c-type-align plain-char round-up
+  struct-entry struct-table)
