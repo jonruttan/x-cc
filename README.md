@@ -112,9 +112,16 @@ rounded to a single, which is the single-precision answer, and one
 handed to a function past its declared parameters goes as a double.
 `stdin`, `stdout` and `stderr` are the C library's own variables, read
 through the slot the loader fills, and `FILE` from `<stdio.h>` is `void`.
+A variadic function of the program's own, `int f(int n, ...)`, takes the
+arguments past its fixed ones the same way: its caller lays them out as
+the va_list a v- function takes, and hands it over as a last, hidden
+argument, which `va_start` copies.  `va_arg` reads the next eight-byte
+slot as the C type it names, `va_copy` copies, and a `va_list` goes on
+to the library's v- functions or to the program's own.
 Anything else refuses by name: `long double`, a call into the C library
-with more than six arguments, and a global initialized by something
-other than a constant or an address.
+with more than six arguments, a global initialized by something other
+than a constant or an address, a struct through `va_arg`, and the
+address of a variadic function.
 
     x -l cc -- run prog.c
 

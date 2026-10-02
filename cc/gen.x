@@ -726,6 +726,18 @@
                 (if (string=? (first (first es)) name) (rest (first es))
                   (self (rest es))))))
     (go %cc-gen-params)))
+
+(def %cc-gen-variadics ())  ; ((name . fixed) ...), the variadic ones
+
+; how many fixed parameters NAME, a variadic function, takes before its
+; "...", else nil
+(def %cc-gen-fixed-find
+  (fn (_ name)
+    (def go (fn (self es)
+              (if (null? es) ()
+                (if (string=? (first (first es)) name) (rest (first es))
+                  (self (rest es))))))
+    (go %cc-gen-variadics)))
 (def %cc-gen-epilogue ())   ; where `return` goes in the function being compiled
 
 ; A function that calls into the C library has an area in its frame for the
@@ -1488,6 +1500,7 @@
           (list (lit fnptr) (%cc-gen-ret-find (first (rest node)))))
         ((if (eq? t (lit var)) (%cc-gen-stream? (first (rest node))) #f)
           (list (lit ptr) (lit void)))
+        ((eq? t (lit va-here)) (list (lit ptr) (lit char)))
         ((eq? t (lit var)) (%cc-gen-place-c-type (%cc-gen-place-of (first (rest node)))))
         ((eq? t (lit num)) (%cc-gen-num-c-type node))
         ((eq? t (lit szof)) (lit ulong))
@@ -1715,6 +1728,8 @@
                     (#t (%cc-gen-bin! op k)))))))
         ((if (eq? t (lit var)) (%cc-gen-stream? (first (rest node))) #f)
           (%cc-gen-stream-load! (first (rest node))))
+        ; the va_list a call to the program's own variadic function hands it
+        ((eq? t (lit va-here)) (%cc-gen-va-address!))
         ((eq? t (lit var))
           (let ((at (%cc-gen-place-of (first (rest node)))))
             (if (%cc-gen-aggregate? (%cc-gen-place-c-type at))
@@ -1863,6 +1878,36 @@
                 (#t (self (rest es))))))
     (go library-variadic)))
 
+; the call area's va_list, into x0: its slots on arm64 macOS, its record
+; on Linux
+(def %cc-gen-va-address!
+  (fn (_)
+    (%cc-gen-address! x19
+      (+ %cc-gen-ca (if (null? %cc-gen-va-record) %cc-gen-ca-vars %cc-gen-ca-record)))))
+
+; The call area's Linux va_list record, written to point at the slots the
+; variable arguments are in; then the va_list into x0
+(def %cc-gen-va-record!
+  (fn (_)
+    (def at (fn (_ off) (mem x19 (+ %cc-gen-ca off))))
+    (do (%cc-gen-address! x19 (+ %cc-gen-ca %cc-gen-ca-vars))
+        (match
+          ((eq? %cc-gen-va-record (lit sysv))
+            (do (%cc-gen! (lit str) x0 (at (+ %cc-gen-ca-record 8)))
+                (%cc-gen! (lit mov) x0 (imm 48))
+                (%cc-gen! (lit strw) x0 (at %cc-gen-ca-record))
+                (%cc-gen! (lit mov) x0 (imm 304))
+                (%cc-gen! (lit strw) x0 (at (+ %cc-gen-ca-record 4)))))
+          ; an offset of zero or more says its register area is used up
+          ((eq? %cc-gen-va-record (lit aapcs))
+            (do (%cc-gen! (lit str) x0 (at %cc-gen-ca-record))
+                (%cc-gen! (lit mov) x0 (imm 0))
+                (%cc-gen! (lit str) x0 (at (+ %cc-gen-ca-record 8)))
+                (%cc-gen! (lit str) x0 (at (+ %cc-gen-ca-record 16)))
+                (%cc-gen! (lit str) x0 (at (+ %cc-gen-ca-record 24)))))
+          (#t ()))
+        (%cc-gen-va-address!))))
+
 ; A call into the C library, to a function the program does not define.
 ; The arguments are evaluated in order and pushed, then popped into the
 ; frame's call area, six at most; a variadic function is called through
@@ -1910,24 +1955,7 @@
         (pop-into (- nvar 1) %cc-gen-ca-vars)
         (pop-into (- fixed 1) (if doubles? %cc-gen-ca-doubles 0))
         (if (null? v) ()
-          (do (%cc-gen-address! x19 (+ %cc-gen-ca %cc-gen-ca-vars))
-              (match
-                ((eq? %cc-gen-va-record (lit sysv))
-                  (do (%cc-gen! (lit str) x0 (at (+ %cc-gen-ca-record 8)))
-                      (%cc-gen! (lit mov) x0 (imm 48))
-                      (%cc-gen! (lit strw) x0 (at %cc-gen-ca-record))
-                      (%cc-gen! (lit mov) x0 (imm 304))
-                      (%cc-gen! (lit strw) x0 (at (+ %cc-gen-ca-record 4)))
-                      (%cc-gen-address! x19 (+ %cc-gen-ca %cc-gen-ca-record))))
-                ; an offset of zero or more says its register area is used up
-                ((eq? %cc-gen-va-record (lit aapcs))
-                  (do (%cc-gen! (lit str) x0 (at %cc-gen-ca-record))
-                      (%cc-gen! (lit mov) x0 (imm 0))
-                      (%cc-gen! (lit str) x0 (at (+ %cc-gen-ca-record 8)))
-                      (%cc-gen! (lit str) x0 (at (+ %cc-gen-ca-record 16)))
-                      (%cc-gen! (lit str) x0 (at (+ %cc-gen-ca-record 24)))
-                      (%cc-gen-address! x19 (+ %cc-gen-ca %cc-gen-ca-record))))
-                (#t ()))
+          (do (%cc-gen-va-record!)
               (%cc-gen! (lit str) x0 (at (* 8 fixed)))))
         (asm-load-imm64! %cc-gen-asm x8
           (%cc-gen-import-slot (if (null? v) name (first v))))
@@ -2063,6 +2091,8 @@
 (def %cc-gen-function-address!
   (fn (_ name)
     (def params (%cc-gen-params-find name))
+    (if (not (null? (%cc-gen-fixed-find name)))
+      (%cc-gen-no (string-append "the address of " name ", which is variadic")))
     (if (if (> (length params) 3) #t
           (if (%cc-gen-struct? (%cc-gen-ret-find name)) #t
             (not (null? (filter %cc-gen-struct? params)))))
@@ -2104,9 +2134,40 @@
 (def %cc-gen-call-fun!
   (fn (_ node)
     (def name (first (rest node)))
-    (def args (first (rest (rest node))))
+    (def given (first (rest (rest node))))
     (def to (%cc-gen-fun-label name))
     (def params (%cc-gen-params-find name))
+    ; a variadic function's arguments past its fixed ones go in the call
+    ; area's slots, and its "..." takes the area's va_list
+    (def fixed (%cc-gen-fixed-find name))
+    (if (if (null? fixed) #f (< (length given) fixed))
+      (%cc-gen-no (string-append name " with too few arguments")))
+    (def extras (if (null? fixed) () (%cc-gen-drop fixed given)))
+    (def args
+      (if (null? fixed) given
+        (append (%cc-gen-take fixed given) (list (list (lit va-here))))))
+    ; the extras are evaluated once the other arguments are, so a call
+    ; among those does not disturb the area; a float goes as a double
+    (def fill-extras
+      (fn (_)
+        (def push-all
+          (fn (self as)
+            (if (null? as) ()
+              (do (%cc-gen-expr! (first as))
+                  (let ((k (%cc-gen-c-type-of (first as))))
+                    (if (%cc-gen-struct? k) (%cc-gen-no "a struct handed to a variadic function"))
+                    (if (eq? k (lit float)) (%cc-gen-convert! (lit double) k) ()))
+                  (asm-push! %cc-gen-asm x0)
+                  (self (rest as))))))
+        (def pop-into
+          (fn (self k)
+            (if (< k 0) ()
+              (do (asm-pop! %cc-gen-asm x0)
+                  (%cc-gen! (lit str) x0 (mem x19 (+ %cc-gen-ca (+ %cc-gen-ca-vars (* 8 k)))))
+                  (self (- k 1))))))
+        (do (push-all extras)
+            (pop-into (- (length extras) 1))
+            (%cc-gen-va-record!))))
     (def sret? (%cc-gen-struct? (%cc-gen-ret-find name)))
     ; (ARG C-TYPE . HOME) per argument; past the parameters, an argument's
     ; own C type says where it goes
@@ -2157,6 +2218,7 @@
               (self (rest ts))))))
     (do (push-each regs)
         (push-each above)
+        (if (null? fixed) () (fill-extras))
         (store-each (reverse above))
         (if sret?
           (do (%cc-gen-address! x19 (%cc-gen-rslot-of node))
@@ -2170,6 +2232,11 @@
 (def %cc-gen-take
   (fn (self n xs)
     (if (<= n 0) () (if (null? xs) () (pair (first xs) (self (- n 1) (rest xs)))))))
+
+; what follows the first N of a list
+(def %cc-gen-drop
+  (fn (self n xs)
+    (if (<= n 0) xs (if (null? xs) () (self (- n 1) (rest xs))))))
 
 (def %cc-gen-fun-find
   (fn (_ name)
@@ -2196,12 +2263,17 @@
     (def most
       (fn (self node)
         (if (not (pair? node)) -1
-          (let ((here (if (if (eq? (first node) (lit call))
-                                (null? (%cc-gen-fun-find (first (rest node))))
-                                #f)
-                        (let ((v (%cc-gen-variadic (first (rest node))))
+          (let ((here (if (eq? (first node) (lit call))
+                        (let ((name (first (rest node)))
                               (n (length (first (rest (rest node))))))
-                          (if (null? v) 0 (- n (first (rest v)))))
+                          (match
+                            ; the program's own variadic function's extras
+                            ((not (null? (%cc-gen-fun-find name)))
+                              (let ((fixed (%cc-gen-fixed-find name)))
+                                (if (null? fixed) -1 (- n fixed))))
+                            (#t
+                              (let ((v (%cc-gen-variadic name)))
+                                (if (null? v) 0 (- n (first (rest v))))))))
                         -1)))
             (def go
               (fn (self2 xs best)
@@ -2795,9 +2867,15 @@
     (set! %cc-gen-funs ())
     (set! %cc-gen-rets ())
     (set! %cc-gen-params ())
+    (set! %cc-gen-variadics ())
     (let ((go (fn (self fs)
                 (if (null? fs) ()
                   (let ((f (first fs)))
+                    (def ps (first (rest (rest f))))
+                    (if (if (null? ps) #f (string=? (first (reverse ps)) "..."))
+                      (set! %cc-gen-variadics
+                        (pair (pair (first (rest f)) (- (length ps) 1)) %cc-gen-variadics))
+                      ())
                     (do (set! %cc-gen-funs
                           (pair (pair (first (rest f)) (%cc-gen-label)) %cc-gen-funs))
                         (set! %cc-gen-rets

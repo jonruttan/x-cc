@@ -452,6 +452,18 @@
             (self (rest es))))))
     (go %cc-funs)))
 
+; how many fixed parameters a variadic function with PARAMS has, the ones
+; before its "...", else nil
+(def %cc-fixed
+  (fn (_ params)
+    (def go
+      (fn (self ps n)
+        (match
+          ((null? ps) ())
+          ((null? (rest ps)) (if (string=? (first ps) "...") n ()))
+          (#t (self (rest ps) (+ n 1))))))
+    (go params 0)))
+
 ; --- the C library -----------------------------------------------------------
 ; A call to a function the program does not define goes to the C library,
 ; opened once for the process and searched by name.  The arguments go as the
@@ -1089,7 +1101,10 @@
     (def label (if (null? f) (library-double-label name) ()))
     (def ks
       (match
-        ((not (null? f)) (first (rest (rest f))))
+        ; a variadic function's last, "...", is no argument's
+        ((not (null? f))
+          (let ((ks (first (rest (rest f)))))
+            (if (null? (%cc-fixed (first f))) ks (%cc-take (- (length ks) 1) ks))))
         ((null? label) ())
         ((string=? label "d->d") (list (lit double)))
         ((string=? label "dd->d") (list (lit double) (lit double)))
@@ -1119,6 +1134,14 @@
       ; struct returned by value moves out of the popped frame into a
       ; fresh slot in the caller's, which lives until the caller returns
       (let ((saved-sp %cc-sp))
+        ; a variadic function's arguments past its fixed ones go as a
+        ; va_list, its "..."
+        (def n (%cc-fixed (first f)))
+        (if (if (null? n) #f (< (length args) n))
+          (%cc-oops (string-append name " with too few arguments")))
+        (def all
+          (if (null? n) args
+            (append (%cc-take n args) (list (%cc-va-list (%cc-drop n args))))))
         (def bind
           (fn (self ps ks as env)
             (if (null? ps) env
@@ -1132,7 +1155,7 @@
                       (if (null? as) () (rest as))
                       (pair (pair (first ps) (pair a k)) env)))))))
         ; f is (params body c-types ret)
-        (def env (bind (first f) (first (rest (rest f))) args ()))
+        (def env (bind (first f) (first (rest (rest f))) all ()))
         (def ret (let ((r (rest (rest (rest f))))) (if (null? r) (lit int) (first r))))
         (def c (%cc-exec-block (first (rest f)) env))
         (if (%cc-ctrl? c (lit goto))
