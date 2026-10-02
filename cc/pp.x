@@ -277,7 +277,10 @@
         (list "stdlib.h" (pair "NULL" "((void *)0)")
           (pair "EXIT_SUCCESS" "0") (pair "EXIT_FAILURE" "1"))
         (list "string.h" (pair "NULL" "((void *)0)"))
-        (list "stddef.h" (pair "NULL" "((void *)0)"))))
+        (list "stddef.h" (pair "NULL" "((void *)0)"))
+        (list "stdarg.h" (pair "va_list" "__builtin_va_list")
+          (pair "va_start" "__builtin_va_start") (pair "va_arg" "__builtin_va_arg")
+          (pair "va_end" "__builtin_va_end") (pair "va_copy" "__builtin_va_copy"))))
 
 ; the macros #include ARG defines: those of the standard header it names in
 ; <...>, none for any other

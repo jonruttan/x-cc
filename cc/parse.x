@@ -107,6 +107,20 @@
 ; and on x86-64, unsigned on arm64 Linux.
 (def plain-char (if (if os-linux? arch-arm64? #f) (lit uchar) (lit char)))
 
+; va_list's C type, each platform's C ABI's: a pointer to eight-byte slots
+; on arm64 macOS; on Linux a record, arm64's 32 bytes and x86-64's 24
+(def %cc-p-va-list
+  (match
+    (os-darwin? (list (lit ptr) (lit char)))
+    (arch-arm64? (list (lit array) 4 (lit ulong)))
+    (#t (list (lit array) 3 (lit ulong)))))
+
+; the C type a va_list is handed on as, which a variadic function's last
+; parameter, "...", holds: the caller's va_list for the arguments past the
+; fixed ones
+(def %cc-p-va-handed
+  (if os-darwin? %cc-p-va-list (list (lit ptr) (lit ulong))))
+
 ; The scalar the specifiers name.  `unsigned`/`signed` pick the signedness and
 ; the width keyword picks the width; `long long` is `long`, and specifiers
 ; that say nothing about either (const, static, extern) are swallowed.  A
@@ -445,6 +459,61 @@
                 (%cc-p-eat (rest r) ")")))))
         (go toks ())))))
 
+; <stdarg.h>'s macros, written out in the C they stand for.  The next
+; argument's slot is the va_list itself on arm64 macOS, and on Linux the
+; record's pointer to its slots -- arm64's first word, x86-64's second --
+; whose register offsets say the registers are used up, as a caller of
+; the program's own variadic function leaves them.
+(def %cc-va-slot
+  (fn (_ ap)
+    (if os-darwin? ap
+      (list (lit idx) (list (lit cast) (list (lit ptr) (list (lit ptr) (lit char))) ap)
+        (list (lit num) (if arch-arm64? 0 1))))))
+
+; the va_list TO made a copy of FROM, a va_list as it is handed on
+(def %cc-va-copy
+  (fn (_ to from)
+    (if os-darwin? (list (lit assign) to from)
+      (let ((word (fn (_ e i) (list (lit idx) (list (lit cast) (list (lit ptr) (lit ulong)) e)
+                                (list (lit num) i)))))
+        (def go
+          (fn (self i)
+            (let ((one (list (lit assign) (word to i) (word from i))))
+              (if (= i 0) one (list (lit comma) (self (- i 1)) one)))))
+        (go (- (first (rest %cc-p-va-list)) 1))))))
+
+; __builtin_va_start (AP, LAST), __builtin_va_arg (AP, TYPE),
+; __builtin_va_end (AP) and __builtin_va_copy (TO, FROM), with TOKS after
+; the name's (: (AST . rest), or nil for another NAME.  va_arg answers the
+; slot's value as TYPE and steps the slot past it.
+(def %cc-e-va-builtin
+  (fn (_ name toks)
+    (match
+      ((string=? name "__builtin_va_start")
+        (let ((r (%cc-p-args toks)))
+          (pair (%cc-va-copy (first (first r)) (list (lit var) "...")) (rest r))))
+      ((string=? name "__builtin_va_copy")
+        (let ((r (%cc-p-args toks)))
+          (pair (%cc-va-copy (first (first r)) (first (rest (first r)))) (rest r))))
+      ((string=? name "__builtin_va_end")
+        (let ((r (%cc-p-args toks)))
+          (pair (list (lit num) 0) (rest r))))
+      ((string=? name "__builtin_va_arg")
+        (let ((ar (%cc-e-assign toks)))
+          (def tr (%cc-p-type-name (%cc-p-eat (rest ar) ",")))
+          (def k (first tr))
+          (if (if (pair? k) (eq? (first k) (lit struct)) #f)
+            (%cc-p-err "not built yet: a struct from va_arg"))
+          (def slot (%cc-va-slot (first ar)))
+          (def step (list (lit num) (round-up (c-type-size k) 8)))
+          (pair (list (lit un) "*"
+                  (list (lit cast) (%cc-p-pointer-to k)
+                    (list (lit bin) "-"
+                      (list (lit assign) slot (list (lit bin) "+" slot step))
+                      step)))
+            (%cc-p-eat (rest tr) ")"))))
+      (#t ()))))
+
 (def %cc-e-primary
   (fn (_ toks)
     (if (null? toks) (%cc-p-err "expected an expression")
@@ -454,9 +523,11 @@
           (if (eq? label (lit str)) (pair tok (rest toks))
             (if (eq? label (lit id))
               (if (%cc-p-op? (rest toks) "(")
-                (let ((r (%cc-p-args (rest (rest toks)))))
-                  (pair (list (lit call) (first (rest tok)) (first r))
-                    (rest r)))
+                (let ((v (%cc-e-va-builtin (first (rest tok)) (rest (rest toks)))))
+                  (if (not (null? v)) v
+                    (let ((r (%cc-p-args (rest (rest toks)))))
+                      (pair (list (lit call) (first (rest tok)) (first r))
+                        (rest r)))))
                 ; an enum constant is its number, right here
                 (let ((ev (%cc-p-enum-value (first (rest tok)))))
                   (pair (if (null? ev) (list (lit var) (first (rest tok))) (list (lit num) ev))
@@ -1020,7 +1091,9 @@
 
 ; --- top level ---------------------------------------------------------------
 
-; parameters: (void) | (type name, ...) -- names and C types
+; parameters: (void) | (type name, ...) -- names and C types.  A `...` after
+; the last is a parameter named "...", which holds a va_list for the
+; arguments past the fixed ones (%cc-p-va-handed).
 (def %cc-p-params
   (fn (_ toks)
     (if (%cc-p-op? toks ")")
@@ -1028,8 +1101,9 @@
       (if (if (%cc-p-kw? toks (lit void)) (%cc-p-op? (rest toks) ")") #f)
         (pair (pair () ()) (rest (rest toks)))
         (let ((go ()))
-          (set! go
-            (fn (self ts names c-types)
+          ; one parameter, then the rest after its comma
+          (def param
+            (fn (_ ts names c-types)
               (def tr (%cc-p-specifiers ts))
               (def sr (%cc-p-stars (first tr) (rest tr)))
               ; (NAME C-TYPE . rest), as a declarator gives it; a
@@ -1048,15 +1122,24 @@
                       k)))
                 (def ts3 (rest (rest head)))
                 (if (%cc-p-op? ts3 ",")
-                  (self (rest ts3) (pair name names) (pair c-type c-types))
+                  (go (rest ts3) (pair name names) (pair c-type c-types))
                   (pair (pair (reverse (pair name names)) (reverse (pair c-type c-types)))
                     (%cc-p-eat ts3 ")"))))))
+          (set! go
+            (fn (_ ts names c-types)
+              (match
+                ((not (%cc-p-op? ts "...")) (param ts names c-types))
+                ((null? names) (%cc-p-err "a ... with no parameter before it"))
+                (#t (pair (pair (reverse (pair "..." names))
+                                (reverse (pair %cc-p-va-handed c-types)))
+                      (%cc-p-eat (rest ts) ")"))))))
           (go toks () ()))))))
 
 (def cc-parse
   (fn (_ toks)
     (set! %cc-p-structs ())
-    (set! %cc-p-typedefs ())
+    ; <stdarg.h>'s va_list is this one
+    (set! %cc-p-typedefs (list (pair "__builtin_va_list" %cc-p-va-list)))
     (set! %cc-p-enums ())
     (set! %cc-p-anon 0)
     (def go
