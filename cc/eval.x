@@ -25,7 +25,7 @@
 (import cc/prims append byte-at byte-len length
   map mem-make mem-ptr mem-ref-at mem-set-at! ptr-int reverse string-append
   string-concat string=? substring word-set! x-write)
-(import cc/lex cc-lex)
+(import cc/pp cc-lex)
 (import cc/parse cc-parse c-type-size plain-char round-up struct-entry struct-table)
 (import cc/real convert-real real-arith real-compare real-negate real-step real-stub
   real-zero? real?)

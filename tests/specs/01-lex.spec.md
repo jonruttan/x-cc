@@ -79,3 +79,14 @@ The preprocessor and lexer: C text to tokens.
 ```
 ---
     ((num 2) (op "+") (num 1) (op "*") (num 2) (op "+") (num 1))
+
+## refused
+
+### a character no C token begins with
+
+```cc
+(display (guard (e (do (display "refused: ") (write e) ""))
+  (cc-lex "int a = 1 @ 2;")))
+```
+---
+    refused: #<err:cc cc: a character no C token begins with: @>

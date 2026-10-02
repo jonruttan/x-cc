@@ -50,7 +50,7 @@
 (import cc/prims append byte-at byte-len convert filter length map mem-ref-byte
   proc-capture reverse sha256-hex-n string-append string-concat string=?
   substring)
-(import cc/lex cc-lex)
+(import cc/pp cc-lex)
 (import cc/parse cc-parse c-type-size c-type-align plain-char round-up struct-entry)
 (import cc/eval common-c-type c-type-elem library-c-type
   library-double-label library-variadic promoted-c-type signed? unsigned-divide)
