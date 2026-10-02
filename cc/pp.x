@@ -273,7 +273,7 @@
 ; functions: (HEADER (NAME . BODY) ...).  The header itself is dropped, and
 ; an #include of one defines these.
 (def %cc-headers
-  (list (list "stdio.h" (pair "EOF" "(-1)") (pair "NULL" "((void *)0)"))
+  (list (list "stdio.h" (pair "EOF" "(-1)") (pair "NULL" "((void *)0)") (pair "FILE" "void"))
         (list "stdlib.h" (pair "NULL" "((void *)0)")
           (pair "EXIT_SUCCESS" "0") (pair "EXIT_FAILURE" "1"))
         (list "string.h" (pair "NULL" "((void *)0)"))

@@ -103,6 +103,25 @@ fedcba
 (6 6)
 ```
 
+### stdin, stdout and stderr, the C library's streams
+
+```cc
+(def src "#include <stdio.h>\nint main(void) {\n  char line[64];\n  int n = 0;\n  FILE *out = stdout;\n  while (fgets(line, sizeof line, stdin)) { n++; fprintf(out, \"%d: %s\", n, line); }\n  fputs(\"done\\n\", stdout);\n  fprintf(stderr, \"%s\", \"\");\n  return n + (stdin != stdout) * 10;\n}\n")
+(def prog-in "a\nbb\n")
+(def prog-argv (list "prog"))
+(display (list (cc-run-with src prog-in prog-argv) (cc-exe-run-with src prog-in prog-argv)))
+```
+---
+```output
+1: a
+2: bb
+done
+1: a
+2: bb
+done
+(12 12)
+```
+
 ## refused
 
 ### main with one parameter

@@ -110,6 +110,8 @@ their arguments in the d registers.  A `float` is held as its single's 32
 bits where an unsigned int would be; its operations are the double's
 rounded to a single, which is the single-precision answer, and one
 handed to a function past its declared parameters goes as a double.
+`stdin`, `stdout` and `stderr` are the C library's own variables, read
+through the slot the loader fills, and `FILE` from `<stdio.h>` is `void`.
 Anything else refuses by name: `long double`, a call into the C library
 with more than six arguments, and a global initialized by something
 other than a constant or an address.
