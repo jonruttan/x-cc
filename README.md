@@ -153,7 +153,10 @@ The answer is converted to the C type the function's header declares,
 and `stdin`, `stdout` and `stderr` are the library's own variables.
 What the library holds for its streams is flushed when the program
 ends, and `exit` flushes before it leaves.  A pointer to one of the
-program's own functions cannot be handed to the library, and refuses.
+program's own functions goes to the library as a callback
+(x/sys/callback): a native function the library calls, which runs the
+program's function here.  It takes up to four arguments, none of them a
+double, a float or a struct, and answers neither.
 
 Working: int/char/void/pointer/array declarations (specifier soup
 accepted, erased, but for `static` on a local); all C89 operators with
@@ -231,7 +234,7 @@ A cast or `sizeof` takes a pointer to a function as a declaration does:
 
 Refused loudly, a recorded pending: `long double`.
 
-Paired with x-lang v0.21.0 (`lang.xon` is the checkable row).
+Paired with x-lang v0.23.0 (`lang.xon` is the checkable row).
 
 ## Tests
 

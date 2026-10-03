@@ -29,6 +29,7 @@
 (import cc/parse cc-parse c-type-size plain-char round-up struct-entry struct-table)
 (import cc/real convert-real real-arith real-compare real-negate real-step real-stub
   real-zero? real?)
+(import x/sys/callback)
 
 ; The collector is non-moving (the reflection layer rides raw object
 ; pointers); the base is refreshed every run.
@@ -529,6 +530,56 @@
 (def %cc-drop
   (fn (self n xs) (if (<= n 0) xs (self (- n 1) (rest xs)))))
 
+; A function of the program's, handed to the C library -- qsort's comparator
+; -- goes as a callback (x/sys/callback): a native function the library calls
+; with the arguments in the C calling convention, each converted to its
+; parameter's C type, which runs the function here and answers its integer
+; value.  One callback a function, made the first time it is handed over and
+; kept until the next run.
+(def %cc-callbacks ())   ; ((name . callback) ...)
+
+(def %cc-callbacks-free!
+  (fn (_)
+    (def go (fn (self es) (if (null? es) () (do ((rest (first es)) free!) (self (rest es))))))
+    (go %cc-callbacks)
+    (set! %cc-callbacks ())))
+
+; the address of a callback calling the program's function NAME, which is
+; handed to the library's function TO
+(def %cc-callback-address
+  (fn (_ name to)
+    (def go (fn (self es)
+              (match
+                ((null? es) ())
+                ((string=? (first (first es)) name) (rest (first es)))
+                (#t (self (rest es))))))
+    (def hit (go %cc-callbacks))
+    (if (not (null? hit)) (hit address)
+      (let ((f (%cc-fun name)))
+        ; f is (params body c-types ret)
+        (def ks (first (rest (rest f))))
+        (def ret (let ((r (rest (rest (rest f))))) (if (null? r) (lit int) (first r))))
+        (def no (fn (_ what) (%cc-oops (string-append what ", handed to " to))))
+        (if (not (null? (%cc-fixed (first f)))) (no (string-append "the variadic function " name)))
+        (if (> (length ks) 4) (no (string-append name ", which takes more than four arguments")))
+        (def plain? (fn (_ k) (if (real? k) #f (not (%cc-struct-c-type? k)))))
+        (def all-plain? (fn (self l) (if (null? l) #t (if (plain? (first l)) (self (rest l)) #f))))
+        (if (not (if (all-plain? ks) (if (eq? ret (lit void)) #t (plain? ret)) #f))
+          (no (string-append name ", which takes or answers a double, a float or a struct")))
+        (def cb
+          (Callback make
+            (fn (_ . as)
+              (%cc-call name (map (fn (_ p) (%cc-convert (first p) (rest p))) (%cc-zip as ks))))
+            (length ks)))
+        (set! %cc-callbacks (pair (pair name cb) %cc-callbacks))
+        (cb address)))))
+
+; the pairs (A . B) of two lists, as far as the shorter goes
+(def %cc-zip
+  (fn (self as bs)
+    (if (if (null? as) #t (null? bs)) ()
+      (pair (pair (first as) (first bs)) (self (rest as) (rest bs))))))
+
 ; NAME called with ARGS in the C library
 (def %cc-libc-call
   (fn (_ name args)
@@ -540,7 +591,7 @@
                     (#t (self (rest es)))))))
         (go library-variadic)))
     (def saved %cc-sp)
-    (def all
+    (def given
       (if (null? v) args
         (let ((n (first (rest v))))
           (if (< (length args) n)
@@ -550,17 +601,23 @@
     (if (null? f)
       (%cc-oops (string-append "a call to " name
                   ", which neither the program nor the C library defines")))
-    (if (> (length all) 7)
+    (if (> (length given) 7)
       (%cc-oops (string-append "a call to " name " with more than seven arguments")))
-    ; a function value is an id, which the library could not call
-    (def id?
+    ; a function value is an id, which the library is handed as a callback's
+    ; address instead (%cc-callback-address)
+    (def id-name
       (fn (_ x)
-        (def go (fn (self es) (if (null? es) #f (if (= (rest (first es)) x) #t (self (rest es))))))
+        (def go (fn (self es)
+                  (match
+                    ((null? es) ())
+                    ((= (rest (first es)) x) (first (first es)))
+                    (#t (self (rest es))))))
         (go %cc-fun-ids)))
-    (def any-id?
-      (fn (self as) (if (null? as) #f (if (id? (first as)) #t (self (rest as))))))
-    (if (any-id? args)
-      (%cc-oops (string-append "a pointer to a function, handed to " name)))
+    (def all
+      (map (fn (_ x)
+             (let ((n (id-name x)))
+               (if (null? n) x (%cc-callback-address n name))))
+        given))
     (def a (fn (_ k) (%cc-drop k all)))
     (def r
       (match
@@ -1441,6 +1498,7 @@
     (set! %cc-strtab ())
     (set! %cc-statics ())
     (set! %cc-fun-ids ())
+    (%cc-callbacks-free!)
     (set! %cc-exit-code ())
     (def prog (cc-parse (cc-lex src)))
     (def load!
