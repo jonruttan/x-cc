@@ -32,7 +32,7 @@
 ; Refused loudly: `long double`, a recorded pending.
 (module cc/parse)
 
-(import cc/prims append byte-len convert length map reverse string-append
+(import cc/prims append byte-len convert length map reverse set-first! string-append
   string=?)
 
 ; The type handle this file asks convert for, fetched by name through the
@@ -440,9 +440,10 @@
       (if (%cc-p-op? (rest ts) "]")
         (let ((inner (self k (rest (rest ts)))))
           (pair (list (lit array) () (first inner)) (rest inner)))
-        (let ((n (first (rest (first (rest ts))))))
-          (let ((inner (self k (%cc-p-eat (rest (rest ts)) "]"))))
-            (pair (list (lit array) n (first inner)) (rest inner)))))
+        ; the count is a constant expression: N + 1, sizeof x / 2, an enum
+        (let ((r (%cc-e-assign (rest ts))))
+          (let ((inner (self k (%cc-p-eat (rest r) "]"))))
+            (pair (list (lit array) (%cc-p-const (first r)) (first inner)) (rest inner)))))
       (pair k ts))))
 
 ; a type name, as a cast or sizeof takes it: TYPE, then [N]... for an
@@ -1161,6 +1162,70 @@
                       (%cc-p-eat (rest ts) ")"))))))
           (go toks () ()))))))
 
+; A function's BODY with each local scoped as C scopes it.  A name declared a
+; second time in the function -- in a sibling block, or an inner block
+; shadowing an outer one or a parameter among PARAMS -- takes a name of its
+; own, NAME%N, which no C name can be, and each (var NAME) in its scope
+; takes it too; a name declared once keeps its name.  A block and a switch's
+; clauses are each a scope.
+(def %cc-p-scope
+  (fn (_ body params)
+    (def used (pair params ()))
+    (def count (pair 0 ()))
+    (def member? (fn (self n l) (if (null? l) #f (if (string=? (first l) n) #t (self n (rest l))))))
+    (def resolve
+      (fn (self n scopes)
+        (if (null? scopes) n
+          (let ((hit (let ((go (fn (self2 al)
+                                 (if (null? al) ()
+                                   (if (string=? (first (first al)) n) (first al) (self2 (rest al)))))))
+                       (go (first scopes)))))
+            (if (null? hit) (self n (rest scopes)) (rest hit))))))
+    (def walk ())
+    ; STMTS in order, a declaration adding to the innermost scope:
+    ; (STMTS' . SCOPES')
+    (def seq
+      (fn (self stmts scopes acc)
+        (if (null? stmts) (pair (reverse acc) scopes)
+          (let ((s (first stmts)))
+            (if (if (pair? s) (eq? (first s) (lit decl)) #f)
+              (let ((name (first (rest s))))
+                (def init (walk (first (rest (rest (rest s)))) scopes))
+                (def fresh
+                  (if (member? name (first used))
+                    (do (set-first! count (+ (first count) 1))
+                        (string-append name (string-append "%" (convert (first count) %string))))
+                    name))
+                (set-first! used (pair name (first used)))
+                (self (rest stmts)
+                  (pair (pair (pair name fresh) (first scopes)) (rest scopes))
+                  (pair (pair (lit decl) (pair fresh (pair (first (rest (rest s)))
+                                                     (pair init (rest (rest (rest (rest s))))))))
+                    acc)))
+              (self (rest stmts) scopes (pair (walk s scopes) acc)))))))
+    (set! walk
+      (fn (self node scopes)
+        (match
+          ((not (pair? node)) node)
+          ((eq? (first node) (lit var)) (list (lit var) (resolve (first (rest node)) scopes)))
+          ; a call names its callee, which may be a local holding a pointer
+          ((eq? (first node) (lit call))
+            (list (lit call) (resolve (first (rest node)) scopes)
+              (map (fn (_ x) (self x scopes)) (first (rest (rest node))))))
+          ((eq? (first node) (lit block))
+            (list (lit block) (first (seq (first (rest node)) (pair () scopes) ()))))
+          ((eq? (first node) (lit switch))
+            (let ((e (self (first (rest node)) scopes)))
+              (def clauses
+                (fn (self2 cs sc acc)
+                  (if (null? cs) (reverse acc)
+                    (let ((r (seq (rest (first cs)) sc ())))
+                      (self2 (rest cs) (rest r)
+                        (pair (pair (self (first (first cs)) sc) (first r)) acc))))))
+              (list (lit switch) e (clauses (first (rest (rest node))) (pair () scopes) ()))))
+          (#t (map (fn (_ x) (self x scopes)) node)))))
+    (walk body ())))
+
 (def cc-parse
   (fn (_ toks)
     (set! %cc-p-structs ())
@@ -1196,7 +1261,8 @@
                           ; (fun NAME PARAMS BODY C-TYPES RET-C-TYPE)
                           (self (rest b)
                             (pair (list (lit fun) name (first (first pr))
-                                    (first b) (rest (first pr)) (first tr))
+                                    (%cc-p-scope (first b) (first (first pr)))
+                                    (rest (first pr)) (first tr))
                               acc)))))
                     ; globals: reuse the declarator line from ts
                     (let ((r (%cc-p-decl-line ts)))
