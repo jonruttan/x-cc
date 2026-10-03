@@ -17,19 +17,23 @@
 ;                   one (NAME fn PARAMS . TOKENS)
 ;   #undef #ifdef #ifndef #if #elif #else #endif
 ;
-; and any other refuses by name.  The other lines' tokens wait until the
-; next directive or the end, then expand under the macros defined so far, so
-; a call to a function-like macro may run over lines.  An #if's condition is
+; and any other refuses by name.  Another line expands under the macros
+; defined so far once its parentheses close -- a call to a function-like
+; macro may run over lines -- with __LINE__ its number.  An #if's condition is
 ; a constant expression: defined NAME and defined (NAME) are 1 or 0, the
 ; macros expand, a name left over is 0, and the parser folds the rest.
 ; cc-lex answers the parser's tokens: blanks out, side-by-side string
 ; literals joined, as C's translation joins them.
 (module cc/pp)
 
-(import cc/prims append byte-at byte-len filter length map reverse string-append
+(import cc/prims append byte-at byte-len convert filter length map reverse string-append
   string-concat string=? substring)
 (import cc/tokens cc-raw-tokens cc-token)
-(import cc/parse cc-parse-const)
+(import cc/parse cc-parse-const plain-char)
+
+; The type handle this file asks convert for, fetched by name through the
+; platform's public door and private to this module.
+(def %string (Type named STRING))
 
 (def %cc-text (fn (_ t) (first (rest t))))
 (def %cc-tag? (fn (_ t tag) (eq? (first t) tag)))
@@ -266,7 +270,34 @@
         (list "stddef.h" (pair "NULL" "((void *)0)"))
         (list "stdarg.h" (pair "va_list" "__builtin_va_list")
           (pair "va_start" "__builtin_va_start") (pair "va_arg" "__builtin_va_arg")
-          (pair "va_end" "__builtin_va_end") (pair "va_copy" "__builtin_va_copy"))))
+          (pair "va_end" "__builtin_va_end") (pair "va_copy" "__builtin_va_copy"))
+        (list "math.h"
+          (pair "M_E" "2.71828182845904523536028747135266250")
+          (pair "M_LOG2E" "1.44269504088896340735992468100189214")
+          (pair "M_LOG10E" "0.434294481903251827651128918916605082")
+          (pair "M_LN2" "0.693147180559945309417232121458176568")
+          (pair "M_LN10" "2.30258509299404568401799145468436421")
+          (pair "M_PI" "3.14159265358979323846264338327950288")
+          (pair "M_PI_2" "1.57079632679489661923132169163975144")
+          (pair "M_PI_4" "0.785398163397448309615660845819875721")
+          (pair "M_1_PI" "0.318309886183790671537767526745028724")
+          (pair "M_2_PI" "0.636619772367581343075535053490057448")
+          (pair "M_2_SQRTPI" "1.12837916709551257389615890312154517")
+          (pair "M_SQRT2" "1.41421356237309504880168872420969808")
+          (pair "M_SQRT1_2" "0.707106781186547524400844362104849039"))
+        ; the platforms' C types: long 64 bits, plain char as plain-char says
+        (list "limits.h"
+          (pair "CHAR_BIT" "8")
+          (pair "SCHAR_MIN" "(-128)") (pair "SCHAR_MAX" "127") (pair "UCHAR_MAX" "255")
+          (pair "CHAR_MIN" (if (eq? plain-char (lit uchar)) "0" "(-128)"))
+          (pair "CHAR_MAX" (if (eq? plain-char (lit uchar)) "255" "127"))
+          (pair "SHRT_MIN" "(-32768)") (pair "SHRT_MAX" "32767") (pair "USHRT_MAX" "65535")
+          (pair "INT_MIN" "(-2147483647-1)") (pair "INT_MAX" "2147483647")
+          (pair "UINT_MAX" "4294967295U")
+          (pair "LONG_MIN" "(-9223372036854775807L-1)") (pair "LONG_MAX" "9223372036854775807L")
+          (pair "ULONG_MAX" "18446744073709551615UL")
+          (pair "LLONG_MIN" "(-9223372036854775807L-1)") (pair "LLONG_MAX" "9223372036854775807L")
+          (pair "ULLONG_MAX" "18446744073709551615UL"))))
 
 ; the macros #include ARG defines: those of the standard header it names in
 ; <...>, none for any other
@@ -304,62 +335,80 @@
       (fn (_ name macros) (filter (fn (_ e) (not (string=? (first e) name))) macros)))
     ; a conditional's opening entry: off-and-taken under a dead parent
     (def open (fn (_ on v) (if on (pair v v) (pair #f #t))))
+    ; WAIT expanded onto OUT, __LINE__ the number of the line N
     (def flush
-      (fn (_ wait macros out)
-        (if (null? wait) out (append (reverse (%cc-expand (reverse wait) macros ())) out))))
+      (fn (_ wait n macros out)
+        (if (null? wait) out
+          (append
+            (reverse (%cc-expand (reverse wait)
+                       (pair (list "__LINE__" (lit obj) (list (lit num) (convert n %string) 1))
+                         macros)
+                       ()))
+            out))))
+    ; does WAIT close every ( it opens: a call to a function-like macro may
+    ; run on to the next line
+    (def closed?
+      (fn (self ts depth)
+        (match
+          ((null? ts) (<= depth 0))
+          ((%cc-op-is? (first ts) "(") (self (rest ts) (+ depth 1)))
+          ((%cc-op-is? (first ts) ")") (self (rest ts) (- depth 1)))
+          (#t (self (rest ts) depth)))))
     (def go
-      (fn (self ls macros stack wait out)
+      (fn (self ls n macros stack wait out)
         (if (null? ls)
           (if (not (null? stack))
             (%cc-oops "unterminated #if")
-            (reverse (flush wait macros out)))
+            (reverse (flush wait n macros out)))
           (let ((line (%cc-skip-sp (first ls))))
             (def on (live? stack))
             (if (if (null? line) #t (not (%cc-op-is? (first line) "#")))
-              ; a line break is a blank between the lines' tokens
-              (self (rest ls) macros stack
-                (if on (append (reverse line) (pair (list (lit sp) " ") wait)) wait)
-                out)
+              ; a line break is a blank between the lines' tokens; a line
+              ; whose parentheses close expands now, under its own number
+              (let ((w (if on (append (reverse line) (pair (list (lit sp) " ") wait)) wait)))
+                (if (closed? w 0)
+                  (self (rest ls) (+ n 1) macros stack () (flush w n macros out))
+                  (self (rest ls) (+ n 1) macros stack w out)))
               (let ((ts (%cc-skip-sp (rest line))))
-                (def out2 (flush wait macros out))
+                (def out2 (flush wait n macros out))
                 (def word (if (if (null? ts) #f (%cc-name? (first ts))) (%cc-text (first ts)) ""))
                 (def args (%cc-skip-sp (if (null? ts) ts (rest ts))))
                 (match
                   ((string=? word "ifdef")
-                    (self (rest ls) macros
+                    (self (rest ls) (+ n 1) macros
                       (pair (open on (if on (not (null? (%cc-macro macros (%cc-directive-name "#ifdef" args)))) #f))
                         stack) () out2))
                   ((string=? word "ifndef")
-                    (self (rest ls) macros
+                    (self (rest ls) (+ n 1) macros
                       (pair (open on (if on (null? (%cc-macro macros (%cc-directive-name "#ifndef" args))) #f))
                         stack) () out2))
                   ((string=? word "if")
-                    (self (rest ls) macros
+                    (self (rest ls) (+ n 1) macros
                       (pair (open on (if on (%cc-if-true? args macros) #f)) stack) () out2))
                   ((string=? word "elif")
                     (if (null? stack) (%cc-oops "#elif without #if")
-                      (self (rest ls) macros
+                      (self (rest ls) (+ n 1) macros
                         (pair (if (rest (first stack)) (pair #f #t)
                                 (let ((v (%cc-if-true? args macros))) (pair v v)))
                           (rest stack))
                         () out2)))
                   ((string=? word "else")
                     (if (null? stack) (%cc-oops "#else without #if")
-                      (self (rest ls) macros
+                      (self (rest ls) (+ n 1) macros
                         (pair (pair (not (rest (first stack))) #t) (rest stack)) () out2)))
                   ((string=? word "endif")
                     (if (null? stack) (%cc-oops "#endif without #if")
-                      (self (rest ls) macros (rest stack) () out2)))
-                  ((not on) (self (rest ls) macros stack () out2))
+                      (self (rest ls) (+ n 1) macros (rest stack) () out2)))
+                  ((not on) (self (rest ls) (+ n 1) macros stack () out2))
                   ((string=? word "include")
-                    (self (rest ls) (append (%cc-header-macros (%cc-spell (%cc-no-sp args))) macros)
+                    (self (rest ls) (+ n 1) (append (%cc-header-macros (%cc-spell (%cc-no-sp args))) macros)
                       stack () out2))
                   ((string=? word "define")
-                    (self (rest ls) (pair (%cc-define args) macros) stack () out2))
+                    (self (rest ls) (+ n 1) (pair (%cc-define args) macros) stack () out2))
                   ((string=? word "undef")
-                    (self (rest ls) (undef (%cc-directive-name "#undef" args) macros) stack () out2))
+                    (self (rest ls) (+ n 1) (undef (%cc-directive-name "#undef" args) macros) stack () out2))
                   (#t (%cc-oops (string-append "unsupported directive #" word))))))))))
-    (go (%cc-lines (cc-raw-tokens src)) () () () ())))
+    (go (%cc-lines (cc-raw-tokens src)) 1 () () () ())))
 
 ; The parser's tokens for SRC: preprocessed, the blanks out, each token
 ; made the parser's, and a string literal right after another joined to it
