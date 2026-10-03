@@ -12,6 +12,7 @@
 
 (provide cc/base cc-version cc-lex cc-parse cc-run cc-run-with
   cc-compile cc-compile-image cc-exe-run cc-exe-run-with cc-argv cc-main
+  cc-cli-plan cc-refusal cc-usage
   %cc-repl-print)
 
 (def cc-version "0.1.0")
@@ -49,4 +50,4 @@
 (import cc/parse cc-parse)
 (import cc/eval cc-run cc-run-with)
 (import cc/gen cc-compile cc-compile-image cc-exe-run cc-exe-run-with)
-(import cc/cli cc-argv cc-main)
+(import cc/cli cc-argv cc-main cc-cli-plan cc-refusal cc-usage)
