@@ -167,8 +167,9 @@ functions with recursion and prototypes; globals; static locals, made
 once on first reach; string literals (interned, and joined when side by
 side); character constants; C's escapes, octal and hex among them;
 `#include` (dropped -- the C library provides the functions -- and one
-of a standard header defines `EOF`, `NULL`, `EXIT_SUCCESS` and
-`EXIT_FAILURE`), object-like `#define` spliced token-wise; // and /* */
+of a standard header defines its macros: `EOF`, `NULL`, `EXIT_SUCCESS`,
+`EXIT_FAILURE`, `<math.h>`'s `M_PI` and the rest, `<limits.h>`'s limits),
+object-like `#define` spliced token-wise; `__LINE__`; // and /* */
 comments.  `x -l cc -- run prog.c ARG ...` hands main the file's name
 and the ARGs as its argv, and fd 0 as its standard input.
 
@@ -191,8 +192,8 @@ no C token begins with refuses by name.  The preprocessor works on those
 tokens a line at a time.  Function-like macros collect their arguments
 as tokens across balanced parentheses, substitute them for the
 parameters, and rescan with the macro open; no parentheses are added,
-as in C.  The lines between two directives expand under the macros
-defined so far, so a call may run over lines.
+as in C.  A line expands under the macros defined so far once its
+parentheses close, so a call may run over lines.
 
 `#if`/`#ifdef`/`#ifndef`/`#elif`/`#else`/`#endif`/`#undef` select
 lines; an inactive region still tracks its nesting.  An `#if` or
