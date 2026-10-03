@@ -55,15 +55,13 @@ many args 14
 2
 ```
 
-## refused
-
-### a pointer to the program's function, handed to the library
+### qsort calls the program's comparator back
 
 ```cc
-(display (cc-run "int cmp(const void *a, const void *b) { return 0; }\nint main(void) { int a[2] = {2, 1}; qsort(a, 2, sizeof a[0], cmp); return a[0]; }"))
+(display (cc-run "#include <stdio.h>\n#include <stdlib.h>\nint cmp(const void *a, const void *b) { return *(const int *)a - *(const int *)b; }\nint main(void) { int a[4] = {3, 1, 4, 2}; qsort(a, 4, sizeof a[0], cmp); printf(\"%d%d%d%d\\n\", a[0], a[1], a[2], a[3]); return a[0]; }"))
 ```
 ---
 ```output
-cc: run failed: #<err:cc cc: run: a pointer to a function, handed to qsort>
+1234
 1
 ```
