@@ -126,7 +126,10 @@ address of a variadic function.
     x -l cc -- run prog.c
 
 runs the same front end through an evaluator with a real memory model
-instead, and is the reference the compiler is checked against: every
+instead: each function is translated, the first time it is called, into
+x closures with every C type, conversion and place settled, and a call
+makes one frame holding all its locals.  It is the reference the
+compiler is checked against: every
 spec expectation comes from the same source compiled with /usr/bin/cc
 and run.  Under `run`, fib recurses, pointers write through, arrays
 decay into functions, bubble sort sorts, and the output matches the
