@@ -238,7 +238,7 @@ A cast or `sizeof` takes a pointer to a function as a declaration does:
 
 Refused loudly, a recorded pending: `long double`.
 
-Paired with x-lang v0.24.0 (`lang.xon` is the checkable row).
+Paired with x-lang v0.25.0 (`lang.xon` is the checkable row).
 
 ## Tests
 
