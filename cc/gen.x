@@ -1926,7 +1926,10 @@
     (def label (library-double-label name))
     (if (if (null? label) (not (%cc-gen-libc-has? (if (null? v) name (first v)))) #f)
       (%cc-gen-no (string-append "a call to " name)))
-    (def doubles? (if (null? label) #f (not (string=? label "s0->d"))))
+    ; atof's string and strtod's string and end pointer are integers; only
+    ; the answer is a double
+    (def doubles?
+      (if (null? label) #f (not (if (string=? label "s0->d") #t (string=? label "ii->d")))))
     (if (if doubles? (not (= (length args) (if (string=? label "dd->d") 2 1))) #f)
       (%cc-gen-no (string-append "a call to " name " with the wrong number of arguments")))
     (def fixed (if (null? v) (length args) (first (rest v))))

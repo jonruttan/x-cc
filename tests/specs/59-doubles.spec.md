@@ -102,6 +102,18 @@ the library's.  Every expectation is what the same source prints through
 17
 ```
 
+### strtod: a number at a time, the end pointer stepping past each, and none
+
+```cc
+(def src "#include <stdio.h>\n#include <stdlib.h>\nint main(void) {\n  const char *text = \" 1.5 -2 3e2 0x10 junk\";\n  char *end;\n  double sum = 0;\n  int n = 0;\n  for (;;) {\n    double v = strtod(text, &end);\n    if (end == text) break;\n    printf(\"%g \", v);\n    sum += v;\n    n++;\n    text = end;\n  }\n  printf(\"| %g %d [%s] %g\\n\", sum, n, text, strtod(\"7.25\", NULL));\n  return n;\n}\n")
+(display (cc-run src))
+```
+---
+```output
+1.5 -2 300 16 | 315.5 4 [ junk] 7.25
+4
+```
+
 ## compiled
 
 ### arithmetic, compound assignment, ++ and --, and printf's conversions
@@ -195,6 +207,18 @@ the library's.  Every expectation is what the same source prints through
 42.500|2.50e+00|2.5   |
  -2.5 +2.5 2 1E-10
 17
+```
+
+### strtod: a number at a time, the end pointer stepping past each, and none
+
+```cc
+(def src "#include <stdio.h>\n#include <stdlib.h>\nint main(void) {\n  const char *text = \" 1.5 -2 3e2 0x10 junk\";\n  char *end;\n  double sum = 0;\n  int n = 0;\n  for (;;) {\n    double v = strtod(text, &end);\n    if (end == text) break;\n    printf(\"%g \", v);\n    sum += v;\n    n++;\n    text = end;\n  }\n  printf(\"| %g %d [%s] %g\\n\", sum, n, text, strtod(\"7.25\", NULL));\n  return n;\n}\n")
+(display (cc-exe-run src))
+```
+---
+```output
+1.5 -2 300 16 | 315.5 4 [ junk] 7.25
+4
 ```
 
 ## refused

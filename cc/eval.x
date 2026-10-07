@@ -66,8 +66,8 @@
 ; The C library's functions on doubles, by how they take and answer them:
 ; (LABEL NAME ...), LABEL one of the platform's (x/num/float): "d->d" a
 ; double for a double, "dd->d" a double for two, "s0->d" a double for a
-; string.  Each is called in a way the others are not, so run and the
-; compiler take these and no other.
+; string, "ii->d" a double for two integers or pointers.  Each is called in
+; a way the others are not, so run and the compiler take these and no other.
 (def library-double-fns
   (list
     (pair "d->d"
@@ -78,7 +78,8 @@
     (pair "dd->d"
       (list "pow" "atan2" "fmod" "hypot" "fmin" "fmax" "fdim" "copysign"
             "remainder" "nextafter"))
-    (pair "s0->d" (list "atof"))))
+    (pair "s0->d" (list "atof"))
+    (pair "ii->d" (list "strtod"))))
 
 ; the LABEL of the library's function on doubles NAME, or nil
 (def library-double-label
@@ -770,7 +771,7 @@
 ; first is its bits, and atof is strtod with no end pointer
 (def %cc-libm-call
   (fn (_ label name args)
-    (def n (if (string=? label "dd->d") 2 1))
+    (def n (if (if (string=? label "dd->d") #t (string=? label "ii->d")) 2 1))
     (if (not (= (length args) n))
       (%cc-oops (string-append "a call to " name " with the wrong number of arguments")))
     (match
@@ -778,6 +779,8 @@
       ((string=? label "dd->d")
         (first ((real-stub label name) (list (first args)) (list (first (rest args))))))
       ((< (first args) 4096) (%cc-oops (string-append "a null pointer, handed to " name)))
+      ; strtod with its end pointer, which may be null
+      ((string=? label "ii->d") ((real-stub label name) (first args) (first (rest args))))
       (#t ((real-stub label "strtod") (first args))))))
 
 
