@@ -3,11 +3,11 @@
 
 Pointers to functions.  A function's name, or `&` of it, is a pointer to
 the function; a call through one, from a variable, a parameter, an
-element or a field, calls it.  Compiled, the pointer is the function's
-address, taken from where the instruction is, and the call hands over
-the arguments in the first registers, so a function whose address is
-taken takes at most three, none of them a struct, and answers no struct.
-The pointer's C type keeps what the function answers.  Each case runs
+element or a field, calls it.  Compiled, the pointer is the address of
+the function's thunk, and the program's own call through it lays the
+arguments out as a direct call does, so it takes any number, structs
+among them, and may answer a struct.  The pointer's C type keeps what the
+function answers.  Each case runs
 the program under `run`, then compiled, and shows both outputs and both
 statuses; every expectation is what the same source prints through
 /usr/bin/cc.
@@ -68,22 +68,21 @@ tri 18
 (74 74)
 ```
 
-## the refusals
-
-### the address of a function that takes a struct
+### a struct taken and answered, four arguments through a table, and eight
 
 ```cc
-(display (guard (e (do (display "refused: ") (write e) ""))
-  (cc-exe-run "struct P { int x; };\nint getx(struct P p) { return p.x; }\nint main(void) { int (*f)(struct P) = getx; return 0; }")))
+(def src "#include <stdio.h>\nstruct P { int x, y; };\nstatic int getx(struct P p) { return p.x * 10 + p.y; }\nstatic struct P swap(struct P p) { struct P q; q.x = p.y; q.y = p.x; return q; }\nstatic int sum4(int a, int b, int c, int d) { return a + 2 * b + 3 * c + 4 * d; }\nstatic long sum8(int a, int b, int c, int d, int e, int f, int g, int h) { return a - b + c - d + e - f + g - h * 100; }\nstatic int dif4(int a, int b, int c, int d) { return a - b - c - d; }\nint main(void) {\n  struct P p = {3, 4};\n  int (*gx)(struct P) = getx;\n  struct P (*sw)(struct P) = swap;\n  int (*ops[2])(int, int, int, int) = { sum4, dif4 };\n  long (*s8)(int, int, int, int, int, int, int, int) = sum8;\n  int i;\n  printf(\"%d %d\\n\", gx(p), gx(sw(p)));\n  for (i = 0; i < 2; i++) printf(\"%d\\n\", ops[i](10, 1, 2, 3));\n  printf(\"%ld\\n\", (*s8)(1, 2, 3, 4, 5, 6, 7, 8));\n  return sw(p).x;\n}\n")
+(display (list (cc-run src) (cc-exe-run src)))
 ```
 ---
-    refused: #<err:cc cc: compile: not built yet: the address of getx, which takes a struct or more than three arguments, or answers a struct>
-
-### the address of a function of four arguments
-
-```cc
-(display (guard (e (do (display "refused: ") (write e) ""))
-  (cc-exe-run "int sum4(int a, int b, int c, int d) { return a + b + c + d; }\nint main(void) { int (*f)(int, int, int, int) = sum4; return 0; }")))
+```output
+34 43
+30
+4
+-796
+34 43
+30
+4
+-796
+(4 4)
 ```
----
-    refused: #<err:cc cc: compile: not built yet: the address of sum4, which takes a struct or more than three arguments, or answers a struct>

@@ -1249,6 +1249,11 @@
 ; they share `b` for the plain branch.
 (def %cc-gen-callop ())
 
+; how far into a thunk its branch to the function itself is: past arm64's
+; adr and b, four bytes each, or x86-64's lea r10, [rip + disp32] (seven)
+; and jmp rel32 (five), which the assembler always writes at those lengths
+(def %cc-gen-thunk-direct ())
+
 (def %cc-gen-find
   (fn (_ name)
     (def go (fn (self es)
@@ -1309,11 +1314,11 @@
 (def %cc-gen-scan-calls!
   (fn (self node)
     (if (pair? node)
-      (do (if (if (eq? (first node) (lit call))
-                (%cc-gen-struct? (%cc-gen-ret-find (first (rest node))))
+      (do (if (if (if (eq? (first node) (lit call)) #t (eq? (first node) (lit callx)))
+                (%cc-gen-struct? (%cc-gen-c-type-of node))
                 #f)
             (set! %cc-gen-rslots
-              (pair (pair node (%cc-gen-room! (%cc-gen-ret-find (first (rest node)))))
+              (pair (pair node (%cc-gen-room! (%cc-gen-c-type-of node)))
                 %cc-gen-rslots))
             ())
           (let ((go (fn (go xs) (if (pair? xs) (do (self (first xs)) (go (rest xs))) ()))))
@@ -1787,7 +1792,7 @@
         ((eq? t (lit comma))
           (do (self (first (rest node))) (self (first (rest (rest node))))))
         ((eq? t (lit call)) (%cc-gen-call! node))
-        ((eq? t (lit callx)) (%cc-gen-call-through! (first (rest node)) (first (rest (rest node)))))
+        ((eq? t (lit callx)) (%cc-gen-call-through! node (first (rest node)) (first (rest (rest node)))))
         ((eq? t (lit cast))
           (let ((k (first (rest node))) (e (first (rest (rest node)))))
             (def from (%cc-gen-c-type-of e))
@@ -1839,7 +1844,7 @@
     (def args (first (rest (rest node))))
     (match
       ; a name that is a local's or a global's holds a pointer to a function
-      ((%cc-gen-variable? name) (%cc-gen-call-through! (list (lit var) name) args))
+      ((%cc-gen-variable? name) (%cc-gen-call-through! node (list (lit var) name) args))
       ((null? (%cc-gen-fun-find name)) (%cc-gen-libc-call! name args))
       (#t (%cc-gen-call-fun! node)))))
 
@@ -1980,7 +1985,9 @@
 (def %cc-gen-gate ())       ; the label the gate follows the code at
 
 ; the label of NAME's thunk, which the function's address is: it takes
-; the function's address into x8 and branches to the gate
+; the function's address into x8 and branches to the gate, which is the
+; way in for the C library; the program's own calls through a pointer come
+; in at its last instruction, a branch to the function
 (def %cc-gen-thunk-label
   (fn (_ name)
     (def go (fn (self es)
@@ -2003,6 +2010,7 @@
           (do (asm-label! %cc-gen-asm (rest (first ts)))
               (%cc-gen! (lit adr) x8 (label (%cc-gen-fun-label (first (first ts)))))
               (%cc-gen! (lit b) (label %cc-gen-gate))
+              (%cc-gen! (lit b) (label (%cc-gen-fun-label (first (first ts)))))
               (self (rest ts))))))
     (do (go (reverse %cc-gen-thunks))
         (asm-label! %cc-gen-asm %cc-gen-gate))))
@@ -2088,51 +2096,58 @@
       (#t (not (null? (%cc-gen-fun-find name)))))))
 
 ; The function NAME's address, into x0, taken from where the instruction
-; is.  A call through a pointer hands over the arguments in the first
-; registers (%cc-gen-call-through!), so a function whose address is taken
-; takes at most three, none of them a struct, and answers no struct.
+; is: its thunk's.  The program's own calls through it take any arguments
+; (%cc-gen-call-through!); the C library's, through the gate, hand over the
+; first three registers, which every callback it takes -- qsort's and
+; bsearch's comparison, a signal handler, an atexit function -- fits.
 (def %cc-gen-function-address!
   (fn (_ name)
-    (def params (%cc-gen-params-find name))
     (if (not (null? (%cc-gen-fixed-find name)))
       (%cc-gen-no (string-append "the address of " name ", which is variadic")))
-    (if (if (> (length params) 3) #t
-          (if (%cc-gen-struct? (%cc-gen-ret-find name)) #t
-            (not (null? (filter %cc-gen-struct? params)))))
-      (%cc-gen-no (string-append "the address of " name
-                    ", which takes a struct or more than three arguments, or answers a struct")))
     (%cc-gen! (lit adr) x0 (label (%cc-gen-thunk-label name)))))
 
-; A call through TARGET, a pointer to a function, with ARGS: the address,
-; then each argument in its own C type's promoted form, wait on the stack;
-; the arguments go into the first registers and the address into x8,
-; which three arguments leave free.  It answers what the pointer's RET says.
+; A call through TARGET, a pointer to a function, with ARGS, made by the
+; program's own convention: the pointer is a thunk (%cc-gen-thunks!), whose
+; last instruction, %cc-gen-thunk-direct bytes in, branches to the function
+; itself.  The pointer's C type names no parameters, so each argument's own
+; C type lays it out, an array going as a pointer.  The address waits on
+; the stack under the arguments and is taken into x19 last, every argument
+; register being spoken for; x19 is the frame's base, which equals x20
+; between calls, so it is put back from x20 once the callee returns.  It
+; answers what the pointer's RET says, a struct into the call's own slot.
 (def %cc-gen-call-through!
-  (fn (_ target args)
-    (if (not (%cc-gen-fnptr? (%cc-gen-c-type-of target)))
+  (fn (_ node target0 args)
+    ; * of a pointer to a function is the function, which is the pointer
+    ; again: (*f)(x) calls f
+    (def strip
+      (fn (self e)
+        (if (if (pair? e)
+              (if (eq? (first e) (lit un))
+                (if (string=? (first (rest e)) "*")
+                  (%cc-gen-fnptr? (%cc-gen-c-type-of (first (rest (rest e)))))
+                  #f)
+                #f)
+              #f)
+          (self (first (rest (rest e))))
+          e)))
+    (def target (strip target0))
+    (def k (%cc-gen-c-type-of target))
+    (if (not (%cc-gen-fnptr? k))
       (%cc-gen-no "a call through something that is not a pointer to a function"))
-    (if (> (length args) 3)
-      (%cc-gen-no "a call through a pointer with more than three arguments"))
-    (def push-all
-      (fn (self as)
-        (if (null? as) ()
-          (do (if (%cc-gen-struct? (%cc-gen-c-type-of (first as)))
-                (%cc-gen-no "a struct handed to a function through a pointer"))
-              (%cc-gen-expr! (first as))
-              (asm-push! %cc-gen-asm x0)
-              (self (rest as))))))
-    ; the last one pushed is on top, so the registers fill from the last back
-    (def pop-all
-      (fn (self rs)
-        (if (null? rs) ()
-          (do (asm-pop! %cc-gen-asm (first rs)) (self (rest rs))))))
+    (def c-types
+      (map (fn (_ a)
+             (let ((ak (%cc-gen-c-type-of a)))
+               (if (%cc-gen-array? ak) (list (lit ptr) (c-type-elem ak)) ak)))
+        args))
     (do (%cc-gen-expr! target)
         (asm-push! %cc-gen-asm x0)
-        (push-all args)
-        (pop-all (reverse (%cc-gen-take (length args) (list x0 x1 x2))))
-        (asm-pop! %cc-gen-asm x8)
-        (%cc-gen-frame-top!)
-        (%cc-gen! (lit blr) x8))))
+        (%cc-gen-call-laid! node args c-types (%cc-gen-struct? (first (rest k)))
+          (fn (_) ())
+          (fn (_)
+            (do (asm-pop! %cc-gen-asm x19)
+                (%cc-gen! (lit add) x19 x19 (imm %cc-gen-thunk-direct))
+                (%cc-gen! (lit blr) x19)
+                (%cc-gen! (lit mov) x19 x20)))))))
 
 (def %cc-gen-call-fun!
   (fn (_ node)
@@ -2171,15 +2186,26 @@
         (do (push-all extras)
             (pop-into (- (length extras) 1))
             (%cc-gen-va-record!))))
-    (def sret? (%cc-gen-struct? (%cc-gen-ret-find name)))
-    ; (ARG C-TYPE . HOME) per argument; past the parameters, an argument's
-    ; own C type says where it goes
+    ; past the parameters, an argument's own C type says where it goes
     (def c-types
       (let ((go (fn (self as ps)
                   (if (null? as) ()
                     (pair (if (null? ps) (%cc-gen-c-type-of (first as)) (first ps))
                       (self (rest as) (if (null? ps) () (rest ps))))))))
         (go args params)))
+    (%cc-gen-call-laid! node args c-types (%cc-gen-struct? (%cc-gen-ret-find name))
+      (fn (_) (if (null? fixed) () (fill-extras)))
+      (fn (_) (%cc-gen! %cc-gen-callop (label to))))))
+
+; The arguments ARGS of the call NODE laid out by their C-TYPES, the
+; callee's parameters' (%cc-gen-homes), then EXTRAS! run and BRANCH! made.
+; The ones that go in registers are worked out first and wait on the
+; stack, then the ones above; every argument is worked out before any is
+; stored, so a call inside one cannot overwrite the others.  A call that
+; answers a struct (SRET?) first says where the struct goes.
+(def %cc-gen-call-laid!
+  (fn (_ node args c-types sret? extras! branch!)
+    ; (ARG C-TYPE . HOME) per argument
     (def triples
       (let ((go (fn (self as ks hs)
                   (if (null? as) ()
@@ -2221,7 +2247,7 @@
               (self (rest ts))))))
     (do (push-each regs)
         (push-each above)
-        (if (null? fixed) () (fill-extras))
+        (extras!)
         (store-each (reverse above))
         (if sret?
           (do (%cc-gen-address! x19 (%cc-gen-rslot-of node))
@@ -2229,7 +2255,7 @@
               (%cc-gen! (lit str) x0 (mem x1 0)))
           ())
         (pop-each (reverse regs))
-        (%cc-gen! %cc-gen-callop (label to)))))
+        (branch!))))
 
 ; the first N of a list
 (def %cc-gen-take
@@ -2860,6 +2886,7 @@
     (set! %cc-gen-nlabels 0)
     (set! %cc-gen-link (if (%cc-gen-arm64? target) %cc-gen-lr ()))
     (set! %cc-gen-callop (if (%cc-gen-arm64? target) (lit bl) (lit call)))
+    (set! %cc-gen-thunk-direct (if (%cc-gen-arm64? target) 8 12))
     (set! %cc-gen-va-record
       (match
         ((eq? target (lit elf-x86-64)) (lit sysv))

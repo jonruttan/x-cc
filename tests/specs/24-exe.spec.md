@@ -59,13 +59,12 @@ eight bits of what main returns.
 ---
     (34 231 19 5)
 
-## the refusal
+## through a pointer
 
-### the address of a function that answers a struct
+### a struct answered through a pointer to the function
 
 ```cc
-(display (guard (e (do (display "refused: ") (write e) ""))
-  (cc-exe-run "struct P { int x; };\nstruct P mk(void) { struct P p = {1}; return p; }\nint main(void) { struct P (*f)(void) = mk; return 0; }")))
+(display (cc-exe-run "struct P { int x; };\nstruct P mk(void) { struct P p = {1}; return p; }\nint main(void) { struct P (*f)(void) = mk; return f().x + 4; }"))
 ```
 ---
-    refused: #<err:cc cc: compile: not built yet: the address of mk, which takes a struct or more than three arguments, or answers a struct>
+    5

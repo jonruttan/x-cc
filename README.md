@@ -38,8 +38,12 @@ string literals, `+ - * / %`, `& | ^ << >>`, the six comparisons,
 `&&`, `||`, the ternary, the comma, unary `- ~ ! & *`, casts,
 subscripts, and `.` and `->`.  A pointer to a function leads to a thunk
 that takes the function's address and branches to a gate the compiler
-writes out after the code, and a call through one hands over up to three
-arguments, none of them a struct.  The gate keeps the caller's
+writes out after the code, then branches to the function itself.  The
+program's own call through a pointer comes in at that last branch and
+lays its arguments out as a direct call does, so it takes any number of
+them, structs among them, and may answer a struct.  The C library comes
+in at the gate, which hands over the first three arguments, as many as
+any callback it takes.  The gate keeps the caller's
 registers, takes up the program's own -- the data and the trampoline
 from where the gate stands, the frame stack's top from where the last
 call out left it -- and calls the function, so the C library can call
