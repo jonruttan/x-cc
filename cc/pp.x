@@ -29,7 +29,7 @@
 (import cc/prims append byte-at byte-len convert filter length map reverse string-append
   string-concat string=? substring)
 (import cc/tokens cc-raw-tokens cc-token)
-(import cc/parse cc-parse-const plain-char)
+(import cc/parse cc-parse-const cc-token-lines! plain-char)
 
 ; The type handle this file asks convert for, fetched by name through the
 ; platform's public door and private to this module.
@@ -62,16 +62,30 @@
   (fn (_ text)
     (%cc-trim-sp (filter (fn (_ t) (not (%cc-tag? t (lit nl)))) (cc-raw-tokens text)))))
 
-; the raw tokens split at the newlines: a list of lines, each a token list
+; the raw tokens split at the newlines: ((N . TOKENS) ...), N the number of
+; the line a line starts on.  A block comment is a blank, its newlines
+; counted, so the line after it has its own number.
 (def %cc-lines
   (fn (_ ts)
+    (def nls
+      (fn (_ s)
+        (def end (byte-len s))
+        (def go (fn (self i k) (if (>= i end) k (self (+ i 1) (if (= (byte-at s i) 10) (+ k 1) k)))))
+        (go 0 0)))
     (def go
-      (fn (self ts line acc)
+      (fn (self ts n start line acc)
         (match
-          ((null? ts) (reverse (if (null? line) acc (pair (reverse line) acc))))
-          ((%cc-tag? (first ts) (lit nl)) (self (rest ts) () (pair (reverse line) acc)))
-          (#t (self (rest ts) (pair (first ts) line) acc)))))
-    (go ts () ())))
+          ((null? ts) (reverse (if (null? line) acc (pair (pair start (reverse line)) acc))))
+          ((%cc-tag? (first ts) (lit nl))
+            (self (rest ts) (+ n 1) (+ n 1) () (pair (pair start (reverse line)) acc)))
+          ((%cc-tag? (first ts) (lit cmt))
+            (self (rest ts) (+ n (nls (%cc-text (first ts)))) start
+              (pair (list (lit sp) " ") line) acc))
+          (#t (self (rest ts) n start (pair (first ts) line) acc)))))
+    (go ts 1 1 () ())))
+
+; the line each token of the walk's output came from, the last first
+(def %cc-pp-lines ())
 
 ; --- macros ------------------------------------------------------------------
 
@@ -331,6 +345,7 @@
 ; directive expands them under the macros as they stand.
 (def %cc-preprocess
   (fn (_ src)
+    (set! %cc-pp-lines ())
     (def live?
       (fn (self st) (if (null? st) #t (if (first (first st)) (self (rest st)) #f))))
     (def undef
@@ -341,12 +356,14 @@
     (def flush
       (fn (_ wait n macros out)
         (if (null? wait) out
-          (append
-            (reverse (%cc-expand (reverse wait)
-                       (pair (list "__LINE__" (lit obj) (list (lit num) (convert n %string) 1))
-                         macros)
-                       ()))
-            out))))
+          (let ((e (%cc-expand (reverse wait)
+                     (pair (list "__LINE__" (lit obj) (list (lit num) (convert n %string) 1))
+                       macros)
+                     ())))
+            (def mark (fn (self ts) (if (null? ts) () (do (set! %cc-pp-lines (pair n %cc-pp-lines))
+                                                         (self (rest ts))))))
+            (mark e)
+            (append (reverse e) out)))))
     ; does WAIT close every ( it opens: a call to a function-like macro may
     ; run on to the next line
     (def closed?
@@ -357,58 +374,58 @@
           ((%cc-op-is? (first ts) ")") (self (rest ts) (- depth 1)))
           (#t (self (rest ts) depth)))))
     (def go
-      (fn (self ls n macros stack wait out)
+      (fn (self ls prev macros stack wait out)
         (if (null? ls)
           (if (not (null? stack))
             (%cc-oops "unterminated #if")
-            (reverse (flush wait n macros out)))
-          (let ((line (%cc-skip-sp (first ls))))
+            (reverse (flush wait prev macros out)))
+          (let ((line (%cc-skip-sp (rest (first ls)))) (n (first (first ls))))
             (def on (live? stack))
             (if (if (null? line) #t (not (%cc-op-is? (first line) "#")))
               ; a line break is a blank between the lines' tokens; a line
               ; whose parentheses close expands now, under its own number
               (let ((w (if on (append (reverse line) (pair (list (lit sp) " ") wait)) wait)))
                 (if (closed? w 0)
-                  (self (rest ls) (+ n 1) macros stack () (flush w n macros out))
-                  (self (rest ls) (+ n 1) macros stack w out)))
+                  (self (rest ls) n macros stack () (flush w n macros out))
+                  (self (rest ls) n macros stack w out)))
               (let ((ts (%cc-skip-sp (rest line))))
                 (def out2 (flush wait n macros out))
                 (def word (if (if (null? ts) #f (%cc-name? (first ts))) (%cc-text (first ts)) ""))
                 (def args (%cc-skip-sp (if (null? ts) ts (rest ts))))
                 (match
                   ((string=? word "ifdef")
-                    (self (rest ls) (+ n 1) macros
+                    (self (rest ls) n macros
                       (pair (open on (if on (not (null? (%cc-macro macros (%cc-directive-name "#ifdef" args)))) #f))
                         stack) () out2))
                   ((string=? word "ifndef")
-                    (self (rest ls) (+ n 1) macros
+                    (self (rest ls) n macros
                       (pair (open on (if on (null? (%cc-macro macros (%cc-directive-name "#ifndef" args))) #f))
                         stack) () out2))
                   ((string=? word "if")
-                    (self (rest ls) (+ n 1) macros
+                    (self (rest ls) n macros
                       (pair (open on (if on (%cc-if-true? args macros) #f)) stack) () out2))
                   ((string=? word "elif")
                     (if (null? stack) (%cc-oops "#elif without #if")
-                      (self (rest ls) (+ n 1) macros
+                      (self (rest ls) n macros
                         (pair (if (rest (first stack)) (pair #f #t)
                                 (let ((v (%cc-if-true? args macros))) (pair v v)))
                           (rest stack))
                         () out2)))
                   ((string=? word "else")
                     (if (null? stack) (%cc-oops "#else without #if")
-                      (self (rest ls) (+ n 1) macros
+                      (self (rest ls) n macros
                         (pair (pair (not (rest (first stack))) #t) (rest stack)) () out2)))
                   ((string=? word "endif")
                     (if (null? stack) (%cc-oops "#endif without #if")
-                      (self (rest ls) (+ n 1) macros (rest stack) () out2)))
-                  ((not on) (self (rest ls) (+ n 1) macros stack () out2))
+                      (self (rest ls) n macros (rest stack) () out2)))
+                  ((not on) (self (rest ls) n macros stack () out2))
                   ((string=? word "include")
-                    (self (rest ls) (+ n 1) (append (%cc-header-macros (%cc-spell (%cc-no-sp args))) macros)
+                    (self (rest ls) n (append (%cc-header-macros (%cc-spell (%cc-no-sp args))) macros)
                       stack () out2))
                   ((string=? word "define")
-                    (self (rest ls) (+ n 1) (pair (%cc-define args) macros) stack () out2))
+                    (self (rest ls) n (pair (%cc-define args) macros) stack () out2))
                   ((string=? word "undef")
-                    (self (rest ls) (+ n 1) (undef (%cc-directive-name "#undef" args) macros) stack () out2))
+                    (self (rest ls) n (undef (%cc-directive-name "#undef" args) macros) stack () out2))
                   (#t (%cc-oops (string-append "unsupported directive #" word))))))))))
     (go (%cc-lines (cc-raw-tokens src)) 1 () () () ())))
 
@@ -416,17 +433,28 @@
 ; made the parser's, and a string literal right after another joined to it
 (def cc-lex
   (fn (_ src)
+    (def raw (%cc-preprocess src))
+    ; TS and NS, each token's line, walked together: (TOKENS . LINES)
     (def go
-      (fn (self ts acc)
-        (if (null? ts) (reverse acc)
-          (let ((t (cc-token (first ts))))
-            (if (if (eq? (first t) (lit str))
-                  (if (null? acc) #f (eq? (first (first acc)) (lit str)))
-                  #f)
-              (self (rest ts)
-                (pair (list (lit str) (string-append (first (rest (first acc))) (first (rest t))))
-                  (rest acc)))
-              (self (rest ts) (pair t acc)))))))
-    (go (%cc-no-sp (%cc-preprocess src)) ())))
+      (fn (self ts ns acc lacc)
+        (def n (if (null? ns) 0 (first ns)))
+        (def ns2 (if (null? ns) ns (rest ns)))
+        (match
+          ((null? ts) (pair (reverse acc) (reverse lacc)))
+          ((%cc-tag? (first ts) (lit sp)) (self (rest ts) ns2 acc lacc))
+          (#t
+            (let ((t (cc-token (first ts))))
+              (if (if (eq? (first t) (lit str))
+                    (if (null? acc) #f (eq? (first (first acc)) (lit str)))
+                    #f)
+                (self (rest ts) ns2
+                  (pair (list (lit str) (string-append (first (rest (first acc))) (first (rest t))))
+                    (rest acc))
+                  lacc)
+                (self (rest ts) ns2 (pair t acc) (pair n lacc))))))))
+    (def r (go raw (reverse %cc-pp-lines) () ()))
+    ; the parser reports an error at its token's line
+    (cc-token-lines! (first r) (rest r))
+    (first r)))
 
 (provide cc/pp cc-lex)

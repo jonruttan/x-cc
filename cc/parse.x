@@ -39,12 +39,45 @@
 ; platform's public door and private to this module.
 (def %string (Type named STRING))
 
+; Where an error is.  cc-lex hands over its tokens' lines with the tokens
+; (cc-token-lines!); the parser keeps the tokens it was given and the rest
+; of them it last looked at, so an error is placed at the line of the token
+; it was looking at.  Tokens that did not come from cc-lex, or a constant
+; expression for #if, have no lines, and an error in them says none.
+(def %cc-p-lexed ())    ; the tokens cc-lex last answered
+(def %cc-p-lines ())    ; their lines, in order
+(def %cc-p-all ())      ; the tokens being parsed, when they are cc-lex's
+(def %cc-p-at ())       ; the rest of them last looked at
+
+(def cc-token-lines!
+  (fn (_ toks lines)
+    (set! %cc-p-lexed toks)
+    (set! %cc-p-lines lines)))
+
+; the line of the token the parser was looking at, or of the BACK-th token
+; before it, or nil
+(def %cc-p-line
+  (fn (_ back)
+    (if (null? %cc-p-all) ()
+      (let ((i (- (- (length %cc-p-all) (length %cc-p-at)) back)))
+        ; past the last token, the last token's line
+        (def j (if (< i (length %cc-p-lines)) i (- (length %cc-p-lines) 1)))
+        (def go (fn (self ls k) (if (null? ls) () (if (= k 0) (first ls) (self (rest ls) (- k 1))))))
+        (if (< j 0) () (go %cc-p-lines j))))))
+
+; MSG raised at the line of the token the parser was looking at, or, BACK
+; given, of the token before it: what a missing ; follows
 (def %cc-p-err
-  (fn (_ msg)
-    (Err raise (lit cc) (string-append "cc: parse: " msg) ())))
+  (fn (_ msg . back)
+    (def n (%cc-p-line (if (null? back) 0 1)))
+    (Err raise (lit cc)
+      (string-append "cc: parse: "
+        (if (null? n) msg (string-append "line " (string-append (convert n %string) (string-append ": " msg)))))
+      ())))
 
 (def %cc-p-op?
   (fn (_ toks s)
+    (set! %cc-p-at toks)
     (if (null? toks) #f
       (if (eq? (first (first toks)) (lit op))
         (string=? (first (rest (first toks))) s)
@@ -52,6 +85,7 @@
 
 (def %cc-p-kw?
   (fn (_ toks k)
+    (set! %cc-p-at toks)
     (if (null? toks) #f
       (if (eq? (first (first toks)) (lit kw))
         (eq? (first (rest (first toks))) k)
@@ -59,13 +93,14 @@
 
 (def %cc-p-id?
   (fn (_ toks)
+    (set! %cc-p-at toks)
     (if (null? toks) #f (eq? (first (first toks)) (lit id)))))
 
 (def %cc-p-eat
   (fn (_ toks s)
     (if (%cc-p-op? toks s)
       (rest toks)
-      (%cc-p-err (string-append "expected " s)))))
+      (%cc-p-err (string-append "expected " s) (lit after)))))
 
 ; the keywords the parser knows and refuses by name, none at present
 (def %cc-p-hard
@@ -1228,6 +1263,7 @@
 
 (def cc-parse
   (fn (_ toks)
+    (set! %cc-p-all (if (eq? toks %cc-p-lexed) toks ()))
     (set! %cc-p-structs ())
     ; <stdarg.h>'s va_list is this one
     (set! %cc-p-typedefs (list (pair "__builtin_va_list" %cc-p-va-list)))
@@ -1281,9 +1317,10 @@
 ; takes one
 (def cc-parse-const
   (fn (_ toks)
+    (set! %cc-p-all ())
     (def r (%cc-e-tern toks))
     (if (not (null? (rest r))) (%cc-p-err "expected a constant expression"))
     (%cc-p-const (first r))))
 
-(provide cc/parse cc-parse cc-parse-const c-type-size c-type-align plain-char round-up
+(provide cc/parse cc-parse cc-parse-const cc-token-lines! c-type-size c-type-align plain-char round-up
   struct-entry struct-table)
