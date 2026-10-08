@@ -10,6 +10,6 @@
 ; ~9s of every invocation that a tool never uses.
 (dialect he)
 
-(requires-release "v0.26.0")
+(requires-release "v0.27.0")
 
 (entry "run.x")
