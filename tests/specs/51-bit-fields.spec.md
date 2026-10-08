@@ -126,4 +126,4 @@ a 5 -7 b 4 4
   (cc-exe-run "struct D { char c; long v : 40; };\nint main(void) { struct D d; d.v = 1; return 0; }")))
 ```
 ---
-    refused: #<err:cc cc: parse: not built yet: a bit-field of a long>
+    refused: #<err:cc cc: parse: line 1: not built yet: a bit-field of a long>

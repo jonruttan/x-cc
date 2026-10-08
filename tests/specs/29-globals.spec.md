@@ -75,7 +75,7 @@ tick
   (cc-exe-run "long double d;\nint main(void) { return 0; }")))
 ```
 ---
-    refused: #<err:cc cc: parse: not built yet: long double>
+    refused: #<err:cc cc: parse: line 1: not built yet: long double>
 
 ### one initialized by something that is not a constant
 

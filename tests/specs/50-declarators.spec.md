@@ -105,4 +105,4 @@ prints through /usr/bin/cc.
   (cc-exe-run "int main(void) { int (*rows[2])[3]; return 0; }")))
 ```
 ---
-    refused: #<err:cc cc: parse: not built yet: an array of pointers to arrays>
+    refused: #<err:cc cc: parse: line 1: not built yet: an array of pointers to arrays>

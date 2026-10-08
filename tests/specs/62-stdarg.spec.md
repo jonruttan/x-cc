@@ -65,7 +65,7 @@ z=3
   (cc-run "#include <stdarg.h>\nstruct P { int x; };\nint f(int n, ...) { va_list ap; struct P p; va_start(ap, n); p = va_arg(ap, struct P); va_end(ap); return p.x; }\nint main(void) { return 0; }\n")))
 ```
 ---
-    refused: #<err:cc cc: parse: not built yet: a struct from va_arg>
+    refused: #<err:cc cc: parse: line 3: not built yet: a struct from va_arg>
 
 ### a ... with no parameter before it
 
@@ -74,4 +74,4 @@ z=3
   (cc-run "int f(...) { return 0; }\nint main(void) { return f(); }\n")))
 ```
 ---
-    refused: #<err:cc cc: parse: a ... with no parameter before it>
+    refused: #<err:cc cc: parse: line 1: a ... with no parameter before it>

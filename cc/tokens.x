@@ -18,8 +18,9 @@
 ;   str  a string literal and chr a character constant, as written
 ;   op   an operator or punctuator, the longest that matches
 ;   bad  a byte no other rule reads
+;   cmt  a block comment, whose newlines the preprocessor counts
 ;
-; A comment drops: a block comment whole, a line comment up to its newline.
+; A line comment drops up to its newline.
 ; cc-token makes a raw token the parser's: (num N [C-TYPE]) (str S) (id S)
 ; (kw SYM) (op S), a number its value and C type, a literal its bytes.
 (module cc/tokens)
@@ -66,7 +67,7 @@
     (if (null? (first %cc-lexer))
       (let ((l (Lexer make
                  (list (Lexer run (lit sp) (list 32 9 13 12 11) (list 32 9 13 12 11))
-                       (Lexer until () "/*" "*/")
+                       (Lexer until (lit cmt) "/*" "*/")
                        (Lexer until () "//" "\n")
                        (Lexer table (lit nl) (list "\n"))
                        (Lexer table (lit kw) %cc-keywords)

@@ -101,4 +101,4 @@ Each status below is the one the same source gives when compiled with
 (write (guard (e (e msg)) (cc-exe-run "int main(void) { long double f = 1.5; return 0; }")))
 ```
 ---
-    "cc: parse: not built yet: long double"
+    "cc: parse: line 1: not built yet: long double"

@@ -198,6 +198,12 @@ parameters, and rescan with the macro open; no parentheses are added,
 as in C.  A line expands under the macros defined so far once its
 parentheses close, so a call may run over lines.
 
+A parse error names its line: `cc: parse: line 2: expected ;`.  The line
+is the source's, counted through the preprocessor -- a directive and
+each line of a block comment count -- and a missing token is placed on
+the line of the token it should have followed.  A macro's tokens take
+the line they are used on.  An `#if` condition's error has no line.
+
 `#if`/`#ifdef`/`#ifndef`/`#elif`/`#else`/`#endif`/`#undef` select
 lines; an inactive region still tracks its nesting.  An `#if` or
 `#elif` condition is C's: `defined NAME` and `defined (NAME)` are 1 or

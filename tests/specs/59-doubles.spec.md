@@ -256,7 +256,7 @@ cc: run failed: #<err:cc cc: run: the operator % on a double>
 (write (guard (e (e msg)) (cc-run "int main(void) { long double d = 5; return 0; }")))
 ```
 ---
-    "cc: parse: not built yet: long double"
+    "cc: parse: line 1: not built yet: long double"
 
 ### double long
 
@@ -264,4 +264,4 @@ cc: run failed: #<err:cc cc: run: the operator % on a double>
 (write (guard (e (e msg)) (cc-run "int main(void) { double long d = 5; return 0; }")))
 ```
 ---
-    "cc: parse: not built yet: long double"
+    "cc: parse: line 1: not built yet: long double"
