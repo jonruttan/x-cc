@@ -172,7 +172,8 @@ side); character constants; C's escapes, octal and hex among them;
 `#include` (dropped -- the C library provides the functions -- and one
 of a standard header defines its macros: `EOF`, `NULL`, `EXIT_SUCCESS`,
 `EXIT_FAILURE`, `<math.h>`'s `M_PI` and the rest, `<limits.h>`'s limits),
-object-like `#define` spliced token-wise; `__LINE__`; // and /* */
+object-like `#define` spliced token-wise; `__LINE__`; `__FILE__`, the path
+as the command line gives it, or `<stdin>` for text from no file; // and /* */
 comments.  `x -l cc -- run prog.c ARG ...` hands main the file's name
 and the ARGs as its argv, and fd 0 as its standard input.
 

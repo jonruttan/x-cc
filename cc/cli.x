@@ -20,6 +20,7 @@
   string=? sys-exit x-write)
 (import cc/eval cc-run-with)
 (import cc/gen cc-compile)
+(import cc/pp cc-source-name!)
 (import x/sys/opts Opts)
 
 (def %cc-cli-engine-flag?
@@ -104,13 +105,17 @@
               (string-append "cc: no such file: "
                 (string-append (first (rest plan)) "\n")))
             (sys-exit 2)))
+      ; __FILE__ is the path as the command line gives it, as in C
       ((eq? label (lit build))
         (sys-exit
           (guard (e (do (display "cc: build failed: ") (x-write e) (newline) 1))
-            (do (cc-compile (file-read-all (first (rest plan))) (first (rest (rest plan)))) 0))))
+            (do (cc-source-name! (first (rest plan)))
+                (cc-compile (file-read-all (first (rest plan))) (first (rest (rest plan))))
+                0))))
       (#t
-        (sys-exit
-          (cc-run-with (file-read-all (first (rest plan))) (lit caller)
-            (pair (first (rest plan)) (first (rest (rest plan))))))))))
+        (do (cc-source-name! (first (rest plan)))
+            (sys-exit
+              (cc-run-with (file-read-all (first (rest plan))) (lit caller)
+                (pair (first (rest plan)) (first (rest (rest plan)))))))))))
 
 (provide cc/cli cc-argv cc-main cc-cli-plan cc-refusal cc-usage)

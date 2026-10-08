@@ -87,6 +87,13 @@
 ; the line each token of the walk's output came from, the last first
 (def %cc-pp-lines ())
 
+; The name __FILE__ spells: the path the next cc-lex reads from, or
+; "<stdin>", as /usr/bin/cc names text that came from no file.  It holds
+; for one cc-lex.
+(def %cc-pp-file "<stdin>")
+(def cc-source-name!
+  (fn (_ path) (set! %cc-pp-file path)))
+
 ; --- macros ------------------------------------------------------------------
 
 ; the macro NAME, or nil
@@ -346,6 +353,9 @@
 (def %cc-preprocess
   (fn (_ src)
     (set! %cc-pp-lines ())
+    (def file-macro
+      (list "__FILE__" (lit obj) (%cc-stringize (list (list (lit id) %cc-pp-file)))))
+    (set! %cc-pp-file "<stdin>")
     (def live?
       (fn (self st) (if (null? st) #t (if (first (first st)) (self (rest st)) #f))))
     (def undef
@@ -358,7 +368,7 @@
         (if (null? wait) out
           (let ((e (%cc-expand (reverse wait)
                      (pair (list "__LINE__" (lit obj) (list (lit num) (convert n %string) 1))
-                       macros)
+                       (pair file-macro macros))
                      ())))
             (def mark (fn (self ts) (if (null? ts) () (do (set! %cc-pp-lines (pair n %cc-pp-lines))
                                                          (self (rest ts))))))
@@ -457,4 +467,4 @@
     (cc-token-lines! (first r) (rest r))
     (first r)))
 
-(provide cc/pp cc-lex)
+(provide cc/pp cc-lex cc-source-name!)
