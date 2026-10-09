@@ -132,7 +132,12 @@ address of a variadic function.
 runs the same front end through an evaluator with a real memory model
 instead: each function is translated, the first time it is called, into
 x closures with every C type, conversion and place settled, and a call
-makes one frame holding all its locals.  It is the reference the
+makes one frame holding all its locals.  A statement hands what follows
+it its outcome as a tail call, and an expression that calls one of the
+program's functions hands its value on the same way, so a C call never
+waits on x's stack: what is pending is closures on the heap, and a
+program recurses until its own stack runs out, "stack overflow" as a
+native one.  It is the reference the
 compiler is checked against: every
 spec expectation comes from the same source compiled with /usr/bin/cc
 and run.  Under `run`, fib recurses, pointers write through, arrays

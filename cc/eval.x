@@ -1017,27 +1017,33 @@
         (if (if (eq? (first sub) (lit var)) (null? (%cc-k-place (first (rest sub)))) #f)
           (let ((e (%cc-k-expr sub))) (pair (list (lit ptr) (first e)) (rest e)))
           (let ((l (%cc-k-lval sub))) (pair (list (lit ptr) (first l)) (rest l)))))
-      (#t
-        (let ((e (%cc-k-expr sub)))
-          (def f (rest e))
-          (def k (promoted-c-type (first e)))
-          (pair (if (string=? op "!") (lit int) k)
-            (match
-              ((real? k)
-                (match
-                  ((string=? op "!") (fn (_ fp) (%cc-b (real-zero? (f fp) k))))
-                  ((string=? op "-") (fn (_ fp) (real-negate (f fp) k)))
-                  (#t (fn (_ fp) (%cc-oops (string-append "the operator ~ on a "
-                                              (if (eq? k (lit float)) "float" "double")))))))
-              ((string=? op "!") (fn (_ fp) (%cc-b (= (f fp) 0))))
-              ((string=? op "-") (let ((c (%cc-k-conv k))) (fn (_ fp) (c (fx- 0 (f fp))))))
-              (#t (let ((c (%cc-k-conv k))) (fn (_ fp) (c (fx- (fx- 0 (f fp)) 1))))))))))))
+      (#t (%cc-k-unary-of op (%cc-k-expr sub))))))
+
+; - ~ ! on E, a translated expression, in its C type promoted
+(def %cc-k-unary-of
+  (fn (_ op e)
+    (def f (rest e))
+    (def k (promoted-c-type (first e)))
+    (pair (if (string=? op "!") (lit int) k)
+      (match
+        ((real? k)
+          (match
+            ((string=? op "!") (fn (_ fp) (%cc-b (real-zero? (f fp) k))))
+            ((string=? op "-") (fn (_ fp) (real-negate (f fp) k)))
+            (#t (fn (_ fp) (%cc-oops (string-append "the operator ~ on a "
+                                        (if (eq? k (lit float)) "float" "double")))))))
+        ((string=? op "!") (fn (_ fp) (%cc-b (= (f fp) 0))))
+        ((string=? op "-") (let ((c (%cc-k-conv k))) (fn (_ fp) (c (fx- 0 (f fp))))))
+        (#t (let ((c (%cc-k-conv k))) (fn (_ fp) (c (fx- (fx- 0 (f fp)) 1)))))))))
 
 ; ++ and --, before or after: a place of C type K moves by what `+ 1` moves
 ; it by -- an address by what it points at, a real value by 1.0
 (def %cc-k-step
-  (fn (_ node up? after?)
-    (def l (%cc-k-lval (%cc-k-a node)))
+  (fn (_ node up? after?) (%cc-k-step-of (%cc-k-lval (%cc-k-a node)) up? after?)))
+
+; the step on L, a translated place
+(def %cc-k-step-of
+  (fn (_ l up? after?)
     (def k (first l))
     (def fa (rest l))
     (def ld (%cc-k-load k))
@@ -1054,9 +1060,12 @@
         (fn (_ fp) (def a (fa fp)) (st a (step (ld a))) (ld a))))))
 
 (def %cc-k-assign
-  (fn (_ node)
-    (def l (%cc-k-lval (%cc-k-a node)))
-    (def r (%cc-k-expr (%cc-k-b node)))
+  (fn (_ node) (%cc-k-assign-of (%cc-k-lval (%cc-k-a node)) (%cc-k-expr (%cc-k-b node)))))
+
+; R, a translated value, stored at L, a translated place; the value is
+; worked out first
+(def %cc-k-assign-of
+  (fn (_ l r)
     (def k (first l))
     (def fa (rest l))
     (def fr (rest r))
@@ -1069,6 +1078,16 @@
         (let ((cf (%cc-k-from (first r) k)) (st (%cc-k-store k)) (ld (%cc-k-load k)))
           (fn (_ fp) (def v (fr fp)) (def a (fa fp)) (st a (cf v)) (ld a)))))))
 
+; the C type a ternary's arms of C types KA and KB meet in: a pointer when
+; either is an address, else the C type their values meet in
+(def %cc-k-ternary-c-type
+  (fn (_ ka kb)
+    (match
+      ((%cc-address? ka) (%cc-decay ka))
+      ((%cc-address? kb) (%cc-decay kb))
+      ((%cc-c-type-decays? ka) ka)
+      (#t (common-c-type ka kb)))))
+
 (def %cc-k-ternary
   (fn (_ node)
     (def t (%cc-k-test (%cc-k-a node)))
@@ -1076,14 +1095,7 @@
     (def eb (%cc-k-expr (%cc-k-c node)))
     (def ka (first ea))
     (def kb (first eb))
-    ; the arms meet as a pointer when either is an address, else in the C
-    ; type their values meet in
-    (def k
-      (match
-        ((%cc-address? ka) (%cc-decay ka))
-        ((%cc-address? kb) (%cc-decay kb))
-        ((%cc-c-type-decays? ka) ka)
-        (#t (common-c-type ka kb))))
+    (def k (%cc-k-ternary-c-type ka kb))
     (def fa (rest ea))
     (def fb (rest eb))
     (pair k
@@ -1240,6 +1252,20 @@
     (def v ((first cs) ((first fs) fp)))
     (pair v (go (rest fs) (rest cs) fp))))
 
+; the C type the function NAME answers, the program's or the library's
+(def %cc-k-named-c-type
+  (fn (_ name)
+    (def f (%cc-fun name))
+    (if (null? f) (library-c-type name)
+      (let ((r (rest (rest (rest f))))) (if (null? r) (lit int) (first r))))))
+
+; N without the * in front of it: * on a function value is the function
+(def %cc-k-strip-deref
+  (fn (self n)
+    (if (if (eq? (first n) (lit un)) (string=? (first (rest n)) "*") #f)
+      (self (first (rest (rest n))))
+      n)))
+
 (set! %cc-k-call
   (fn (_ node)
     (def args (map (fn (_ a) (%cc-k-expr a)) (%cc-k-b node)))
@@ -1250,29 +1276,292 @@
     (if named?
       ; a named call: its function's C type, or the library's
       (let ((name (%cc-k-a node)))
-        (def f (%cc-fun name))
-        (def k (if (null? f) (library-c-type name)
-                 (let ((r (rest (rest (rest f))))) (if (null? r) (lit int) (first r)))))
         (def cs (%cc-k-arg-convs name ks))
-        (pair k (fn (_ fp) (%cc-call name (%cc-k-arg-values fs cs fp)))))
+        (pair (%cc-k-named-c-type name) (fn (_ fp) (%cc-call name (%cc-k-arg-values fs cs fp)))))
       ; a call through a value: a variable holding a function, or any other
       ; expression -- (*f)(x) is f(x), * on a function value the function
       (let ((target
               (if (eq? (first node) (lit call))
                 (%cc-k-expr (list (lit var) (%cc-k-a node)))
                 (%cc-k-expr (%cc-k-a node)))))
-        (def strip
-          (fn (self n)
-            (if (if (eq? (first n) (lit un)) (string=? (first (rest n)) "*") #f)
-              (self (first (rest (rest n))))
-              n)))
         (def ft
           (if (eq? (first node) (lit call)) (rest target)
-            (rest (%cc-k-expr (strip (%cc-k-a node))))))
+            (rest (%cc-k-expr (%cc-k-strip-deref (%cc-k-a node))))))
         (pair (%cc-called-c-type (first target))
           (fn (_ fp)
             (let ((name (%cc-fun-name (ft fp))))
               (%cc-call name (%cc-k-arg-values fs (%cc-k-arg-convs name ks) fp)))))))))
+
+; --- what follows a call -------------------------------------------------------
+; A call to one of the program's functions does not wait on x's stack for
+; the function to answer: the expression it stands in is translated with
+; what follows it as a closure (a continuation), so (%cc-k-cexpr NODE) is
+; (C-TYPE . F), F a closure of the frame's address and NEXT that hands NEXT
+; the value, a tail call.  Pending work is closures on the heap, and a C
+; program recurses until its own stack is full.  An expression that calls
+; none of the program's functions keeps its direct closure, lifted.
+
+(def %cc-k-cexpr ())
+(def %cc-k-clval ())
+
+(def %cc-k-fst (fn (_ p) (first p)))
+(def %cc-k-snd (fn (_ p) (rest p)))
+
+; does NAME, called, name one of the program's functions or a variable
+; holding one
+(def %cc-k-program-call?
+  (fn (_ name)
+    (if (null? (%cc-k-place name)) (not (null? (%cc-fun name))) #t)))
+
+; does NODE call one of the program's functions; sizeof evaluates nothing
+(def %cc-k-calls?
+  (fn (self node)
+    (match
+      ((not (pair? node)) #f)
+      ((eq? (first node) (lit szof)) #f)
+      ((eq? (first node) (lit callx)) #t)
+      ((if (eq? (first node) (lit call)) (%cc-k-program-call? (first (rest node))) #f) #t)
+      (#t (%cc-k-calls-in? self node)))))
+
+(def %cc-k-calls-in?
+  (fn (_ calls? xs)
+    (def go (fn (self xs)
+              (if (pair? xs) (if (calls? (first xs)) #t (self (rest xs))) #f)))
+    (go xs)))
+
+; a direct translation, E, as one that hands its value on
+(def %cc-k-lift
+  (fn (_ e)
+    (def f (rest e))
+    (pair (first e) (fn (_ fp next) (next (f fp))))))
+
+; FA's value, then FB's, handed on combined by COMB, a direct closure of
+; the pair of them
+(def %cc-k-both
+  (fn (_ fa fb comb)
+    (fn (_ fp next) (fa fp (fn (_ x) (fb fp (fn (_ y) (next (comb (pair x y))))))))))
+
+; is NODE's value true, handed on
+(def %cc-k-ctest
+  (fn (_ node)
+    (if (not (%cc-k-calls? node))
+      (let ((t (%cc-k-test node))) (fn (_ fp next) (next (t fp))))
+      (let ((e (%cc-k-cexpr node)))
+        (def f (rest e))
+        (def k (first e))
+        (if (real? k)
+          (fn (_ fp next) (f fp (fn (_ v) (next (not (real-zero? v k))))))
+          (fn (_ fp next) (f fp (fn (_ v) (next (not (= v 0)))))))))))
+
+(set! %cc-k-cexpr
+  (fn (_ node)
+    (if (%cc-k-calls? node) (%cc-k-cexpr-of node) (%cc-k-lift (%cc-k-expr node)))))
+
+(def %cc-k-cexpr-of
+  (fn (_ node)
+    (def t (first node))
+    (match
+      ((if (eq? t (lit call)) #t (eq? t (lit callx))) (%cc-k-ccall node))
+      ((eq? t (lit bin)) (%cc-k-cbin node))
+      ((eq? t (lit cmp)) (%cc-k-ccmp node))
+      ((eq? t (lit and)) (%cc-k-cand node #t))
+      ((eq? t (lit or)) (%cc-k-cand node #f))
+      ((eq? t (lit un)) (%cc-k-cunary node))
+      ((eq? t (lit idx)) (%cc-k-cread (%cc-k-clval node)))
+      ((eq? t (lit dot)) (%cc-k-cread (%cc-k-clval node)))
+      ((eq? t (lit arrow)) (%cc-k-cread (%cc-k-clval node)))
+      ((eq? t (lit assign)) (%cc-k-cassign node))
+      ((eq? t (lit preinc)) (%cc-k-cstep node #t #f))
+      ((eq? t (lit predec)) (%cc-k-cstep node #f #f))
+      ((eq? t (lit postinc)) (%cc-k-cstep node #t #t))
+      ((eq? t (lit postdec)) (%cc-k-cstep node #f #t))
+      ((eq? t (lit ternary)) (%cc-k-cternary node))
+      ((eq? t (lit comma)) (%cc-k-ccomma node))
+      ((eq? t (lit cast)) (%cc-k-ccast node))
+      (#t (%cc-oops "unknown expression")))))
+
+(def %cc-k-cbin
+  (fn (_ node)
+    (def ea (%cc-k-cexpr (%cc-k-b node)))
+    (def eb (%cc-k-cexpr (%cc-k-c node)))
+    (def op (%cc-k-a node))
+    (def ka (first ea))
+    (def kb (first eb))
+    (def comb
+      (if (if (%cc-address? ka) #t (%cc-address? kb))
+        (%cc-k-addr-arith op %cc-k-fst %cc-k-snd ka kb)
+        (%cc-k-arith op %cc-k-fst %cc-k-snd ka kb)))
+    (pair (%cc-bin-c-type op ka kb) (%cc-k-both (rest ea) (rest eb) comb))))
+
+(def %cc-k-ccmp
+  (fn (_ node)
+    (def ea (%cc-k-cexpr (%cc-k-b node)))
+    (def eb (%cc-k-cexpr (%cc-k-c node)))
+    (pair (lit int)
+      (%cc-k-both (rest ea) (rest eb)
+        (%cc-k-cmp (%cc-k-a node) %cc-k-fst %cc-k-snd (first ea) (first eb))))))
+
+; && when AND?, else ||: the second operand only when the first leaves it open
+(def %cc-k-cand
+  (fn (_ node and?)
+    (def ta (%cc-k-ctest (%cc-k-a node)))
+    (def tb (%cc-k-ctest (%cc-k-b node)))
+    (pair (lit int)
+      (if and?
+        (fn (_ fp next) (ta fp (fn (_ x) (if x (tb fp (fn (_ y) (next (%cc-b y)))) (next 0)))))
+        (fn (_ fp next) (ta fp (fn (_ x) (if x (next 1) (tb fp (fn (_ y) (next (%cc-b y))))))))))))
+
+(def %cc-k-cunary
+  (fn (_ node)
+    (def op (%cc-k-a node))
+    (def sub (%cc-k-b node))
+    (match
+      ((string=? op "*")
+        (let ((e (%cc-k-cexpr sub)))
+          (def ek (c-type-elem (first e)))
+          (def f (rest e))
+          (pair ek
+            (if (%cc-c-type-decays? ek) f
+              (let ((ld (%cc-k-load ek))) (fn (_ fp next) (f fp (fn (_ a) (next (ld a))))))))))
+      ((string=? op "&")
+        (let ((l (%cc-k-clval sub))) (pair (list (lit ptr) (first l)) (rest l))))
+      (#t
+        (let ((e (%cc-k-cexpr sub)))
+          (def d (%cc-k-unary-of op (pair (first e) %cc-id)))
+          (def f (rest e))
+          (def g (rest d))
+          (pair (first d) (fn (_ fp next) (f fp (fn (_ v) (next (g v)))))))))))
+
+; a place's value: an array or a struct is its address, anything else loads
+(def %cc-k-cread
+  (fn (_ l)
+    (def k (first l))
+    (def fa (rest l))
+    (pair k
+      (if (%cc-c-type-decays? k) fa
+        (let ((ld (%cc-k-load k))) (fn (_ fp next) (fa fp (fn (_ a) (next (ld a))))))))))
+
+; the value first, then the place, as the direct assignment
+(def %cc-k-cassign
+  (fn (_ node)
+    (def l (%cc-k-clval (%cc-k-a node)))
+    (def r (%cc-k-cexpr (%cc-k-b node)))
+    (def d (%cc-k-assign-of (pair (first l) %cc-k-snd) (pair (first r) %cc-k-fst)))
+    (pair (first d) (%cc-k-both (rest r) (rest l) (rest d)))))
+
+(def %cc-k-cstep
+  (fn (_ node up? after?)
+    (def l (%cc-k-clval (%cc-k-a node)))
+    (def d (%cc-k-step-of (pair (first l) %cc-id) up? after?))
+    (def f (rest l))
+    (def g (rest d))
+    (pair (first d) (fn (_ fp next) (f fp (fn (_ a) (next (g a))))))))
+
+(def %cc-k-cternary
+  (fn (_ node)
+    (def t (%cc-k-ctest (%cc-k-a node)))
+    (def ea (%cc-k-cexpr (%cc-k-b node)))
+    (def eb (%cc-k-cexpr (%cc-k-c node)))
+    (def k (%cc-k-ternary-c-type (first ea) (first eb)))
+    (def fa (rest ea))
+    (def fb (rest eb))
+    (pair k
+      (if (real? k)
+        (let ((ca (%cc-k-from (first ea) k)) (cb (%cc-k-from (first eb) k)))
+          (fn (_ fp next)
+            (t fp (fn (_ x)
+                    (if x (fa fp (fn (_ v) (next (ca v)))) (fb fp (fn (_ v) (next (cb v)))))))))
+        (fn (_ fp next) (t fp (fn (_ x) (if x (fa fp next) (fb fp next)))))))))
+
+(def %cc-k-ccomma
+  (fn (_ node)
+    (def ea (%cc-k-cexpr (%cc-k-a node)))
+    (def eb (%cc-k-cexpr (%cc-k-b node)))
+    (def fa (rest ea))
+    (def fb (rest eb))
+    (pair (first eb) (fn (_ fp next) (fa fp (fn (_ x) (fb fp next)))))))
+
+(def %cc-k-ccast
+  (fn (_ node)
+    (def e (%cc-k-cexpr (%cc-k-b node)))
+    (def to (%cc-k-a node))
+    (def f (rest e))
+    (def cf (%cc-k-from (first e) to))
+    (def c (%cc-k-conv to))
+    (pair to (fn (_ fp next) (f fp (fn (_ v) (next (c (cf v)))))))))
+
+(set! %cc-k-clval
+  (fn (_ node)
+    (if (%cc-k-calls? node) (%cc-k-clval-of node) (%cc-k-lift (%cc-k-lval node)))))
+
+(def %cc-k-clval-of
+  (fn (_ node)
+    (def t (first node))
+    (match
+      ((eq? t (lit idx))
+        (let ((e (%cc-k-cexpr (list (lit bin) "+" (%cc-k-a node) (%cc-k-b node)))))
+          (pair (c-type-elem (first e)) (rest e))))
+      ((eq? t (lit dot))
+        (let ((l (%cc-k-clval (%cc-k-a node))))
+          (def f (%cc-k-field (first l) (%cc-k-b node)))
+          (def off (first f))
+          (def fa (rest l))
+          (pair (rest f) (fn (_ fp next) (fa fp (fn (_ a) (next (fx+ a off))))))))
+      ((eq? t (lit arrow))
+        (let ((e (%cc-k-cexpr (%cc-k-a node))))
+          (def f (%cc-k-field (c-type-elem (first e)) (%cc-k-b node)))
+          (def off (first f))
+          (def fe (rest e))
+          (pair (rest f) (fn (_ fp next) (fe fp (fn (_ a) (next (fx+ a off))))))))
+      ((if (eq? t (lit un)) (string=? (%cc-k-a node) "*") #f)
+        (let ((e (%cc-k-cexpr (%cc-k-b node)))) (pair (c-type-elem (first e)) (rest e))))
+      ((if (eq? t (lit call)) #t (eq? t (lit callx))) (%cc-k-cexpr node))
+      (#t (%cc-oops "not an lvalue")))))
+
+; FS's values in order, handed on as a list
+(def %cc-k-cargs
+  (fn (self fs fp next)
+    (if (null? fs) (next ())
+      ((first fs) fp (fn (_ v) (self (rest fs) fp (fn (_ vs) (next (pair v vs)))))))))
+
+; each value of VS by its converter in CS
+(def %cc-k-conv-all
+  (fn (self cs vs)
+    (if (null? vs) () (pair ((first cs) (first vs)) (self (rest cs) (rest vs))))))
+
+(def %cc-k-ccall
+  (fn (_ node)
+    (def args (map (fn (_ a) (%cc-k-cexpr a)) (%cc-k-b node)))
+    (def ks (map (fn (_ e) (first e)) args))
+    (def fs (map (fn (_ e) (rest e)) args))
+    (if (if (eq? (first node) (lit call)) (null? (%cc-k-place (%cc-k-a node))) #f)
+      (%cc-k-ccall-named (%cc-k-a node) ks fs)
+      (%cc-k-ccall-through node ks fs))))
+
+(def %cc-k-ccall-named
+  (fn (_ name ks fs)
+    (def cs (%cc-k-arg-convs name ks))
+    (pair (%cc-k-named-c-type name)
+      (fn (_ fp next)
+        (%cc-k-cargs fs fp (fn (_ vs) (%cc-call-k name (%cc-k-conv-all cs vs) next)))))))
+
+; a call through a value: the function first, then the arguments
+(def %cc-k-ccall-through
+  (fn (_ node ks fs)
+    (def target
+      (if (eq? (first node) (lit call))
+        (%cc-k-cexpr (list (lit var) (%cc-k-a node)))
+        (%cc-k-cexpr (%cc-k-a node))))
+    (def ft
+      (if (eq? (first node) (lit call)) (rest target)
+        (rest (%cc-k-cexpr (%cc-k-strip-deref (%cc-k-a node))))))
+    (pair (%cc-called-c-type (first target))
+      (fn (_ fp next)
+        (ft fp (fn (_ id)
+                 (def name (%cc-fun-name id))
+                 (%cc-k-cargs fs fp
+                   (fn (_ vs)
+                     (%cc-call-k name (%cc-k-conv-all (%cc-k-arg-convs name ks) vs) next)))))))))
 
 ; --- initializers --------------------------------------------------------------
 ; (%cc-k-init K INIT): a closure of the frame's address and the place's that
@@ -1329,11 +1618,62 @@
                     (self (rest ps) fp a)))))
     (fn (_ fp a) (go parts fp a))))
 
+; INIT laid at a place of C type K, then NEXT: a closure of the frame's
+; address, the place's and NEXT; the direct one when INIT calls none of the
+; program's functions
+(def %cc-k-cinit
+  (fn (self k init)
+    (if (not (%cc-k-calls? init))
+      (let ((f (%cc-k-init k init))) (fn (_ fp a next) (f fp a) (next ())))
+      (match
+        ((eq? (first init) (lit initlist))
+          (let ((items (first (rest init))))
+            (match
+              ((if (pair? k) (eq? (first k) (lit array)) #f)
+                (let ((ek (c-type-elem k)))
+                  (def es (c-type-size ek))
+                  (def go (fn (self2 is i)
+                            (if (null? is) ()
+                              (pair (pair (* i es) (self ek (first is))) (self2 (rest is) (+ i 1))))))
+                  (%cc-k-cinit-each (go items 0))))
+              ((%cc-struct-c-type? k)
+                (let ((e (struct-entry (first (rest k)))))
+                  (def go (fn (self2 is fs)
+                            (match
+                              ((null? is) ())
+                              ((null? fs) (%cc-oops "too many initializers for a struct"))
+                              (#t (pair (pair (first (rest (first fs)))
+                                          (self (first (rest (rest (first fs)))) (first is)))
+                                    (self2 (rest is) (rest fs)))))))
+                  (%cc-k-cinit-each (go items (rest (rest e))))))
+              (#t (self k (first items))))))
+        ((%cc-struct-c-type? k)
+          (let ((f (rest (%cc-k-cexpr init))) (n (c-type-size k)))
+            (fn (_ fp a next) (f fp (fn (_ v) (%cc-copy-bytes! a v n) (next ()))))))
+        (#t
+          (let ((e (%cc-k-cexpr init)))
+            (def f (rest e))
+            (def cf (%cc-k-from (first e) k))
+            (def st (%cc-k-store k))
+            (fn (_ fp a next) (f fp (fn (_ v) (st a (cf v)) (next ()))))))))))
+
+; PARTS, ((OFF . CINIT) ...), each laid at its offset in turn, then NEXT
+(def %cc-k-cinit-each
+  (fn (_ parts)
+    (def go (fn (self ps fp a next)
+              (if (null? ps) (next ())
+                ((rest (first ps)) fp (fx+ a (first (first ps)))
+                  (fn (_ x) (self (rest ps) fp a next))))))
+    (fn (_ fp a next) (go parts fp a next))))
+
 ; --- statements ----------------------------------------------------------------
 ; A statement translates to (RUN SEEK LABELS): RUN, a closure of the frame's
-; address, answers control; SEEK, of the frame's address and a label's name,
-; enters the statement at that label inside it; LABELS, the labels it holds
-; at any depth.  A declaration is (decl INIT), its INIT run where it stands.
+; address and NEXT, hands NEXT the control it ends with, a tail call; SEEK,
+; of the frame's address, a label's name and NEXT, enters the statement at
+; that label inside it; LABELS, the labels it holds at any depth.  A
+; declaration is (decl INIT), INIT a closure of the frame's address and
+; NEXT, run where it stands.  Control is () to go on, or a break, continue,
+; return or goto (%cc-brk %cc-cnt %cc-ret0).
 
 (def %cc-k-run (fn (_ s) (first s)))
 (def %cc-k-seek (fn (_ s) (first (rest s))))
@@ -1352,40 +1692,41 @@
   (fn (self ss) (if (null? ss) () (if (%cc-k-decl? (first ss)) (self (rest ss))
                                     (append (%cc-k-labels (first ss)) (self (rest ss)))))))
 (def %cc-k-noseek
-  (fn (_ fp name) (%cc-oops "a goto into a statement that holds no label")))
+  (fn (_ fp name next) (%cc-oops "a goto into a statement that holds no label")))
 (def %cc-k-stmt ())
 
-; A block's statements from ITEMS on, ALL being every one of them.  SEEK,
-; when not (), is a label being gone to, in ITEMS: the statements before it
-; are passed over, their declarations not initialized, as C leaves them.  A
-; goto a statement answers goes on here when its label is one of the
-; block's.
+; A block's statements from ITEMS on, ALL being every one of them, then
+; NEXT with the control they end with.  SEEK, when not (), is a label being
+; gone to, in ITEMS: the statements before it are passed over, their
+; declarations not initialized, as C leaves them.  A goto a statement
+; answers goes on here when its label is one of the block's.
 (def %cc-k-items
-  (fn (self all items fp seek)
-    (if (null? items) ()
+  (fn (self all items fp seek next)
+    (if (null? items) (next ())
       (match
         ((%cc-k-decl? (first items))
-          (do (if (null? seek) ((first (rest (first items))) fp) ())
-              (self all (rest items) fp seek)))
+          (if (null? seek)
+            ((first (rest (first items))) fp (fn (_ x) (self all (rest items) fp () next)))
+            (self all (rest items) fp seek next)))
         ((if (null? seek) #f (not (%cc-k-has? (first items) seek)))
-          (self all (rest items) fp seek))
+          (self all (rest items) fp seek next))
+        ((null? seek)
+          ((%cc-k-run (first items)) fp (fn (_ c) (%cc-k-items-on self all items fp c next))))
         (#t
-          (%cc-k-items-on self all items fp
-            (if (null? seek)
-              ((%cc-k-run (first items)) fp)
-              ((%cc-k-seek (first items)) fp seek))))))))
+          ((%cc-k-seek (first items)) fp seek
+            (fn (_ c) (%cc-k-items-on self all items fp c next))))))))
 
 ; the block's walk once its first item in ITEMS answered C
 (def %cc-k-items-on
-  (fn (_ go all items fp c)
+  (fn (_ go all items fp c next)
     (match
-      ((null? c) (go all (rest items) fp ()))
-      ((not (%cc-ctrl? c (lit goto))) c)
+      ((null? c) (go all (rest items) fp () next))
+      ((not (%cc-ctrl? c (lit goto))) (next c))
       ((%cc-k-any-has? (rest items) (first (rest c)))
-        (go all (rest items) fp (first (rest c))))
+        (go all (rest items) fp (first (rest c)) next))
       ((%cc-k-any-has? all (first (rest c)))
-        (go all (%cc-k-tail all (first (rest c))) fp (first (rest c))))
-      (#t c))))
+        (go all (%cc-k-tail all (first (rest c))) fp (first (rest c)) next))
+      (#t (next c)))))
 
 ; a declaration: its slot, or a static's storage made and initialized now,
 ; once; the name in scope in its own initializer
@@ -1398,17 +1739,18 @@
       (let ((a (%cc-heap (c-type-size k))))
         (set! %cc-k-locals (pair (pair name (pair (lit global) (pair a k))) %cc-k-locals))
         (if (null? init) () ((%cc-k-init k init) 0 a))
-        (list (lit decl) (fn (_ fp) ())))
+        (list (lit decl) (fn (_ fp next) (next ()))))
       (let ((off (%cc-k-slot! name k)))
         (match
-          ((null? init) (list (lit decl) (fn (_ fp) ())))
+          ((null? init) (list (lit decl) (fn (_ fp next) (next ()))))
           ; an array or a struct is zero where its initializer stops, each
           ; time its declaration is reached
           ((%cc-c-type-decays? k)
-            (let ((f (%cc-k-init k init)) (n (round-up (c-type-size k) 8)))
-              (list (lit decl) (fn (_ fp) (do (%cc-k-zero! (+ fp off) n) (f fp (+ fp off)))))))
-          (#t (let ((f (%cc-k-init k init)))
-                (list (lit decl) (fn (_ fp) (f fp (+ fp off)))))))))))
+            (let ((f (%cc-k-cinit k init)) (n (round-up (c-type-size k) 8)))
+              (list (lit decl)
+                (fn (_ fp next) (%cc-k-zero! (fx+ fp off) n) (f fp (fx+ fp off) next)))))
+          (#t (let ((f (%cc-k-cinit k init)))
+                (list (lit decl) (fn (_ fp next) (f fp (fx+ fp off) next))))))))))
 
 ; N bytes of the frame at A, a multiple of eight, to zero
 (def %cc-k-zero!
@@ -1434,84 +1776,98 @@
     (set! %cc-k-locals saved)
     out))
 
+; NODE, an expression run for its effect, then NEXT with no control
+(def %cc-k-effect
+  (fn (_ node)
+    (if (%cc-k-calls? node)
+      (let ((f (rest (%cc-k-cexpr node)))) (fn (_ fp next) (f fp (fn (_ v) (next ())))))
+      (let ((f (rest (%cc-k-expr node)))) (fn (_ fp next) (f fp) (next ()))))))
+
 ; the rest of a loop after a pass over its body answered C: a break ends it,
-; nothing or a continue goes on to the next pass as NEXT does, and anything
-; else -- a return, a goto -- leaves it
+; nothing or a continue goes on to the next pass as NEXT-PASS does, and
+; anything else -- a return, a goto -- leaves it
 (def %cc-k-loop-on
-  (fn (_ next)
-    (fn (self fp c)
+  (fn (_ next-pass)
+    (fn (self fp c next)
       (match
-        ((%cc-ctrl? c (lit break)) ())
-        ((if (null? c) #t (%cc-ctrl? c (lit continue))) (next self fp))
-        (#t c)))))
+        ((%cc-ctrl? c (lit break)) (next ()))
+        ((if (null? c) #t (%cc-ctrl? c (lit continue))) (next-pass self fp next))
+        (#t (next c))))))
+
+; a pass of a loop: the test C, then the body BR and ON after it
+(def %cc-k-pass
+  (fn (_ c br on fp next)
+    (c fp (fn (_ x) (if x (br fp (fn (_ r) (on fp r next))) (next ()))))))
 
 (set! %cc-k-stmt
   (fn (self stmt)
     (def t (first stmt))
     (match
-      ((eq? t (lit expr))
-        (let ((f (rest (%cc-k-expr (first (rest stmt))))))
-          (list (fn (_ fp) (do (f fp) ())) %cc-k-noseek ())))
+      ((eq? t (lit expr)) (list (%cc-k-effect (first (rest stmt))) %cc-k-noseek ()))
       ((eq? t (lit block))
         (let ((items (%cc-k-stmts (first (rest stmt)))))
-          (list (fn (_ fp) (%cc-k-items items items fp ()))
-                (fn (_ fp name) (%cc-k-items items items fp name))
+          (list (fn (_ fp next) (%cc-k-items items items fp () next))
+                (fn (_ fp name next) (%cc-k-items items items fp name next))
                 (%cc-k-all-labels items))))
       ((eq? t (lit if))
-        (let ((c (%cc-k-test (first (rest stmt)))) (th (self (first (rest (rest stmt))))))
+        (let ((c (%cc-k-ctest (first (rest stmt)))) (th (self (first (rest (rest stmt))))))
           (def e (first (rest (rest (rest stmt)))))
           (def el (if (null? e) () (self e)))
-          (list (if (null? el)
-                  (fn (_ fp) (if (c fp) ((%cc-k-run th) fp) ()))
-                  (fn (_ fp) (if (c fp) ((%cc-k-run th) fp) ((%cc-k-run el) fp))))
-                (fn (_ fp name)
-                  (if (%cc-k-has? th name) ((%cc-k-seek th) fp name) ((%cc-k-seek el) fp name)))
+          (def tr (%cc-k-run th))
+          (def er (if (null? el) (fn (_ fp next) (next ())) (%cc-k-run el)))
+          (list (fn (_ fp next) (c fp (fn (_ x) (if x (tr fp next) (er fp next)))))
+                (fn (_ fp name next)
+                  (if (%cc-k-has? th name)
+                    ((%cc-k-seek th) fp name next)
+                    ((%cc-k-seek el) fp name next)))
                 (append (%cc-k-labels th) (if (null? el) () (%cc-k-labels el))))))
       ((eq? t (lit while))
-        (let ((c (%cc-k-test (first (rest stmt)))) (b (self (first (rest (rest stmt))))))
+        (let ((c (%cc-k-ctest (first (rest stmt)))) (b (self (first (rest (rest stmt))))))
           (def br (%cc-k-run b))
-          (def on (%cc-k-loop-on (fn (_ on fp) (if (c fp) (on fp (br fp)) ()))))
-          (list (fn (_ fp) (if (c fp) (on fp (br fp)) ()))
-                (fn (_ fp name) (on fp ((%cc-k-seek b) fp name)))
+          (def on (%cc-k-loop-on (fn (_ on fp next) (%cc-k-pass c br on fp next))))
+          (list (fn (_ fp next) (%cc-k-pass c br on fp next))
+                (fn (_ fp name next) ((%cc-k-seek b) fp name (fn (_ r) (on fp r next))))
                 (%cc-k-labels b))))
       ((eq? t (lit do))
-        (let ((b (self (first (rest stmt)))) (c (%cc-k-test (first (rest (rest stmt))))))
+        (let ((b (self (first (rest stmt)))) (c (%cc-k-ctest (first (rest (rest stmt))))))
           (def br (%cc-k-run b))
-          (def on (%cc-k-loop-on (fn (_ on fp) (if (c fp) (on fp (br fp)) ()))))
-          (list (fn (_ fp) (on fp (br fp)))
-                (fn (_ fp name) (on fp ((%cc-k-seek b) fp name)))
+          (def on (%cc-k-loop-on (fn (_ on fp next) (%cc-k-pass c br on fp next))))
+          (list (fn (_ fp next) (br fp (fn (_ r) (on fp r next))))
+                (fn (_ fp name next) ((%cc-k-seek b) fp name (fn (_ r) (on fp r next))))
                 (%cc-k-labels b))))
       ((eq? t (lit for))
         (let ((i-n (first (rest stmt))) (c-n (first (rest (rest stmt))))
               (u-n (first (rest (rest (rest stmt))))))
-          (def fi (if (null? i-n) (fn (_ fp) ()) (rest (%cc-k-expr i-n))))
-          (def c (if (null? c-n) (fn (_ fp) #t) (%cc-k-test c-n)))
-          (def fu (if (null? u-n) (fn (_ fp) ()) (rest (%cc-k-expr u-n))))
+          (def fi (if (null? i-n) (fn (_ fp next) (next ())) (%cc-k-effect i-n)))
+          (def c (if (null? c-n) (fn (_ fp next) (next #t)) (%cc-k-ctest c-n)))
+          (def fu (if (null? u-n) (fn (_ fp next) (next ())) (%cc-k-effect u-n)))
           (def b (self (first (rest (rest (rest (rest stmt)))))))
           (def br (%cc-k-run b))
-          (def on (%cc-k-loop-on (fn (_ on fp) (do (fu fp) (if (c fp) (on fp (br fp)) ())))))
-          (list (fn (_ fp) (do (fi fp) (if (c fp) (on fp (br fp)) ())))
-                (fn (_ fp name) (on fp ((%cc-k-seek b) fp name)))
+          (def on (%cc-k-loop-on
+                    (fn (_ on fp next) (fu fp (fn (_ x) (%cc-k-pass c br on fp next))))))
+          (list (fn (_ fp next) (fi fp (fn (_ x) (%cc-k-pass c br on fp next))))
+                (fn (_ fp name next) ((%cc-k-seek b) fp name (fn (_ r) (on fp r next))))
                 (%cc-k-labels b))))
       ((eq? t (lit goto))
         (let ((g (list (lit goto) (first (rest stmt)))))
-          (list (fn (_ fp) g) %cc-k-noseek ())))
+          (list (fn (_ fp next) (next g)) %cc-k-noseek ())))
       ((eq? t (lit label))
         (let ((name (first (rest stmt))) (s (self (first (rest (rest stmt))))))
           (def sr (%cc-k-run s))
           (list sr
-                (fn (_ fp n) (if (string=? n name) (sr fp) ((%cc-k-seek s) fp n)))
+                (fn (_ fp n next) (if (string=? n name) (sr fp next) ((%cc-k-seek s) fp n next)))
                 (pair name (%cc-k-labels s)))))
       ((eq? t (lit return))
         (let ((e (first (rest stmt))))
-          (if (null? e) (list (fn (_ fp) %cc-ret0) %cc-k-noseek ())
-            (let ((ce (%cc-k-expr e)))
+          (if (null? e) (list (fn (_ fp next) (next %cc-ret0)) %cc-k-noseek ())
+            (let ((ce (%cc-k-cexpr e)))
               (def f (rest ce))
               (def k (first ce))
-              (list (fn (_ fp) (list (lit return) (f fp) k)) %cc-k-noseek ())))))
+              (list (fn (_ fp next) (f fp (fn (_ v) (next (list (lit return) v k)))))
+                    %cc-k-noseek ())))))
       ((eq? t (lit switch)) (%cc-k-switch stmt))
-      ((eq? t (lit break)) (list (fn (_ fp) %cc-brk) %cc-k-noseek ()))
-      ((eq? t (lit continue)) (list (fn (_ fp) %cc-cnt) %cc-k-noseek ()))
+      ((eq? t (lit break)) (list (fn (_ fp next) (next %cc-brk)) %cc-k-noseek ()))
+      ((eq? t (lit continue)) (list (fn (_ fp next) (next %cc-cnt)) %cc-k-noseek ()))
       (#t (%cc-oops "unknown statement")))))
 
 ; A switch: the matched clause and every clause after it run as one block
@@ -1520,7 +1876,7 @@
 ; Every clause's statements are one scope.
 (def %cc-k-switch
   (fn (_ stmt)
-    (def fv (rest (%cc-k-expr (first (rest stmt)))))
+    (def fv (rest (%cc-k-cexpr (first (rest stmt)))))
     (def clauses (first (rest (rest stmt))))
     (def all
       (%cc-k-stmts
@@ -1544,12 +1900,14 @@
     (def default
       (let ((go (fn (self ss) (if (null? ss) () (if (null? (first (first ss))) (rest (first ss)) (self (rest ss)))))))
         (go starts)))
-    (def finish (fn (_ c) (if (%cc-ctrl? c (lit break)) () c)))
-    (list (fn (_ fp)
-            (let ((at (from starts (fv fp) fp)))
-              (def body (if (null? at) default at))
-              (if (null? body) () (finish (%cc-k-items body body fp ())))))
-          (fn (_ fp name) (finish (%cc-k-items all all fp name)))
+    ; NEXT with what the clauses ended with, a break the switch's own
+    (def finish (fn (_ next) (fn (_ c) (next (if (%cc-ctrl? c (lit break)) () c)))))
+    (list (fn (_ fp next)
+            (fv fp (fn (_ v)
+                     (def at (from starts v fp))
+                     (def body (if (null? at) default at))
+                     (if (null? body) (next ()) (%cc-k-items body body fp () (finish next))))))
+          (fn (_ fp name next) (%cc-k-items all all fp name (finish next)))
           (%cc-k-all-labels all))))
 
 ; what follows the first N of a list
@@ -1598,8 +1956,12 @@
 ; it answers by value moves out of the popped frame into a fresh slot in the
 ; caller's, which lives until the caller returns -- or exit, or the C
 ; library's
+; NAME, one of the program's functions, called with ARGS, then NEXT with
+; what it answers: its frame made and its parameters stored, its body run
+; with the rest of the call as its continuation, so the caller waits on the
+; heap, not on x's stack
 (def %cc-call-fun
-  (fn (_ name args)
+  (fn (_ name args next)
     (def tr (%cc-k-fun name))
     (def saved-sp %cc-sp)
     (def n (first (rest (rest (rest (rest tr))))))
@@ -1622,7 +1984,13 @@
               (self (rest ps) (if (null? as) () (rest as)))))))
     (bind (first (rest tr)) all)
     (def ret (first (rest (rest tr))))
-    (def c ((%cc-k-run (first (rest (rest (rest tr))))) fp))
+    ((%cc-k-run (first (rest (rest (rest tr))))) fp
+      (fn (_ c) (%cc-call-done c ret saved-sp next)))))
+
+; a call's end: the body ended with C; the frame is popped down to SAVED-SP
+; and NEXT handed what the function answers, in RET, its C type
+(def %cc-call-done
+  (fn (_ c ret saved-sp next)
     (if (%cc-ctrl? c (lit goto))
       (%cc-oops (string-append "a goto to a label the function does not have: "
                   (first (rest c)))))
@@ -1632,9 +2000,7 @@
         (%cc-convert-from (first (rest c)) (first (rest (rest c))) ret)
         0))
     (set! %cc-sp saved-sp)
-    (if (%cc-struct-c-type? ret)
-      (%cc-moved-out v (c-type-size ret))
-      v)))
+    (next (if (%cc-struct-c-type? ret) (%cc-moved-out v (c-type-size ret)) v))))
 
 ; a struct answered by value: its N bytes at V, in the popped frame, moved
 ; into a fresh slot in the caller's
@@ -1645,18 +2011,32 @@
     (%cc-write-bytes! tmp vals)
     tmp))
 
+; NAME called with ARGS, then NEXT with what it answers
+(def %cc-call-k
+  (fn (_ name args next)
+    (if (null? (%cc-fun name))
+      (next (%cc-call-library name args))
+      (%cc-call-fun name args next))))
+
+; NAME called with ARGS, answering what it answers: the way in from outside
+; the program -- main, and a callback the C library makes -- whose
+; continuation hands the value back
 (def %cc-call-run
   (fn (_ name args)
-    (if (not (null? (%cc-fun name)))
-      (%cc-call-fun name args)
-      ; exit leaves through the interpreter, once the C library has written
-      ; what it holds; everything else is the C library's
-      (if (string=? name "exit")
-        (do (%cc-libc-flush!)
-            (set! %cc-exit-code (first args))
-            (Err raise (lit cc-exit) "exit" ()))
-        (let ((label (library-double-label name)))
-          (if (null? label) (%cc-libc-call name args) (%cc-libm-call label name args)))))))
+    (if (null? (%cc-fun name))
+      (%cc-call-library name args)
+      (%cc-call-fun name args %cc-id))))
+
+; exit leaves through the interpreter, once the C library has written what
+; it holds; everything else is the C library's
+(def %cc-call-library
+  (fn (_ name args)
+    (if (string=? name "exit")
+      (do (%cc-libc-flush!)
+          (set! %cc-exit-code (first args))
+          (Err raise (lit cc-exit) "exit" ()))
+      (let ((label (library-double-label name)))
+        (if (null? label) (%cc-libc-call name args) (%cc-libm-call label name args))))))
 
 (def %cc-call ())
 (set! %cc-call %cc-call-run)
