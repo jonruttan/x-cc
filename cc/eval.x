@@ -25,7 +25,7 @@
 
 (import cc/prims append byte-at byte-len length
   map mem-make mem-ptr mem-ref-at mem-set-at! ptr-int reverse string-append
-  string-concat string=? substring word-set! x-write)
+  string-concat string=? substring word-set! x-write fx+ fx- fx* fx< fx<< fx>>)
 (import cc/pp cc-lex)
 (import cc/parse cc-parse c-type-size plain-char round-up struct-entry struct-table)
 (import cc/real convert-real real-arith real-compare real-negate real-step real-stub
@@ -42,12 +42,12 @@
 ; the buffer's pointer and A's distance from it reach A wherever it is
 (def %cc-raw-ref
   (fn (_ a w)
-    (if (< a 4096) (%cc-oops "a read through a null pointer"))
-    (mem-ref-at %cc-memp (- a %cc-base) w)))
+    (if (fx< a 4096) (%cc-oops "a read through a null pointer"))
+    (mem-ref-at %cc-memp (fx- a %cc-base) w)))
 (def %cc-raw-set!
   (fn (_ a v w)
-    (if (< a 4096) (%cc-oops "a write through a null pointer"))
-    (mem-set-at! %cc-memp (- a %cc-base) v w)))
+    (if (fx< a 4096) (%cc-oops "a write through a null pointer"))
+    (mem-set-at! %cc-memp (fx- a %cc-base) v w)))
 (def %cc-sp 0)          ; stack pointer, grows down
 (def %cc-hp 0)          ; the bump for literals and globals, grows up
 (def %cc-genv ())       ; ((name addr . c-type) ...)
@@ -233,8 +233,8 @@
 ; as the sign
 (def %cc-sext
   (fn (_ v w)
-    (let ((top (<< 1 (- (* 8 w) 1))))
-      (if (>= v top) (- v (* 2 top)) v))))
+    (def top (fx<< 1 (fx- (fx* 8 w) 1)))
+    (if (fx< v top) v (fx- v (fx<< top 1)))))
 
 (def %cc-load
   (fn (_ addr c-type)
@@ -303,15 +303,19 @@
 ; stack bytes, zero-filled, eight-aligned; answers the base address
 (def %cc-alloca
   (fn (_ n)
-    (def size (round-up (if (< n 1) 1 n) 8))
-    (set! %cc-sp (- %cc-sp size))
-    (if (< %cc-sp %cc-sp-min) (set! %cc-sp-min %cc-sp) ())
-    (if (<= %cc-sp %cc-hp) (%cc-oops "stack overflow")
-      (let ((clear (fn (self i)
-                     (if (>= i size) ()
-                       (do (word-set! %cc-memp (+ (- %cc-sp %cc-base) i) 0)
-                           (self (+ i 8)))))))
-        (do (clear 0) %cc-sp)))))
+    ; at least one byte, a whole number of words
+    (def size (if (fx< n 1) 8 (fx<< (fx>> (fx+ n 7) 3) 3)))
+    (set! %cc-sp (fx- %cc-sp size))
+    (if (fx< %cc-sp %cc-sp-min) (set! %cc-sp-min %cc-sp) ())
+    (if (not (fx< %cc-hp %cc-sp)) (%cc-oops "stack overflow"))
+    (def at (fx- %cc-sp %cc-base))
+    (def clear (fn (self i)
+                 (if (fx< i size)
+                   (do (word-set! %cc-memp (fx+ at i) 0)
+                       (self (fx+ i 8)))
+                   ())))
+    (clear 0)
+    %cc-sp))
 
 ; bytes for a literal or a global, zero-filled like the stack's: the raw
 ; buffer behind the memory is space-filled at birth (0x20 bytes), and a
@@ -741,9 +745,10 @@
 (def %cc-copy-bytes!
   (fn (_ dst src n)
     (def go (fn (self i)
-              (if (>= i n) ()
-                (do (%cc-raw-set! (+ dst i) (%cc-raw-ref (+ src i) 1) 1)
-                    (self (+ i 1))))))
+              (if (fx< i n)
+                (do (%cc-raw-set! (fx+ dst i) (%cc-raw-ref (fx+ src i) 1) 1)
+                    (self (fx+ i 1)))
+                ())))
     (go 0)))
 
 ; bytes out as a list, and back in: a returned struct is read before its
@@ -919,16 +924,16 @@
     (match
       ((if (string=? op "-") (if (%cc-address? ka) (%cc-address? kb) #f) #f)
         (let ((es (c-type-size (c-type-elem ka))))
-          (fn (_ fp) (let ((x (fa fp))) (%cc-div (- x (fb fp)) es)))))
+          (fn (_ fp) (def x (fa fp)) (%cc-div (fx- x (fb fp)) es))))
       ((if (string=? op "-") (%cc-address? ka) #f)
         (let ((es (c-type-size (c-type-elem ka))))
-          (fn (_ fp) (let ((x (fa fp))) (- x (* (fb fp) es))))))
+          (fn (_ fp) (def x (fa fp)) (fx- x (fx* (fb fp) es)))))
       ((if (string=? op "+") (%cc-address? ka) #f)
         (let ((es (c-type-size (c-type-elem ka))))
-          (fn (_ fp) (let ((x (fa fp))) (+ x (* (fb fp) es))))))
+          (fn (_ fp) (def x (fa fp)) (fx+ x (fx* (fb fp) es)))))
       ((string=? op "+")
         (let ((es (c-type-size (c-type-elem kb))))
-          (fn (_ fp) (let ((x (fa fp))) (+ (* x es) (fb fp))))))
+          (fn (_ fp) (def x (fa fp)) (fx+ (fx* x es) (fb fp)))))
       (#t (fn (_ fp) (%cc-oops (string-append "the operator " op " on an address")))))))
 
 ; OP on two integers converted to K: a closure of the two
@@ -936,9 +941,11 @@
   (fn (_ op k)
     (def wide? (eq? k (lit ulong)))
     (match
-      ((string=? op "+") (fn (_ x y) (+ x y)))
-      ((string=? op "-") (fn (_ x y) (- x y)))
-      ((string=? op "*") (fn (_ x y) (* x y)))
+      ; a long's sum, difference and product wrap at 64 bits, as C's do;
+      ; a narrower type is cut to its width after
+      ((string=? op "+") fx+)
+      ((string=? op "-") fx-)
+      ((string=? op "*") fx*)
       ((string=? op "/") (if wide? (fn (_ x y) (%cc-udiv x y #f)) (fn (_ x y) (%cc-div x y))))
       ((string=? op "%") (if wide? (fn (_ x y) (%cc-udiv x y #t)) (fn (_ x y) (%cc-mod x y))))
       ((string=? op "&") (fn (_ x y) (& x y)))
@@ -961,24 +968,24 @@
     (match
       ((real? k)
         (let ((ca (%cc-k-from ka k)) (cb (%cc-k-from kb k)))
-          (fn (_ fp) (let ((x (ca (fa fp)))) (real-arith op x (cb (fb fp)) k)))))
+          (fn (_ fp) (def x (ca (fa fp))) (real-arith op x (cb (fb fp)) k))))
       ((if shift? (real? kb) #f)
         (fn (_ fp) (%cc-oops (string-append "the operator " op " by a floating value"))))
       (#t
         (let ((c (%cc-k-conv k)) (g (%cc-k-int-op op k)))
           (if shift?
-            (fn (_ fp) (let ((x (c (fa fp)))) (c (g x (fb fp)))))
-            (fn (_ fp) (let ((x (c (fa fp)))) (c (g x (c (fb fp))))))))))))
+            (fn (_ fp) (def x (c (fa fp))) (c (g x (fb fp))))
+            (fn (_ fp) (def x (c (fa fp))) (c (g x (c (fb fp)))))))))))
 
 ; a comparison OP in the integer C type K: an unsigned long compares with its
 ; top bit flipped, which is unsigned order
 (def %cc-k-cmp-op
   (fn (_ op)
     (match
-      ((string=? op "<") (fn (_ x y) (< x y)))
-      ((string=? op "<=") (fn (_ x y) (<= x y)))
-      ((string=? op ">") (fn (_ x y) (> x y)))
-      ((string=? op ">=") (fn (_ x y) (>= x y)))
+      ((string=? op "<") fx<)
+      ((string=? op "<=") (fn (_ x y) (not (fx< y x))))
+      ((string=? op ">") (fn (_ x y) (fx< y x)))
+      ((string=? op ">=") (fn (_ x y) (not (fx< x y))))
       ((string=? op "==") (fn (_ x y) (= x y)))
       (#t (fn (_ x y) (not (= x y)))))))
 
@@ -987,9 +994,9 @@
     (def k (if (if (%cc-address? ka) #t (%cc-address? kb)) (lit long) (common-c-type ka kb)))
     (if (real? k)
       (let ((ca (%cc-k-from ka k)) (cb (%cc-k-from kb k)))
-        (fn (_ fp) (let ((x (ca (fa fp)))) (%cc-b (real-compare op x (cb (fb fp)) k)))))
+        (fn (_ fp) (def x (ca (fa fp))) (%cc-b (real-compare op x (cb (fb fp)) k))))
       (let ((c (%cc-k-conv k)) (flip (if (eq? k (lit ulong)) (<< 1 63) 0)) (t (%cc-k-cmp-op op)))
-        (fn (_ fp) (let ((x (^ (c (fa fp)) flip))) (%cc-b (t x (^ (c (fb fp)) flip)))))))))
+        (fn (_ fp) (def x (^ (c (fa fp)) flip)) (%cc-b (t x (^ (c (fb fp)) flip))))))))
 
 ; a unary operator: * reads, & is the place's address, and - ~ ! in the
 ; operand's C type, promoted
@@ -1023,8 +1030,8 @@
                   (#t (fn (_ fp) (%cc-oops (string-append "the operator ~ on a "
                                               (if (eq? k (lit float)) "float" "double")))))))
               ((string=? op "!") (fn (_ fp) (%cc-b (= (f fp) 0))))
-              ((string=? op "-") (let ((c (%cc-k-conv k))) (fn (_ fp) (c (- 0 (f fp))))))
-              (#t (let ((c (%cc-k-conv k))) (fn (_ fp) (c (- (- 0 (f fp)) 1))))))))))))
+              ((string=? op "-") (let ((c (%cc-k-conv k))) (fn (_ fp) (c (fx- 0 (f fp))))))
+              (#t (let ((c (%cc-k-conv k))) (fn (_ fp) (c (fx- (fx- 0 (f fp)) 1))))))))))))
 
 ; ++ and --, before or after: a place of C type K moves by what `+ 1` moves
 ; it by -- an address by what it points at, a real value by 1.0
@@ -1039,12 +1046,12 @@
     (def step
       (match
         ((real? k) (let ((op (if up? "+" "-"))) (fn (_ v) (real-step v k op))))
-        (up? (fn (_ v) (+ v by)))
-        (#t (fn (_ v) (- v by)))))
+        (up? (fn (_ v) (fx+ v by)))
+        (#t (fn (_ v) (fx- v by)))))
     (pair k
       (if after?
-        (fn (_ fp) (let ((a (fa fp))) (let ((v (ld a))) (do (st a (step v)) v))))
-        (fn (_ fp) (let ((a (fa fp))) (do (st a (step (ld a))) (ld a))))))))
+        (fn (_ fp) (def a (fa fp)) (def v (ld a)) (st a (step v)) v)
+        (fn (_ fp) (def a (fa fp)) (st a (step (ld a))) (ld a))))))
 
 (def %cc-k-assign
   (fn (_ node)
@@ -1057,10 +1064,10 @@
       (if (%cc-struct-c-type? k)
         ; a struct-kinded place: the bytes copied from the value's address
         (let ((n (c-type-size k)))
-          (fn (_ fp) (let ((v (fr fp))) (let ((d (fa fp))) (do (%cc-copy-bytes! d v n) d)))))
+          (fn (_ fp) (def v (fr fp)) (def d (fa fp)) (%cc-copy-bytes! d v n) d))
         ; an assignment answers what its place holds after it
         (let ((cf (%cc-k-from (first r) k)) (st (%cc-k-store k)) (ld (%cc-k-load k)))
-          (fn (_ fp) (let ((v (fr fp))) (let ((a (fa fp))) (do (st a (cf v)) (ld a))))))))))
+          (fn (_ fp) (def v (fr fp)) (def a (fa fp)) (st a (cf v)) (ld a)))))))
 
 (def %cc-k-ternary
   (fn (_ node)
@@ -1225,9 +1232,13 @@
 ; the argument values: each closure's, converted
 (def %cc-k-arg-values
   (fn (self fs cs fp)
-    (if (null? fs) ()
-      (let ((v ((first cs) ((first fs) fp))))
-        (pair v (self (rest fs) (rest cs) fp))))))
+    (if (null? fs) () (%cc-k-arg-next self fs cs fp))))
+
+; the first argument's value, worked out before the rest's
+(def %cc-k-arg-next
+  (fn (_ go fs cs fp)
+    (def v ((first cs) ((first fs) fp)))
+    (pair v (go (rest fs) (rest cs) fp))))
 
 (set! %cc-k-call
   (fn (_ node)
@@ -1352,23 +1363,29 @@
 (def %cc-k-items
   (fn (self all items fp seek)
     (if (null? items) ()
-      (let ((it (first items)))
-        (match
-          ((%cc-k-decl? it)
-            (do (if (null? seek) ((first (rest it)) fp) ())
-                (self all (rest items) fp seek)))
-          ((if (null? seek) #f (not (%cc-k-has? it seek)))
-            (self all (rest items) fp seek))
-          (#t
-            (let ((c (if (null? seek) ((%cc-k-run it) fp) ((%cc-k-seek it) fp seek))))
-              (match
-                ((null? c) (self all (rest items) fp ()))
-                ((not (%cc-ctrl? c (lit goto))) c)
-                ((%cc-k-any-has? (rest items) (first (rest c)))
-                  (self all (rest items) fp (first (rest c))))
-                ((%cc-k-any-has? all (first (rest c)))
-                  (self all (%cc-k-tail all (first (rest c))) fp (first (rest c))))
-                (#t c)))))))))
+      (match
+        ((%cc-k-decl? (first items))
+          (do (if (null? seek) ((first (rest (first items))) fp) ())
+              (self all (rest items) fp seek)))
+        ((if (null? seek) #f (not (%cc-k-has? (first items) seek)))
+          (self all (rest items) fp seek))
+        (#t
+          (%cc-k-items-on self all items fp
+            (if (null? seek)
+              ((%cc-k-run (first items)) fp)
+              ((%cc-k-seek (first items)) fp seek))))))))
+
+; the block's walk once its first item in ITEMS answered C
+(def %cc-k-items-on
+  (fn (_ go all items fp c)
+    (match
+      ((null? c) (go all (rest items) fp ()))
+      ((not (%cc-ctrl? c (lit goto))) c)
+      ((%cc-k-any-has? (rest items) (first (rest c)))
+        (go all (rest items) fp (first (rest c))))
+      ((%cc-k-any-has? all (first (rest c)))
+        (go all (%cc-k-tail all (first (rest c))) fp (first (rest c))))
+      (#t c))))
 
 ; a declaration: its slot, or a static's storage made and initialized now,
 ; once; the name in scope in its own initializer
@@ -1396,9 +1413,11 @@
 ; N bytes of the frame at A, a multiple of eight, to zero
 (def %cc-k-zero!
   (fn (_ a n)
+    (def at (fx- a %cc-base))
     (def go (fn (self i)
-              (if (>= i n) ()
-                (do (word-set! %cc-memp (+ (- a %cc-base) i) 0) (self (+ i 8))))))
+              (if (fx< i n)
+                (do (word-set! %cc-memp (fx+ at i) 0) (self (fx+ i 8)))
+                ())))
     (go 0)))
 
 ; STMTS translated in order, each declaration in scope after it, and the
@@ -1579,46 +1598,57 @@
 ; it answers by value moves out of the popped frame into a fresh slot in the
 ; caller's, which lives until the caller returns -- or exit, or the C
 ; library's
+(def %cc-call-fun
+  (fn (_ name args)
+    (def tr (%cc-k-fun name))
+    (def saved-sp %cc-sp)
+    (def n (first (rest (rest (rest (rest tr))))))
+    (if (if (null? n) #f (fx< (length args) n))
+      (%cc-oops (string-append name " with too few arguments")))
+    ; a variadic function's arguments past its fixed ones go as a
+    ; va_list, its "..."
+    (def all
+      (if (null? n) args
+        (append (%cc-take n args) (list (%cc-va-list (%cc-drop n args))))))
+    (def fp (%cc-alloca (first tr)))
+    (def bind
+      (fn (self ps as)
+        (if (null? ps) ()
+          (do (if (null? as) ()
+                (if (null? (rest (rest (first ps))))
+                  ((first (rest (first ps))) (fx+ fp (first (first ps))) (first as))
+                  (%cc-copy-bytes! (fx+ fp (first (first ps))) (first as)
+                    (rest (rest (first ps))))))
+              (self (rest ps) (if (null? as) () (rest as)))))))
+    (bind (first (rest tr)) all)
+    (def ret (first (rest (rest tr))))
+    (def c ((%cc-k-run (first (rest (rest (rest tr))))) fp))
+    (if (%cc-ctrl? c (lit goto))
+      (%cc-oops (string-append "a goto to a label the function does not have: "
+                  (first (rest c)))))
+    ; (return V C-TYPE): V in the C type the function answers
+    (def v
+      (if (%cc-ctrl? c (lit return))
+        (%cc-convert-from (first (rest c)) (first (rest (rest c))) ret)
+        0))
+    (set! %cc-sp saved-sp)
+    (if (%cc-struct-c-type? ret)
+      (%cc-moved-out v (c-type-size ret))
+      v)))
+
+; a struct answered by value: its N bytes at V, in the popped frame, moved
+; into a fresh slot in the caller's
+(def %cc-moved-out
+  (fn (_ v n)
+    (def vals (%cc-read-bytes v n))
+    (def tmp (%cc-alloca n))
+    (%cc-write-bytes! tmp vals)
+    tmp))
+
 (def %cc-call-run
   (fn (_ name args)
-    (def f (%cc-fun name))
-    (if (not (null? f))
-      (let ((tr (%cc-k-fun name)) (saved-sp %cc-sp))
-        (def n (first (rest (rest (rest (rest tr))))))
-        (if (if (null? n) #f (< (length args) n))
-          (%cc-oops (string-append name " with too few arguments")))
-        ; a variadic function's arguments past its fixed ones go as a
-        ; va_list, its "..."
-        (def all
-          (if (null? n) args
-            (append (%cc-take n args) (list (%cc-va-list (%cc-drop n args))))))
-        (def fp (%cc-alloca (first tr)))
-        (def bind
-          (fn (self ps as)
-            (if (null? ps) ()
-              (let ((p (first ps)))
-                (do (if (null? as) ()
-                      (if (null? (rest (rest p)))
-                        ((first (rest p)) (+ fp (first p)) (first as))
-                        (%cc-copy-bytes! (+ fp (first p)) (first as) (rest (rest p)))))
-                    (self (rest ps) (if (null? as) () (rest as))))))))
-        (bind (first (rest tr)) all)
-        (def ret (first (rest (rest tr))))
-        (def c ((%cc-k-run (first (rest (rest (rest tr))))) fp))
-        (if (%cc-ctrl? c (lit goto))
-          (%cc-oops (string-append "a goto to a label the function does not have: "
-                      (first (rest c)))))
-        ; (return V C-TYPE): V in the C type the function answers
-        (def v
-          (if (%cc-ctrl? c (lit return))
-            (%cc-convert-from (first (rest c)) (first (rest (rest c))) ret)
-            0))
-        (if (%cc-struct-c-type? ret)
-          (let ((vals (%cc-read-bytes v (c-type-size ret))))
-            (set! %cc-sp saved-sp)
-            (let ((tmp (%cc-alloca (c-type-size ret))))
-              (do (%cc-write-bytes! tmp vals) tmp)))
-          (do (set! %cc-sp saved-sp) v)))
+    (if (not (null? (%cc-fun name)))
+      (%cc-call-fun name args)
       ; exit leaves through the interpreter, once the C library has written
       ; what it holds; everything else is the C library's
       (if (string=? name "exit")

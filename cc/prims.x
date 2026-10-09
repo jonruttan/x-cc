@@ -74,6 +74,20 @@
 (def mem-ref-at (fn (_ p i w) (%cc-ptr-ref p i w)))
 (def mem-set-at! (fn (_ p i v w) (%cc-ptr-set p i v w)))
 
+; The engine's integer prims, for what run does at every step: an address,
+; an offset, a width, a C integer's value.  They cost no heap objects where
+; the platform's operators cost 9 to 366 a use, since those check their
+; operands and promote past a machine word.  These do neither -- a nil
+; operand crashes the engine and a result past a word wraps, as a C long
+; does -- so they take only what is an integer by construction.  There is
+; no > or >=: a > b is (fx< b a), and a >= b is (not (fx< a b)).
+(def fx+ (prim-ref (lit int) (lit +)))
+(def fx- (prim-ref (lit int) (lit -)))
+(def fx* (prim-ref (lit int) (lit *)))
+(def fx< (prim-ref (lit int) (lit <)))
+(def fx<< (prim-ref (lit int) (lit <<)))
+(def fx>> (prim-ref (lit int) (lit >>)))
+
 ; the first N bytes of a buffer, digested
 (def sha256-hex-n (fn (_ s n) (Sha256 hex-n s n)))
 ; build the compiled digest engine once; pure x carries on if it cannot
@@ -113,7 +127,7 @@
   list->string convert length reverse append map filter set-first!
   vec-make vec-ref vec-set!
   mem-make mem-ptr ptr-int word-ref word-set! mem-set-byte! mem-ref-byte
-  mem-ref-at mem-set-at!
+  mem-ref-at mem-set-at! fx+ fx- fx* fx< fx<< fx>>
   file-close file-open-read file-read file-read-all file-seek file-exists? file-write
   file-write-exec!
   sha256-hex-n sha256-jit! proc-capture
