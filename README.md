@@ -82,7 +82,8 @@ The executable has a data segment, mapped readable and writable on the
 page after the code -- `__DATA` in the Mach-O, a second `PT_LOAD` in the
 ELF.  The import slots are at the front of it, `exit`'s first; the
 globals follow, each at its C type's size with the initializer's value
-already in place; then the string literals, end to end and each stored
+already in place -- what no initializer reaches is zero in the image,
+never built byte by byte; then the string literals, end to end and each stored
 once.  The entry hands compiled code the data's address the way it
 hands over the trampoline's.  The executable is loaded where the kernel
 chooses and nothing relocates the program's own data, so a global
@@ -95,8 +96,8 @@ The calling convention is the compiler's own, since nothing else links
 with what it writes: the first four arguments in registers, unless
 they are structs, and the rest stored where the callee's frame will
 have its top, the answer in one register, and a frame per call taken
-from a four-megabyte region below the machine stack, a megabyte at most
-each.  A frame keeps its scalars low, where a load reaches them, and its
+from a four-megabyte region below the machine stack, which one frame may
+fill.  A frame keeps its scalars low, where a load reaches them, and its
 arrays and structs above, reached through their address.  A struct
 goes by value: an argument is copied whole to the callee's frame, and a
 call that answers one has a slot of its own in the caller's frame,

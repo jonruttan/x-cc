@@ -66,6 +66,14 @@ tick
 3
 ```
 
+### two megabytes, a 40 by 40 grid of doubles, and a large array with two items given
+
+```cc
+(display (cc-exe-run "static char big[2000000];\nstatic double grid[40][40];\nstatic int some[50000] = {7, 8};\nint main(void) { big[1999999] = 5; grid[39][39] = 2.5; return big[1999999] + big[0] + (int)(grid[39][39] * 2) + some[0] + some[1] + some[49999]; }"))
+```
+---
+    25
+
 ## the refusals
 
 ### a global long double

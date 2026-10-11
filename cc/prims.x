@@ -73,6 +73,8 @@
 ; signed type sign-extends it itself
 (def mem-ref-at (fn (_ p i w) (%cc-ptr-ref p i w)))
 (def mem-set-at! (fn (_ p i v w) (%cc-ptr-set p i v w)))
+; N bytes from a pointer, each set to B: one C memset
+(def mem-fill! (prim-ref (lit mem) (lit set)))
 
 ; The engine's integer prims, for what run does at every step: an address,
 ; an offset, a width, a C integer's value.  They cost no heap objects where
@@ -127,7 +129,7 @@
   list->string convert length reverse append map filter set-first!
   vec-make vec-ref vec-set!
   mem-make mem-ptr ptr-int word-ref word-set! mem-set-byte! mem-ref-byte
-  mem-ref-at mem-set-at! fx+ fx- fx* fx< fx<< fx>>
+  mem-ref-at mem-set-at! mem-fill! fx+ fx- fx* fx< fx<< fx>>
   file-close file-open-read file-read file-read-all file-seek file-exists? file-write
   file-write-exec!
   sha256-hex-n sha256-jit! proc-capture

@@ -11,20 +11,16 @@
 ; bytes alive, the pointer addresses them.
 (module cc/image)
 
-(import cc/prims byte-at byte-len file-write-exec! mem-make mem-ptr
-  mem-set-byte! word-set!)
+(import cc/prims byte-at byte-len file-write-exec! mem-fill! mem-make mem-ptr
+  mem-set-byte!)
 
-; a zeroed image of at least N bytes; the capacity is rounded up to eight so
-; the zeroing can go a word at a time
+; a zeroed image of at least N bytes, the capacity rounded up to eight
 (def img-new
   (fn (_ n)
     (let ((cap (let ((m (+ n 7))) (- m (% m 8)))))
       (let ((buf (mem-make cap)))
-        (do (%cc-img-zero! (mem-ptr buf) 0 cap)
+        (do (mem-fill! (mem-ptr buf) 0 cap)
             (pair buf (mem-ptr buf)))))))
-
-(def %cc-img-zero!
-  (fn (self p i n) (if (>= i n) () (do (word-set! p i 0) (self p (+ i 8) n)))))
 
 (def img-u8! (fn (_ img at v) (mem-set-byte! (rest img) at v)))
 
@@ -55,6 +51,14 @@
     (if (null? bs) ()
       (do (img-u8! img at (first bs)) (self img (+ at 1) (rest bs))))))
 
+; PIECES, ((OFFSET . BYTES) ...), each list of byte values at AT plus its
+; offset; what no piece covers stays zero
+(def img-pieces!
+  (fn (self img at pieces)
+    (if (null? pieces) ()
+      (do (img-bytes! img (+ at (first (first pieces))) (rest (first pieces)))
+          (self img at (rest pieces))))))
+
 ; a string's bytes, from AT, with no terminator (the image is zeroed)
 (def img-ascii!
   (fn (_ img at s)
@@ -69,4 +73,4 @@
   (fn (_ img path n) (file-write-exec! path (first img) n)))
 
 (provide cc/image img-new img-u8! img-u16! img-u32! img-u64! img-be32! img-be64!
-  img-bytes! img-ascii! img-write!)
+  img-bytes! img-pieces! img-ascii! img-write!)

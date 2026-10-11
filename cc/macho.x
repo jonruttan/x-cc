@@ -24,9 +24,9 @@
 (module cc/macho)
 
 (import cc/prims append byte-at byte-len length reverse sha256-hex-n sha256-jit!
-  string-append word-ref word-set!)
+  string-append word-ref word-set! fx+ fx<)
 (import cc/image img-new img-u8! img-u16! img-u32! img-u64! img-be32! img-be64!
-  img-bytes! img-ascii! img-write!)
+  img-bytes! img-pieces! img-ascii! img-write!)
 
 (def %cc-macho-vmbase 0x100000000)
 (def %cc-macho-segalign 16384)         ; the arm64 page
@@ -177,9 +177,17 @@
 ; N bytes from SRC at OFF to DST, eight at a time
 (def %cc-macho-copy!
   (fn (self dst src off i n)
-    (if (>= i n) ()
-      (do (word-set! dst i (word-ref src (+ off i)))
-          (self dst src off (+ i 8) n)))))
+    (if (fx< i n)
+      (do (word-set! dst i (word-ref src (fx+ off i)))
+          (self dst src off (fx+ i 8) n))
+      ())))
+
+; is the page of N bytes at OFF in the image P all zero
+(def %cc-macho-zero-page?
+  (fn (_ p off n)
+    (def go (fn (self i)
+              (if (fx< i n) (if (= (word-ref p (fx+ off i)) 0) (self (fx+ i 8)) #f) #t)))
+    (go 0)))
 
 ; The digest of an all-zero page, computed once.  Every page between the end
 ; of the code and the link-edit data is zero, and a small program is mostly
@@ -192,7 +200,8 @@
           ())
         %cc-macho-zero-hex)))
 
-; CODE is the code, entry first; DATA the bytes of the data segment;
+; CODE is the code, entry first; DATA the data segment, (LENGTH . PIECES),
+; each piece (OFFSET . BYTES) and what none covers zero;
 ; IMPORTS the slots in the data dyld fills with libSystem's functions, each
 ; (OFFSET . NAME), in the order of their offsets.
 ; Writes the executable to PATH and answers its size in bytes.
@@ -201,7 +210,7 @@
     (def vmbase %cc-macho-vmbase)
     (def codeoff %cc-macho-codeoff)
     (def codelen (length code))
-    (def datalen (length data))
+    (def datalen (first data))
     ; __TEXT ends where the data begins, and the data takes whole pages: a
     ; program with none still gets one, so every executable has the segment.
     (def dataoff (+ codeoff (macho-data-at codelen)))
@@ -291,7 +300,7 @@
 
     ; the code, then the data a page later
     (img-bytes! img codeoff code)
-    (img-bytes! img dataoff data)
+    (img-pieces! img dataoff (rest data))
 
     ; the chained fixups, and each import's slot in the data as a bind
     (img-bytes! img fixups (first fx))
@@ -373,8 +382,12 @@
             ((padding? off code-end dataoff) (%cc-macho-zero-page-hex))
             ((padding? off data-end linkedit) (%cc-macho-zero-page-hex))
             (#t (let ((n (if (< (- sigoff off) 4096) (- sigoff off) 4096)))
-                  (do (%cc-macho-copy! (rest scratch) (rest img) off 0 n)
-                      (sha256-hex-n (first scratch) n))))))))
+                  ; a page of the data no initializer reached is zero, and
+                  ; a large uninitialized global is many of them
+                  (if (if (= n 4096) (%cc-macho-zero-page? (rest img) off 4096) #f)
+                    (%cc-macho-zero-page-hex)
+                    (do (%cc-macho-copy! (rest scratch) (rest img) off 0 n)
+                        (sha256-hex-n (first scratch) n)))))))))
     (def hash-pages
       (fn (self k)
         (if (>= k nslots) ()
