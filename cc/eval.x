@@ -26,7 +26,7 @@
 (import cc/prims append byte-at byte-len length
   map mem-make mem-ptr mem-ref-at mem-set-at! ptr-int reverse string-append
   string-concat string=? substring x-write fx+ fx- fx* fx< fx<< fx>>
-  mem-fill! int-ptr heap-count heap-collect)
+  mem-fill! int-ptr heap-count heap-collect evals)
 (import cc/pp cc-lex)
 (import cc/parse cc-parse c-type-size plain-char round-up struct-entry struct-table)
 (import cc/real convert-real real-arith real-compare real-negate real-step real-stub
@@ -305,19 +305,25 @@
 
 ; x collects only when asked, and run allocates at every step, so it asks
 ; where a long program spends its time: each call and each pass of a loop.
-; A collection is due when the live objects have doubled since the last
-; one left them.  Every value run holds there is in an environment or a
-; global, which the collector reaches; a callback the C library made is
-; under the library's own call, whose arguments only C holds, so none is
-; made there.
+; Counting the live objects walks the heap, so the clock between
+; collections is the engine's count of evaluations, read in constant time:
+; a collection is due once as many evaluations have run since the last as
+; that one left live objects -- an evaluation allocates about an object,
+; so the heap about doubles between collections.  Every value run holds
+; there is in an environment or a global, which the collector reaches; a
+; callback the C library made is under the library's own call, whose
+; arguments only C holds, so none is made there.
 (def %cc-heap-mark 0)   ; the live objects the last collection left
+(def %cc-eval-mark 0)   ; the evaluations counted when it ran
 (def %cc-in-library 0)  ; callbacks the C library is making now
 
 (def %cc-collect?
   (fn (_)
     (if (fx< 0 %cc-in-library) ()
-      (if (fx< (fx* 2 %cc-heap-mark) (heap-count))
-        (do (heap-collect) (set! %cc-heap-mark (heap-count)))
+      (if (fx< (fx+ %cc-eval-mark %cc-heap-mark) (evals))
+        (do (heap-collect)
+            (set! %cc-heap-mark (heap-count))
+            (set! %cc-eval-mark (evals)))
         ()))))
 
 ; stack bytes, zero-filled, eight-aligned; answers the base address
@@ -2087,6 +2093,7 @@
     (set! %cc-exit-code ())
     (set! %cc-in-library 0)
     (set! %cc-heap-mark (heap-count))
+    (set! %cc-eval-mark (evals))
     (def prog (cc-parse (cc-lex src)))
     (def load!
       (fn (self items)
