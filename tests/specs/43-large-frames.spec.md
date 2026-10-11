@@ -7,8 +7,8 @@ locals that are not arrays or structs -- where a load reaches them,
 printf's area, then the arrays and structs, which are reached through
 their address from any distance, and at the top the arguments the caller
 stored there, which the prologue copies down.  The prologue takes the
-frame off x20 in steps an immediate holds, up to a megabyte a frame, out
-of a four-megabyte region.  Each case below prints what the same source
+frame off x20 in steps an immediate holds, a frame up to the whole of
+a four-megabyte region.  Each case below prints what the same source
 prints through /usr/bin/cc, and exits as it does; where both columns
 show, `run` and the compiled executable agree.
 
@@ -87,12 +87,20 @@ k
 ---
     (91 91)
 
-## the refusals
-
-### a frame past a megabyte
+### two megabytes of chars in one frame, compiled
 
 ```cc
-(write (guard (e (e msg)) (cc-exe-run "int main(void) { char buf[2000000]; buf[0] = 1; return buf[0]; }")))
+(display (cc-exe-run "int main(void) { char buf[2000000]; buf[0] = 1; buf[1999999] = 2; return buf[0] + buf[1999999]; }"))
 ```
 ---
-    "cc: compile: not built yet: a frame past a megabyte"
+    3
+
+## the refusals
+
+### a frame past the four megabytes frames have
+
+```cc
+(write (guard (e (e msg)) (cc-exe-run "int main(void) { char buf[5000000]; buf[0] = 1; return buf[0]; }")))
+```
+---
+    "cc: compile: not built yet: a frame past the four megabytes frames have"

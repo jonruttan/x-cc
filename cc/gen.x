@@ -93,10 +93,10 @@
 ; The frames go in a region below the machine stack, so a push never lands
 ; in one: the entry points x20 at the region's top and moves the machine
 ; stack below it, and each function's prologue takes its frame off x20.
-; Four megabytes of the eight a process's stack has on both targets; a
-; frame takes at most a megabyte of it.
+; Four megabytes of the eight a process's stack has on both targets; one
+; frame may take all of it.
 (def %cc-gen-region 4194304)
-(def %cc-gen-frame-most 1048576)
+(def %cc-gen-frame-most %cc-gen-region)
 
 ; the bytes of several pieces, in order
 (def %cc-gen-cat
@@ -768,13 +768,45 @@
 (def %cc-gen-globals ())    ; ((name offset . c-type) ...)
 (def %cc-gen-strings ())    ; ((text . offset) ...)
 
-; room for BYTES in the data, at a multiple of ALIGN; answers where
+; SIZE bytes of room in the data, at a multiple of ALIGN, starting with
+; BYTES; the rest of the room is zero.  Answers where.
 (def %cc-gen-data!
-  (fn (_ bytes align)
+  (fn (_ bytes size align)
     (let ((off (round-up %cc-gen-databytes align)))
-      (do (set! %cc-gen-data (pair (pair off bytes) %cc-gen-data))
-          (set! %cc-gen-databytes (+ off (length bytes)))
+      (do (if (null? bytes) () (set! %cc-gen-data (pair (pair off bytes) %cc-gen-data)))
+          (set! %cc-gen-databytes (+ off size))
           off))))
+
+; the bytes a global or a static of C-TYPE starts with, as far as INIT goes:
+; none for no initializer, the elements given of an array's list, a
+; string's text and its terminator; what follows is zero in the data
+(def %cc-gen-init-bytes
+  (fn (_ c-type init)
+    (match
+      ((null? init) ())
+      ((if (%cc-gen-array? c-type) (eq? (first init) (lit initlist)) #f)
+        (let ((items (first (rest init))) (ek (c-type-elem c-type)))
+          (if (> (length items) (first (rest c-type)))
+            (%cc-gen-no "more initializers than an array has elements"))
+          (def es (c-type-size ek))
+          (def go
+            (fn (go i is)
+              (if (null? is) ()
+                (append (%cc-gen-const-bytes ek (first is) (* i es)) (go (+ i 1) (rest is))))))
+          (go 0 items)))
+      ((if (%cc-gen-array? c-type)
+         (if (eq? (first init) (lit str)) (%cc-gen-byte? (c-type-elem c-type)) #f)
+         #f)
+        (let ((text (first (rest init))) (n (first (rest c-type))))
+          (if (> (byte-len text) n)
+            (%cc-gen-no "a string longer than the array it initializes"))
+          ; the terminator when there is room for it, as C has it
+          (def go
+            (fn (go i)
+              (if (< i (byte-len text)) (pair (byte-at text i) (go (+ i 1)))
+                (if (< i n) (list 0) ()))))
+          (go 0)))
+      (#t (%cc-gen-const-bytes c-type init 0)))))
 
 (def %cc-gen-string!
   (fn (_ text)
@@ -786,7 +818,7 @@
       (fn (self i out) (if (< i 0) out (self (- i 1) (pair (byte-at text i) out)))))
     (let ((hit (go %cc-gen-strings)))
       (if (not (null? hit)) hit
-        (let ((off (%cc-gen-data! (bytes (- (byte-len text) 1) (list 0)) 1)))
+        (let ((off (%cc-gen-data! (bytes (- (byte-len text) 1) (list 0)) (+ (byte-len text) 1) 1)))
           (do (set! %cc-gen-strings (pair (pair text off) %cc-gen-strings))
               off))))))
 
@@ -813,7 +845,7 @@
       (%cc-gen-no (string-append "a second declaration of " name)))
     (def init (first (rest (rest (rest node)))))
     (set! %cc-gen-pending ())
-    (def off (%cc-gen-data! (%cc-gen-const-bytes c-type init 0) (c-type-align c-type)))
+    (def off (%cc-gen-data! (%cc-gen-init-bytes c-type init) (c-type-size c-type) (c-type-align c-type)))
     (%cc-gen-keep-fixups! off)
     (set! %cc-gen-globals (pair (pair name (pair off c-type)) %cc-gen-globals))))
 
@@ -964,8 +996,8 @@
     (def c-type (%cc-gen-c-type! (first (rest (rest node))) "a local"))
     (set! %cc-gen-pending ())
     (def off
-      (%cc-gen-data! (%cc-gen-const-bytes c-type (first (rest (rest (rest node)))) 0)
-        (c-type-align c-type)))
+      (%cc-gen-data! (%cc-gen-init-bytes c-type (first (rest (rest (rest node)))))
+        (c-type-size c-type) (c-type-align c-type)))
     (set! %cc-gen-static-scope
       (pair (pair (first (rest node)) (pair off c-type)) %cc-gen-static-scope))
     (%cc-gen-keep-fixups! off)
@@ -1194,18 +1226,10 @@
         (#t (%cc-gen-no (string-append "a global initialized with " op))))
       c-type)))
 
-; the bytes of the data: every piece at its offset, zeros between.  The
-; pieces are listed last-laid first, so the bytes build from the end back.
+; the data: (LENGTH . PIECES), each piece (OFFSET . BYTES); the writer lays
+; each at its offset in a zeroed image, so the zeros are never built
 (def %cc-gen-data-bytes
-  (fn (_)
-    (def zeros (fn (self n acc) (if (<= n 0) acc (self (- n 1) (pair 0 acc)))))
-    (def go
-      (fn (self ps cursor acc)
-        (if (null? ps) (zeros cursor acc)
-          (let ((off (first (first ps))) (bs (rest (first ps))))
-            (self (rest ps) off
-              (append bs (zeros (- cursor (+ off (length bs))) acc)))))))
-    (go %cc-gen-data %cc-gen-databytes ())))
+  (fn (_) (pair %cc-gen-databytes %cc-gen-data)))
 
 ; a literal's address: where the strings start, plus its offset
 (def %cc-gen-string-at!
@@ -1861,7 +1885,7 @@
                 (#t (self (rest es))))))
     (def hit (go %cc-gen-imports))
     (if (not (null? hit)) hit
-      (let ((off (%cc-gen-data! (list 0 0 0 0 0 0 0 0) 8)))
+      (let ((off (%cc-gen-data! () 8 8)))
         (do (set! %cc-gen-imports (pair (pair name off) %cc-gen-imports))
             off)))))
 
@@ -2789,7 +2813,7 @@
     (%cc-gen-scan-calls! body)
     (def frame
       (+ (round-up %cc-gen-frame-bytes 16) (%cc-gen-above-size homes sret?)))
-    (if (> frame %cc-gen-frame-most) (%cc-gen-no "a frame past a megabyte"))
+    (if (> frame %cc-gen-frame-most) (%cc-gen-no "a frame past the four megabytes frames have"))
     (set! %cc-gen-frame-top frame)
     (def home (fn (_ p) (rest (rest p))))
     (def in-reg? (fn (_ p) (eq? (first (home p)) (lit reg))))
@@ -2865,7 +2889,7 @@
     (%cc-gen-import-slot "exit")
     ; then the frame stack's top as the last call out left it, which the
     ; gate takes up again (%cc-gen-gate-bytes)
-    (%cc-gen-data! (list 0 0 0 0 0 0 0 0) 8)
+    (%cc-gen-data! () 8 8)
     (set! %cc-gen-thunks ())
     ; the ones a load reaches first, then the arrays and structs, which are
     ; only ever reached through their address

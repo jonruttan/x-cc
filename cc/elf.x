@@ -26,7 +26,7 @@
 
 (import cc/prims append byte-at byte-len file-close file-open-read file-read file-seek
   length mem-make reverse substring)
-(import cc/image img-new img-u8! img-u16! img-u32! img-u64! img-bytes! img-write!)
+(import cc/image img-new img-u8! img-u16! img-u32! img-u64! img-bytes! img-pieces! img-write!)
 
 (def %cc-elf-base 0x400000)
 (def %cc-elf-phdrs-end 288)        ; the header and four program headers
@@ -112,7 +112,8 @@
         (img-u64! img (+ at 40) memsz)
         (img-u64! img (+ at 48) align))))
 
-; CODE is the code, entry first; DATA the bytes of the data segment; MACHINE
+; CODE is the code, entry first; DATA the data segment, (LENGTH . PIECES),
+; each piece (OFFSET . BYTES) and what none covers zero; MACHINE
 ; the e_machine value; IMPORTS the slots in the data the loader fills with
 ; the C library's functions, each (OFFSET . NAME).
 ; Writes the executable to PATH and answers its size in bytes.
@@ -123,7 +124,7 @@
     (def gap (%cc-elf-gap machine))
     (def align (%cc-elf-align machine))
     (def codelen (length code))
-    (def datalen (length data))
+    (def datalen (first data))
     (def dataoff (- (+ codeoff (elf-data-at codelen machine)) gap))
     (def n (length imports))
     ; the names: a NUL, libc.so.6, libm.so.6, then each import's
@@ -179,7 +180,7 @@
     (img-bytes! img %cc-elf-phdrs-end (%cc-elf-ascii interp))
 
     (img-bytes! img codeoff code)
-    (img-bytes! img dataoff data)
+    (img-pieces! img dataoff (rest data))
 
     ; the dynamic section
     (def tag!
