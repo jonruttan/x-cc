@@ -146,7 +146,7 @@ decay into functions, bubble sort sorts, and the output matches the
 real binary byte for byte.
 
 MEMORY IS BYTES, at real addresses: the globals, string literals and
-stack are in one buffer, anything else is wherever the C library put
+stack are in one 64 MB buffer, anything else is wherever the C library put
 it, and every read and write takes the width of its C type -- `char` 1,
 `short` 2, `int` 4, `long` and pointers 8, with signed C types
 sign-extending.  Width here is a byte count; C11 (6.2.6.2) counts a type's
@@ -155,7 +155,10 @@ width in bits.  An address below 4096 is a null pointer and refuses.
 counts.  Arithmetic is C's: an operand narrower than an int promotes
 to one, a binary operator's operands meet in the C type the usual
 conversions give them, and the result wraps in it.  Locals live in
-memory so &local works, and the stack grows down.
+memory so &local works, and the stack grows down.  x collects only when
+asked, so `run` asks at each call and each pass of a loop, once the live
+objects have doubled since the last collection -- never inside a callback
+the C library is making, whose arguments only C holds.
 
 THE C LIBRARY IS THE SYSTEM'S: a call to a function the program does
 not define goes to libc, opened in the process and searched by name,

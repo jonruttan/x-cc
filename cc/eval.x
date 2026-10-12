@@ -25,7 +25,8 @@
 
 (import cc/prims append byte-at byte-len length
   map mem-make mem-ptr mem-ref-at mem-set-at! ptr-int reverse string-append
-  string-concat string=? substring word-set! x-write fx+ fx- fx* fx< fx<< fx>>)
+  string-concat string=? substring x-write fx+ fx- fx* fx< fx<< fx>>
+  mem-fill! int-ptr heap-count heap-collect evals)
 (import cc/pp cc-lex)
 (import cc/parse cc-parse c-type-size plain-char round-up struct-entry struct-table)
 (import cc/real convert-real real-arith real-compare real-negate real-step real-stub
@@ -36,7 +37,9 @@
 ; pointers); the base is refreshed every run.
 (def %cc-mem ())        ; the buffer string, held so it stays alive
 (def %cc-memp ())       ; its ptr object, for the interpreter's words
-(def %cc-memsize 131072)   ; bytes of program memory
+; bytes of program memory: the stack grows down from its top and the
+; globals, statics and string literals up from its foot
+(def %cc-memsize 67108864)
 (def %cc-base 0)        ; the buffer's address
 ; the W bytes at address A: the prim takes a pointer and an offset, and
 ; the buffer's pointer and A's distance from it reach A wherever it is
@@ -300,6 +303,29 @@
         (if (if (real? to) #t (%cc-bits? to)) r (%cc-convert r to)))
       v)))
 
+; x collects only when asked, and run allocates at every step, so it asks
+; where a long program spends its time: each call and each pass of a loop.
+; Counting the live objects walks the heap, so the clock between
+; collections is the engine's count of evaluations, read in constant time:
+; a collection is due once as many evaluations have run since the last as
+; that one left live objects -- an evaluation allocates about an object,
+; so the heap about doubles between collections.  Every value run holds
+; there is in an environment or a global, which the collector reaches; a
+; callback the C library made is under the library's own call, whose
+; arguments only C holds, so none is made there.
+(def %cc-heap-mark 0)   ; the live objects the last collection left
+(def %cc-eval-mark 0)   ; the evaluations counted when it ran
+(def %cc-in-library 0)  ; callbacks the C library is making now
+
+(def %cc-collect?
+  (fn (_)
+    (if (fx< 0 %cc-in-library) ()
+      (if (fx< (fx+ %cc-eval-mark %cc-heap-mark) (evals))
+        (do (heap-collect)
+            (set! %cc-heap-mark (heap-count))
+            (set! %cc-eval-mark (evals)))
+        ()))))
+
 ; stack bytes, zero-filled, eight-aligned; answers the base address
 (def %cc-alloca
   (fn (_ n)
@@ -308,13 +334,7 @@
     (set! %cc-sp (fx- %cc-sp size))
     (if (fx< %cc-sp %cc-sp-min) (set! %cc-sp-min %cc-sp) ())
     (if (not (fx< %cc-hp %cc-sp)) (%cc-oops "stack overflow"))
-    (def at (fx- %cc-sp %cc-base))
-    (def clear (fn (self i)
-                 (if (fx< i size)
-                   (do (word-set! %cc-memp (fx+ at i) 0)
-                       (self (fx+ i 8)))
-                   ())))
-    (clear 0)
+    (mem-fill! (int-ptr %cc-sp) 0 size)
     %cc-sp))
 
 ; bytes for a literal or a global, zero-filled like the stack's: the raw
@@ -326,12 +346,9 @@
     (def size (round-up (if (< n 1) 1 n) 8))
     (def base %cc-hp)
     (set! %cc-hp (+ %cc-hp size))
-    (if (>= %cc-hp %cc-sp) (%cc-oops "program memory exhausted")
-      (let ((clear (fn (self i)
-                     (if (>= i size) ()
-                       (do (word-set! %cc-memp (+ (- base %cc-base) i) 0)
-                           (self (+ i 8)))))))
-        (do (clear 0) base)))))
+    (if (>= %cc-hp %cc-sp) (%cc-oops "program memory exhausted"))
+    (mem-fill! (int-ptr base) 0 size)
+    base))
 
 ; a C string into memory, interned; answers its address
 (def %cc-intern
@@ -562,7 +579,10 @@
         (def cb
           (Callback make
             (fn (_ . as)
-              (%cc-call name (map (fn (_ p) (%cc-convert (first p) (rest p))) (%cc-zip as ks))))
+              (set! %cc-in-library (fx+ %cc-in-library 1))
+              (def v (%cc-call name (map (fn (_ p) (%cc-convert (first p) (rest p))) (%cc-zip as ks))))
+              (set! %cc-in-library (fx- %cc-in-library 1))
+              v)
             (length ks)))
         (set! %cc-callbacks (pair (pair name cb) %cc-callbacks))
         (cb address)))))
@@ -1754,13 +1774,7 @@
 
 ; N bytes of the frame at A, a multiple of eight, to zero
 (def %cc-k-zero!
-  (fn (_ a n)
-    (def at (fx- a %cc-base))
-    (def go (fn (self i)
-              (if (fx< i n)
-                (do (word-set! %cc-memp (fx+ at i) 0) (self (fx+ i 8)))
-                ())))
-    (go 0)))
+  (fn (_ a n) (mem-fill! (int-ptr a) 0 n)))
 
 ; STMTS translated in order, each declaration in scope after it, and the
 ; names they bring out of scope at the end
@@ -1797,6 +1811,7 @@
 ; a pass of a loop: the test C, then the body BR and ON after it
 (def %cc-k-pass
   (fn (_ c br on fp next)
+    (%cc-collect?)
     (c fp (fn (_ x) (if x (br fp (fn (_ r) (on fp r next))) (next ()))))))
 
 (set! %cc-k-stmt
@@ -1962,6 +1977,7 @@
 ; heap, not on x's stack
 (def %cc-call-fun
   (fn (_ name args next)
+    (%cc-collect?)
     (def tr (%cc-k-fun name))
     (def saved-sp %cc-sp)
     (def n (first (rest (rest (rest (rest tr))))))
@@ -2045,11 +2061,10 @@
 
 (def %cc-sp-min 0)   ; the stack's deepest reach, for the dirty clear
 
+; the program memory from offset I to END, zeroed: one memset
 (def %cc-mem-clear
-  (fn (self i end)
-    (if (>= i end) ()
-      (do (word-set! %cc-memp i 0)
-          (self (+ i 8) end)))))
+  (fn (_ i end)
+    (if (fx< i end) (mem-fill! (int-ptr (fx+ (ptr-int %cc-memp) i)) 0 (fx- end i)) ())))
 
 (def %cc-run-core
   (fn (_ src input argv)
@@ -2076,6 +2091,9 @@
     (set! %cc-fun-ids ())
     (%cc-callbacks-free!)
     (set! %cc-exit-code ())
+    (set! %cc-in-library 0)
+    (set! %cc-heap-mark (heap-count))
+    (set! %cc-eval-mark (evals))
     (def prog (cc-parse (cc-lex src)))
     (def load!
       (fn (self items)

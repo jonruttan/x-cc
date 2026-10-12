@@ -17,6 +17,7 @@
 (import x/sys/proc)
 (import x/type/vector)
 (import x/codec/sha256)
+(import x/tool/profile eval-count)
 
 ; The type handle this file asks convert for, fetched by name through the
 ; platform's public door and private to this module.
@@ -75,6 +76,16 @@
 (def mem-set-at! (fn (_ p i v w) (%cc-ptr-set p i v w)))
 ; N bytes from a pointer, each set to B: one C memset
 (def mem-fill! (prim-ref (lit mem) (lit set)))
+; an address as a pointer
+(def int-ptr (prim-ref (lit int) (lit ->ptr)))
+
+; the heap's live objects -- a walk of the whole heap -- and a collection
+; of what is not live; there is no automatic one
+(def heap-count (fn (_) (Heap count)))
+(def heap-collect (fn (_) (Heap collect)))
+; the evaluations the engine has made, a counter it keeps: a clock read in
+; constant time
+(def evals (fn (_) (eval-count)))
 
 ; The engine's integer prims, for what run does at every step: an address,
 ; an offset, a width, a C integer's value.  They cost no heap objects where
@@ -129,7 +140,7 @@
   list->string convert length reverse append map filter set-first!
   vec-make vec-ref vec-set!
   mem-make mem-ptr ptr-int word-ref word-set! mem-set-byte! mem-ref-byte
-  mem-ref-at mem-set-at! mem-fill! fx+ fx- fx* fx< fx<< fx>>
+  mem-ref-at mem-set-at! mem-fill! int-ptr heap-count heap-collect evals fx+ fx- fx* fx< fx<< fx>>
   file-close file-open-read file-read file-read-all file-seek file-exists? file-write
   file-write-exec!
   sha256-hex-n sha256-jit! proc-capture
