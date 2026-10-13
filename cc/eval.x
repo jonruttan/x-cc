@@ -225,6 +225,7 @@
     (if (pair? k) #f
       (match
         ((eq? k (lit uchar)) #f)
+        ((eq? k (lit bool)) #f)
         ((eq? k (lit ushort)) #f)
         ((eq? k (lit uint)) #f)
         ((eq? k (lit ulong)) #f)
@@ -286,6 +287,8 @@
   (fn (_ v c-type)
     (match
       ((eq? c-type (lit void)) 0)
+      ; a _Bool is 1 for any value that is not 0
+      ((eq? c-type (lit bool)) (if (= v 0) 0 1))
       ((%cc-c-type-decays? c-type) (%cc-oops "a cast to an array or a struct"))
       (#t (let ((w (%cc-width c-type)))
             (if (>= w 8) v
@@ -297,6 +300,14 @@
 ; either is real (cc/real.x), an integer TO's answer cut to its width; any
 ; other V is as it was
 (def %cc-convert-from
+  (fn (_ v from to)
+    (match
+      ; a _Bool is 1 for any value that is not 0, a real one's sign of zero
+      ; included
+      ((eq? to (lit bool)) (if (real? from) (if (real-zero? v from) 0 1) (if (= v 0) 0 1)))
+      (#t (%cc-convert-between v from to)))))
+
+(def %cc-convert-between
   (fn (_ v from to)
     (if (if (real? from) #t (real? to))
       (let ((r (convert-real v from to)))
@@ -882,6 +893,7 @@
   (fn (_ k)
     (match
       ((eq? k (lit void)) (fn (_ v) 0))
+      ((eq? k (lit bool)) (fn (_ v) (if (= v 0) 0 1)))
       ((%cc-c-type-decays? k) (fn (_ v) (%cc-oops "a cast to an array or a struct")))
       (#t (let ((w (%cc-width k)))
             (if (>= w 8) %cc-id
@@ -892,6 +904,15 @@
 
 ; V of the C type FROM as TO takes it (%cc-convert-from)
 (def %cc-k-from
+  (fn (_ from to)
+    (match
+      ((eq? to (lit bool))
+        (if (real? from)
+          (fn (_ v) (if (real-zero? v from) 0 1))
+          (fn (_ v) (if (= v 0) 0 1))))
+      (#t (%cc-k-from-between from to)))))
+
+(def %cc-k-from-between
   (fn (_ from to)
     (if (if (real? from) #t (real? to))
       (if (if (real? to) #t (%cc-bits? to))

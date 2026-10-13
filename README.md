@@ -115,6 +115,9 @@ their arguments in the d registers.  A `float` is held as its single's 32
 bits where an unsigned int would be; its operations are the double's
 rounded to a single, which is the single-precision answer, and one
 handed to a function past its declared parameters goes as a double.
+A `_Bool` is one byte holding 0 or 1: any value converted to it, by a
+store, an initializer, an argument, a return or a cast, is 1 unless it
+compares equal to 0.
 `stdin`, `stdout` and `stderr` are the C library's own variables, read
 through the slot the loader fills, and `FILE` from `<stdio.h>` is `void`.
 A variadic function of the program's own, `int f(int n, ...)`, takes the

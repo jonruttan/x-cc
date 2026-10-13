@@ -54,7 +54,7 @@
 (import cc/parse cc-parse c-type-size c-type-align plain-char round-up struct-entry)
 (import cc/eval common-c-type c-type-elem library-c-type
   library-double-label library-variadic promoted-c-type signed? unsigned-divide)
-(import cc/real convert-real real-arith real-negate)
+(import cc/real convert-real real-arith real-negate real-zero?)
 (import cc/macho macho-write! macho-data-at)
 (import cc/elf elf-write! elf-data-at elf-machine-aarch64 elf-machine-x86-64)
 
@@ -424,6 +424,12 @@
 (def %cc-gen-form
   (fn (_ v c-type)
     (def size (c-type-size c-type))
+    (match
+      ((%cc-gen-bool? c-type) (if (= v 0) 0 1))
+      (#t (%cc-gen-form-of v c-type size)))))
+
+(def %cc-gen-form-of
+  (fn (_ v c-type size)
     (if (>= size 8) v
       (let ((top (<< 1 (- (* 8 size) 1))))
         (def low (& v (- (* 2 top) 1)))
@@ -625,6 +631,7 @@
       ((eq? c-type (lit int)) c-type)
       ((eq? c-type (lit char)) c-type)
       ((eq? c-type (lit uchar)) c-type)
+      ((eq? c-type (lit bool)) c-type)
       ((eq? c-type (lit short)) c-type)
       ((eq? c-type (lit ushort)) c-type)
       ((eq? c-type (lit long)) c-type)
@@ -648,6 +655,8 @@
               " that is not an integer, a double, a float, a pointer, an array or a struct"))))))
 
 (def %cc-gen-byte? (fn (_ c-type) (if (eq? c-type (lit char)) #t (eq? c-type (lit uchar)))))
+; a _Bool is a byte that holds 0 or 1
+(def %cc-gen-bool? (fn (_ c-type) (eq? c-type (lit bool))))
 (def %cc-gen-half? (fn (_ c-type) (if (eq? c-type (lit short)) #t (eq? c-type (lit ushort)))))
 
 ; what is left when a value of C-TYPE is loaded or stored: the C types a
@@ -666,6 +675,7 @@
     (match
       ((eq? c-type (lit char)) (lit ldrsb))
       ((eq? c-type (lit uchar)) (lit ldrb))
+      ((eq? c-type (lit bool)) (lit ldrb))
       ((eq? c-type (lit short)) (lit ldrsh))
       ((eq? c-type (lit ushort)) (lit ldrh))
       ((eq? c-type (lit uint)) (lit ldrw))
@@ -676,7 +686,7 @@
 (def %cc-gen-store-op
   (fn (_ c-type)
     (match
-      ((%cc-gen-byte? c-type) (lit strb))
+      ((if (%cc-gen-byte? c-type) #t (%cc-gen-bool? c-type)) (lit strb))
       ((%cc-gen-half? c-type) (lit strh))
       ((%cc-gen-wide? c-type) (lit str))
       (#t (do (%cc-gen-value-c-type! c-type) (lit strw))))))
@@ -1152,6 +1162,11 @@
             (zeros 8 ())))
       ((eq? (first init) (lit initlist))
         (%cc-gen-no "a braced initializer for something that is not an array or a struct"))
+      ; a _Bool starts as 1 for any value that is not 0
+      ((%cc-gen-bool? c-type)
+        (let ((v (%cc-gen-fold init)) (from (%cc-gen-c-type-of init)))
+          (%cc-gen-value-bytes c-type
+            (if (%cc-gen-real? from) (if (real-zero? v from) 0 1) (if (= v 0) 0 1)))))
       (#t (let ((v (%cc-gen-fold init)))
             (%cc-gen-value-bytes c-type (convert-real v (%cc-gen-c-type-of init) c-type)))))))
 
@@ -1477,6 +1492,15 @@
           ((eq? from c-type) ())
           ((%cc-gen-real? from) (do (%cc-gen-real-in! d0 x0 from) (%cc-gen-real-out! c-type)))
           (#t (%cc-gen-int->real! from c-type))))
+      ; a _Bool is 1 for any value that is not 0
+      ((%cc-gen-bool? c-type)
+        (if (%cc-gen-real? from)
+          (do (%cc-gen-real-unary! "!" from)
+              (%cc-gen! (lit cmp) x0 (imm 0))
+              (%cc-gen-flag! (lit b/eq)))
+          (if (%cc-gen-bool? from) ()
+            (do (%cc-gen! (lit cmp) x0 (imm 0))
+                (%cc-gen-flag! (lit b/ne))))))
       ((%cc-gen-real? from) (%cc-gen-real->int! c-type from))
       ((if (%cc-gen-byte? c-type) #t (%cc-gen-half? c-type)) (%cc-gen-narrow! c-type))
       ((eq? c-type (lit int)) (if (%cc-gen-int-form? from) () (%cc-gen-int!)))
@@ -1489,15 +1513,17 @@
 (def %cc-gen-store!
   (fn (_ place from)
     (def k (%cc-gen-place-c-type place))
-    (if (if (%cc-gen-real? k) #t (%cc-gen-real? from))
+    (if (if (%cc-gen-real? k) #t (if (%cc-gen-real? from) #t (%cc-gen-bool? k)))
       (do (%cc-gen-convert! k from) (%cc-gen-put! place))
       (do (%cc-gen-put! place) (%cc-gen-convert! k from)))))
 
-; x0, of C type FROM, as C-TYPE when either is real; any other value is left
-; as it is, for a store to cut
+; x0, of C type FROM, as C-TYPE when either is real or C-TYPE is a _Bool;
+; any other value is left as it is, for a store to cut
 (def %cc-gen-convert-real!
   (fn (_ c-type from)
-    (if (if (%cc-gen-real? c-type) #t (%cc-gen-real? from)) (%cc-gen-convert! c-type from) ())))
+    (if (if (%cc-gen-real? c-type) #t (if (%cc-gen-real? from) #t (%cc-gen-bool? c-type)))
+      (%cc-gen-convert! c-type from)
+      ())))
 
 ; NODE's value into x0 and compared with zero, for a branch on whether it
 ; is true: a real value is false at either zero
