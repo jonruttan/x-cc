@@ -361,7 +361,94 @@
           "  int tm_sec; int tm_min; int tm_hour; int tm_mday; int tm_mon; int tm_year;"
           "  int tm_wday; int tm_yday; int tm_isdst; long tm_gmtoff; char *tm_zone;"
           "};"
+          "#endif"
+          "#ifndef __XCC_STRUCT_TIMESPEC"
+          "#define __XCC_STRUCT_TIMESPEC"
+          "struct timespec { long tv_sec; long tv_nsec; };"
           "#endif")
+        ; struct stat as each platform's C library lays it out, and its
+        ; st_atime and the rest as the seconds of its times; time.h gives
+        ; its struct timespec
+        (pair "sys/stat.h"
+          (append
+            (list "#include <sys/types.h>" "#include <time.h>"
+              (if os-darwin? "#define mode_t unsigned short" "#define mode_t unsigned int")
+              "#define S_IFMT 0170000" "#define S_IFDIR 0040000" "#define S_IFREG 0100000"
+              "#define S_IFLNK 0120000" "#define S_IFIFO 0010000" "#define S_IFCHR 0020000"
+              "#define S_IFBLK 0060000" "#define S_IFSOCK 0140000"
+              "#define S_ISDIR(m) (((m) & 0170000) == 0040000)"
+              "#define S_ISREG(m) (((m) & 0170000) == 0100000)"
+              "#define S_ISLNK(m) (((m) & 0170000) == 0120000)"
+              "#define S_ISFIFO(m) (((m) & 0170000) == 0010000)"
+              "#define S_ISCHR(m) (((m) & 0170000) == 0020000)"
+              "#define S_ISBLK(m) (((m) & 0170000) == 0060000)"
+              "#define S_IRWXU 0700" "#define S_IRUSR 0400" "#define S_IWUSR 0200"
+              "#define S_IXUSR 0100" "#define S_IRWXG 070" "#define S_IRGRP 040"
+              "#define S_IWGRP 020" "#define S_IXGRP 010" "#define S_IRWXO 07"
+              "#define S_IROTH 04" "#define S_IWOTH 02" "#define S_IXOTH 01"
+              "#ifndef __XCC_STRUCT_STAT"
+              "#define __XCC_STRUCT_STAT")
+            (append (match
+              (os-darwin?
+                (list "struct stat {"
+                  "  int st_dev; unsigned short st_mode; unsigned short st_nlink;"
+                  "  unsigned long st_ino; unsigned int st_uid; unsigned int st_gid; int st_rdev;"
+                  "  struct timespec st_atimespec; struct timespec st_mtimespec;"
+                  "  struct timespec st_ctimespec; struct timespec st_birthtimespec;"
+                  "  long st_size; long st_blocks; int st_blksize; unsigned int st_flags;"
+                  "  unsigned int st_gen; int st_lspare; long st_qspare[2];"
+                  "};"
+                  "#define st_atime st_atimespec.tv_sec" "#define st_mtime st_mtimespec.tv_sec"
+                  "#define st_ctime st_ctimespec.tv_sec"))
+              (arch-arm64?
+                (list "struct stat {"
+                  "  unsigned long st_dev; unsigned long st_ino; unsigned int st_mode;"
+                  "  unsigned int st_nlink; unsigned int st_uid; unsigned int st_gid;"
+                  "  unsigned long st_rdev; unsigned long __pad1; long st_size; int st_blksize;"
+                  "  int __pad2; long st_blocks;"
+                  "  struct timespec st_atim; struct timespec st_mtim; struct timespec st_ctim;"
+                  "  int __unused[2];"
+                  "};"
+                  "#define st_atime st_atim.tv_sec" "#define st_mtime st_mtim.tv_sec"
+                  "#define st_ctime st_ctim.tv_sec"))
+              (#t
+                (list "struct stat {"
+                  "  unsigned long st_dev; unsigned long st_ino; unsigned long st_nlink;"
+                  "  unsigned int st_mode; unsigned int st_uid; unsigned int st_gid; int __pad0;"
+                  "  unsigned long st_rdev; long st_size; long st_blksize; long st_blocks;"
+                  "  struct timespec st_atim; struct timespec st_mtim; struct timespec st_ctim;"
+                  "  long __unused[3];"
+                  "};"
+                  "#define st_atime st_atim.tv_sec" "#define st_mtime st_mtim.tv_sec"
+                  "#define st_ctime st_ctim.tv_sec")))
+              (list "#endif"))))
+        ; DIR is the C library's, reached only through its pointer
+        (list "dirent.h" "#define DIR void"
+          "#define DT_UNKNOWN 0" "#define DT_FIFO 1" "#define DT_CHR 2" "#define DT_DIR 4"
+          "#define DT_BLK 6" "#define DT_REG 8" "#define DT_LNK 10" "#define DT_SOCK 12"
+          "#ifndef __XCC_STRUCT_DIRENT"
+          "#define __XCC_STRUCT_DIRENT"
+          (if os-darwin?
+            "struct dirent { unsigned long d_ino; unsigned long d_seekoff; unsigned short d_reclen; unsigned short d_namlen; unsigned char d_type; char d_name[1024]; };"
+            "struct dirent { unsigned long d_ino; long d_off; unsigned short d_reclen; unsigned char d_type; char d_name[256]; };")
+          "#endif")
+        (list "unistd.h" %cc-null "#include <sys/types.h>"
+          "#define STDIN_FILENO 0" "#define STDOUT_FILENO 1" "#define STDERR_FILENO 2"
+          "#define F_OK 0" "#define X_OK 1" "#define W_OK 2" "#define R_OK 4"
+          "#define SEEK_SET 0" "#define SEEK_CUR 1" "#define SEEK_END 2")
+        ; a handler is a function pointer; the numbers past SIGTERM differ
+        (list "signal.h" "#define sig_atomic_t int"
+          "#define SIG_DFL ((void (*)(int))0)" "#define SIG_IGN ((void (*)(int))1)"
+          "#define SIG_ERR ((void (*)(int))-1)"
+          "#define SIGHUP 1" "#define SIGINT 2" "#define SIGQUIT 3" "#define SIGILL 4"
+          "#define SIGTRAP 5" "#define SIGABRT 6" "#define SIGFPE 8" "#define SIGKILL 9"
+          "#define SIGSEGV 11" "#define SIGPIPE 13" "#define SIGALRM 14" "#define SIGTERM 15"
+          (if os-darwin? "#define SIGUSR1 30" "#define SIGUSR1 10")
+          (if os-darwin? "#define SIGUSR2 31" "#define SIGUSR2 12")
+          (if os-darwin? "#define SIGCHLD 20" "#define SIGCHLD 17")
+          (if os-darwin? "#define SIGCONT 19" "#define SIGCONT 18")
+          (if os-darwin? "#define SIGSTOP 17" "#define SIGSTOP 19")
+          (if os-darwin? "#define SIGTSTP 18" "#define SIGTSTP 20"))
         ; errno is the C library's, through the function that answers its
         ; address; the numbers through ERANGE are the same on both platforms
         (list "errno.h"

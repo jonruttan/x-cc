@@ -32,8 +32,9 @@ globals, locals (a static one kept once, in the data) and parameters of
 every width, signed and unsigned,
 pointers, arrays, pointers to arrays, structs and unions, typedefs of
 any of them, assignment, `++` and `--`,
-`if`/`else`, `while`, `do`, `for`, `switch`, `break`, `continue`,
-`goto`, `return` and calls, recursion included, over integer constants and
+`if`/`else`, `while`, `do`, `for` (C99's declaration in its first part
+included), `switch`, `break`, `continue`, `goto`, `return` and calls,
+recursion included, over integer constants and
 string literals, `+ - * / %`, `& | ^ << >>`, the six comparisons,
 `&&`, `||`, the ternary, the comma, unary `- ~ ! & *`, casts,
 subscripts, and `.` and `->`.  A pointer to a function leads to a thunk
@@ -191,7 +192,11 @@ lines of C in place of the `#include` that give its macros and types --
 `<stdint.h>`'s limits and fixed-width types, `<stdbool.h>`'s `bool`,
 `<inttypes.h>`'s `PRId64` and the rest, `<time.h>`'s `struct tm`,
 `<errno.h>`'s `errno` and its numbers, `<assert.h>`'s `assert`,
-`<sys/types.h>`'s `ssize_t` and the like -- and any other is dropped),
+`<sys/types.h>`'s `ssize_t` and the like, `<sys/stat.h>`'s and `<dirent.h>`'s
+`struct stat` and `struct dirent` as each platform lays them out,
+`<unistd.h>`, `<signal.h>`'s `SIGUSR1` and `SIG_IGN` -- and any other is
+dropped), a global declared more than once (`extern int n;` before
+`int n = 10;`) as one,
 object-like `#define` spliced token-wise; `__LINE__`; `__FILE__`, the path
 as the command line gives it, or `<stdin>` for text from no file; // and /* */
 comments.  `x -l cc -- run prog.c ARG ...` hands main the file's name
