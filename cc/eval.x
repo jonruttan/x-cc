@@ -117,6 +117,8 @@
                 "rindex"))
         ; errno's address, through the function each platform's errno.h names
         (each (list (lit ptr) (lit int)) (list "__error" "__errno_location"))
+        ; the handler signal replaces
+        (each (list (lit fnptr) (lit void)) (list "signal"))
         (each (lit ulong)
           (list "strlen" "strnlen" "strspn" "strcspn" "fread" "fwrite" "strtoul"
                 "strtoull" "strftime" "wcslen"))
@@ -666,7 +668,32 @@
           (%cc-ptr-call f (first all) (first (a 1)) (first (a 2)) (first (a 3))
             (first (a 4)) (first (a 5)) (first (a 6))))))
     (set! %cc-sp saved)
-    (%cc-convert r (library-c-type name))))
+    (def k (library-c-type name))
+    (if (if (pair? k) (eq? (first k) (lit fnptr)) #f)
+      (%cc-callback-function r)
+      (%cc-convert r k))))
+
+; A function pointer the C library answers -- the handler signal replaces --
+; as the program holds it: the id of the program's function when it is one
+; of the callbacks made for them, the address itself otherwise
+(def %cc-callback-function
+  (fn (_ address)
+    (def name
+      (let ((go (fn (self es)
+                  (match
+                    ((null? es) ())
+                    ((= ((rest (first es)) address) address) (first (first es)))
+                    (#t (self (rest es)))))))
+        (go %cc-callbacks)))
+    (def id
+      (if (null? name) ()
+        (let ((go (fn (self es)
+                    (match
+                      ((null? es) ())
+                      ((string=? (first (first es)) name) (rest (first es)))
+                      (#t (self (rest es)))))))
+          (go %cc-fun-ids))))
+    (if (null? id) address id)))
 
 ; the C library writes out what its streams hold, so what the program
 ; printed comes before anything x prints after it

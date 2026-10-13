@@ -135,6 +135,9 @@
             ((eq? k (lit unsigned)) #t)
             ((eq? k (lit signed)) #t)
             ((eq? k (lit const)) #t)
+            ((eq? k (lit volatile)) #t)
+            ((eq? k (lit register)) #t)
+            ((eq? k (lit auto)) #t)
             ((eq? k (lit static)) #t)
             (#t (eq? k (lit extern)))))
         #f))))
@@ -159,8 +162,10 @@
 
 ; The scalar the specifiers name.  `unsigned`/`signed` pick the signedness and
 ; the width keyword picks the width; `long long` is `long`, and specifiers
-; that say nothing about either (const, static, extern) are swallowed.  A
-; `char` that says neither `signed` nor `unsigned` is plain-char.
+; that say nothing about either (const, volatile, register, auto, static,
+; extern) are swallowed: nothing is kept in a register, so every access to
+; a volatile is one.  A `char` that says neither `signed` nor `unsigned` is
+; plain-char.
 (def %cc-p-scalar-of
   (fn (_ toks)
     (def go
@@ -845,6 +850,15 @@
         (let ((kr (%cc-p-array-suffix (first sr) (rest ts))))
           (pair (first (rest (first ts))) (pair (first kr) (rest kr))))))))
 
+; is C-TYPE an array without a size
+(def %cc-p-unsized?
+  (fn (_ c-type)
+    (if (pair? c-type) (if (eq? (first c-type) (lit array)) (null? (first (rest c-type))) #f) #f)))
+
+; whether the declarators being read are a global's, where an array without
+; a size may wait for another declaration's (%cc-p-merge-globals)
+(def %cc-p-file-scope? #f)
+
 ; one declarator after the specifiers, and its initializer if it has one:
 ; ((decl NAME C-TYPE INIT) . rest)
 (def %cc-p-declarator
@@ -859,7 +873,7 @@
                   (%cc-e-assign (rest ts3)))))
         (pair (list (lit decl) name (%cc-p-size-c-type c-type (first ir)) (first ir))
           (rest ir)))
-      (if (if (pair? c-type) (if (eq? (first c-type) (lit array)) (null? (first (rest c-type))) #f) #f)
+      (if (if (%cc-p-unsized? c-type) (not %cc-p-file-scope?) #f)
         (%cc-p-err "an array without a size needs an initializer")
         (pair (list (lit decl) name c-type ()) ts3)))))
 
@@ -1065,10 +1079,15 @@
                     (%cc-p-eat (%cc-p-eat (rest c) ")") ";")))))
             (if (%cc-p-kw? toks (lit for))
               (let ((ts (%cc-p-eat (rest toks) "(")))
+                ; C99's declaration in place of the first expression:
+                ; (DECLS . rest past its ;), its scope the loop's own block
+                (def d-r (if (%cc-p-c-type-start? ts) (%cc-p-decl-line ts) ()))
                 (def i-r
-                  (if (%cc-p-op? ts ";") (pair () ts)
-                    (%cc-e-comma ts)))
-                (def ts2 (%cc-p-eat (rest i-r) ";"))
+                  (match
+                    ((not (null? d-r)) (pair () ()))
+                    ((%cc-p-op? ts ";") (pair () ts))
+                    (#t (%cc-e-comma ts))))
+                (def ts2 (if (null? d-r) (%cc-p-eat (rest i-r) ";") (rest d-r)))
                 (def c-r
                   (if (%cc-p-op? ts2 ";") (pair () ts2)
                     (%cc-e-comma ts2)))
@@ -1077,9 +1096,9 @@
                   (if (%cc-p-op? ts3 ")") (pair () ts3)
                     (%cc-e-comma ts3)))
                 (def b (%cc-p-stmt (%cc-p-eat (rest u-r) ")")))
+                (def loop (list (lit for) (first i-r) (first c-r) (first u-r) (first b)))
                 (pair
-                  (list (lit for) (first i-r) (first c-r) (first u-r)
-                    (first b))
+                  (if (null? d-r) loop (list (lit block) (append (first d-r) (list loop))))
                   (rest b)))
               (if (%cc-p-kw? toks (lit return))
                 (if (%cc-p-op? (rest toks) ";")
@@ -1265,6 +1284,46 @@
           (#t (map (fn (_ x) (self x scopes)) node)))))
     (walk body ())))
 
+; PROG with a global declared more than once -- `extern int n;` before
+; `int n = 10;`, or `extern int t[];` before `int t[3] = {...};` -- as one
+; gdecl at its last declaration: the declaration with an initializer, when
+; one has one, or the last.  An array whose size no declaration gives is
+; refused here.
+(def %cc-p-merge-globals
+  (fn (_ prog)
+    (def gdecl? (fn (_ it) (eq? (first it) (lit gdecl))))
+    (def name (fn (_ it) (first (rest it))))
+    (def c-type (fn (_ it) (first (rest (rest it)))))
+    (def init (fn (_ it) (first (rest (rest (rest it))))))
+    (def named? (fn (_ it n) (if (gdecl? it) (string=? (name it) n) #f)))
+    (def later?
+      (fn (self its n)
+        (match
+          ((null? its) #f)
+          ((named? (first its) n) #t)
+          (#t (self (rest its) n)))))
+    ; the declaration of N that gives its initializer, or nil
+    (def chosen
+      (fn (self its n found)
+        (match
+          ((null? its) found)
+          ((if (named? (first its) n) (not (null? (init (first its)))) #f)
+            (if (null? found)
+              (self (rest its) n (first its))
+              (%cc-p-err (string-append "a second definition of " n))))
+          (#t (self (rest its) n found)))))
+    (def go
+      (fn (self its acc)
+        (match
+          ((null? its) (reverse acc))
+          ((not (gdecl? (first its))) (self (rest its) (pair (first its) acc)))
+          ((later? (rest its) (name (first its))) (self (rest its) acc))
+          (#t (let ((it (let ((d (chosen prog (name (first its)) ()))) (if (null? d) (first its) d))))
+                (if (%cc-p-unsized? (c-type it))
+                  (%cc-p-err "an array without a size needs an initializer"))
+                (self (rest its) (pair it acc)))))))
+    (go prog ())))
+
 (def cc-parse
   (fn (_ toks)
     (set! %cc-p-all (if (eq? toks %cc-p-lexed) toks ()))
@@ -1273,10 +1332,11 @@
     (set! %cc-p-typedefs (list (pair "__builtin_va_list" %cc-p-va-list)))
     (set! %cc-p-enums ())
     (set! %cc-p-anon 0)
+    (set! %cc-p-file-scope? #f)
     (def go
       (fn (self ts acc)
         (if (null? ts)
-          (reverse acc)
+          (%cc-p-merge-globals (reverse acc))
           (if (%cc-p-hard? ts)
             (%cc-p-err
               (string-append "not built yet: "
@@ -1305,7 +1365,8 @@
                                     (rest (first pr)) (first tr))
                               acc)))))
                     ; globals: reuse the declarator line from ts
-                    (let ((r (%cc-p-decl-line ts)))
+                    (let ((r (do (set! %cc-p-file-scope? #t) (%cc-p-decl-line ts))))
+                      (set! %cc-p-file-scope? #f)
                       (self (rest r)
                         (append
                           (reverse
