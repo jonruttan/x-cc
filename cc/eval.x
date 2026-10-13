@@ -128,7 +128,7 @@
                 "getdelim" "sysconf" "random" "mktime" "timegm"))
         (each (lit void)
           (list "free" "exit" "_exit" "abort" "qsort" "srand" "srandom" "perror"
-                "rewind" "setbuf" "clearerr" "__assert_rtn" "__assert_fail"))
+                "rewind" "setbuf" "clearerr" "__assert_rtn" "__assert_fail" "longjmp"))
         (cat (map (fn (_ e) (each (lit double) (rest e))) library-double-fns))))))
 
 (def library-c-type
@@ -1384,7 +1384,42 @@
 ; holding one
 (def %cc-k-program-call?
   (fn (_ name)
-    (if (null? (%cc-k-place name)) (not (null? (%cc-fun name))) #t)))
+    (if (null? (%cc-k-place name))
+      (if (null? (%cc-fun name)) (%cc-jump-name? name) #t)
+      #t)))
+
+; setjmp and longjmp, when the program defines neither: setjmp keeps what
+; follows its call, and the program stack's pointer, under the jmp_buf's
+; address and answers 0; longjmp puts the pointer back and hands its value
+; -- 1 for a 0 -- to what followed that setjmp, leaving its own call's
+; continuation, and every frame since, behind
+(def %cc-jumps ())   ; ((jmp_buf address . (next . sp)) ...), this run's
+(def %cc-jump-name?
+  (fn (_ name) (if (string=? name "setjmp") #t (string=? name "longjmp"))))
+
+(def %cc-k-jump
+  (fn (_ name fs)
+    (if (string=? name "setjmp")
+      (pair (lit int)
+        (fn (_ fp next)
+          (%cc-k-cargs fs fp
+            (fn (_ vs)
+              (set! %cc-jumps (pair (pair (first vs) (pair next %cc-sp)) %cc-jumps))
+              (next 0)))))
+      (pair (lit void)
+        (fn (_ fp next)
+          (%cc-k-cargs fs fp
+            (fn (_ vs)
+              (def at (first vs))
+              (def v (%cc-convert (first (rest vs)) (lit int)))
+              (def go (fn (self es)
+                        (match
+                          ((null? es) (%cc-oops "longjmp to a jmp_buf no setjmp filled"))
+                          ((= (first (first es)) at) (rest (first es)))
+                          (#t (self (rest es))))))
+              (def j (go %cc-jumps))
+              (set! %cc-sp (rest j))
+              ((first j) (if (= v 0) 1 v)))))))))
 
 ; does NODE call one of the program's functions; sizeof evaluates nothing
 (def %cc-k-calls?
@@ -1612,6 +1647,12 @@
       (%cc-k-ccall-through node ks fs))))
 
 (def %cc-k-ccall-named
+  (fn (_ name ks fs)
+    (if (if (null? (%cc-fun name)) (%cc-jump-name? name) #f)
+      (%cc-k-jump name fs)
+      (%cc-k-ccall-call name ks fs))))
+
+(def %cc-k-ccall-call
   (fn (_ name ks fs)
     (def cs (%cc-k-arg-convs name ks))
     (pair (%cc-k-named-c-type name)
@@ -2137,6 +2178,7 @@
     (set! %cc-hp (+ %cc-base 16))
     (set! %cc-genv ())
     (set! %cc-funs ())
+    (set! %cc-jumps ())
     (set! %cc-strtab ())
     (set! %cc-k-funs ())
     (set! %cc-k-locals ())

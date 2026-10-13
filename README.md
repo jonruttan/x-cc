@@ -119,6 +119,11 @@ handed to a function past its declared parameters goes as a double.
 A `_Bool` is one byte holding 0 or 1: any value converted to it, by a
 store, an initializer, an argument, a return or a cast, is 1 unless it
 compares equal to 0.
+`setjmp` and `longjmp` are the compiler's own, as the C library's would
+keep the frame of the gate its calls go through: setjmp keeps the frame's
+base, the frame stack's top, the machine stack's pointer and where the
+call returns to; longjmp puts them back and returns there with its value,
+1 for a 0.  Under `run`, setjmp keeps what follows its call.
 `stdin`, `stdout` and `stderr` are the C library's own variables, read
 through the slot the loader fills, and `FILE` from `<stdio.h>` is `void`.
 A variadic function of the program's own, `int f(int n, ...)`, takes the
@@ -194,9 +199,9 @@ lines of C in place of the `#include` that give its macros and types --
 `<errno.h>`'s `errno` and its numbers, `<assert.h>`'s `assert`,
 `<sys/types.h>`'s `ssize_t` and the like, `<sys/stat.h>`'s and `<dirent.h>`'s
 `struct stat` and `struct dirent` as each platform lays them out,
-`<unistd.h>`, `<signal.h>`'s `SIGUSR1` and `SIG_IGN` -- and any other is
-dropped), a global declared more than once (`extern int n;` before
-`int n = 10;`) as one,
+`<unistd.h>`, `<signal.h>`'s `SIGUSR1` and `SIG_IGN`, `<setjmp.h>`'s `jmp_buf`
+-- and any other is dropped), a global declared more than once
+(`extern int n;` before `int n = 10;`) as one,
 object-like `#define` spliced token-wise; `__LINE__`; `__FILE__`, the path
 as the command line gives it, or `<stdin>` for text from no file; // and /* */
 comments.  `x -l cc -- run prog.c ARG ...` hands main the file's name
