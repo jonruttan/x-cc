@@ -1895,8 +1895,116 @@
     (match
       ; a name that is a local's or a global's holds a pointer to a function
       ((%cc-gen-variable? name) (%cc-gen-call-through! node (list (lit var) name) args))
+      ((if (null? (%cc-gen-fun-find name)) (%cc-gen-jump-name? name) #f)
+        (%cc-gen-jump-call! name args))
       ((null? (%cc-gen-fun-find name)) (%cc-gen-libc-call! name args))
       (#t (%cc-gen-call-fun! node)))))
+
+; --- setjmp and longjmp ----------------------------------------------------------
+; The C library's setjmp keeps the frame of the function that calls it,
+; which here is the gate's, gone by the time a longjmp comes back to it.
+; So when the program defines neither, each is a routine of the compiler's
+; own, called by the program's convention, with the jmp_buf in x0:
+; setjmp keeps x19 and x20 (the frame's base and the frame stack's top),
+; the machine stack's pointer as the call left it, and the address the call
+; returns to, and answers 0; longjmp, with its value in x1, puts all four
+; back and returns to that address with the value -- 1 for a 0.  A function
+; keeps nothing in a register across a call, so those four are the whole of
+; where the setjmp's caller stood.  The routines name registers the portable
+; model does not, so each is written out per target; it is placed after the
+; program's functions as nops (%cc-gen-jumps!) and its bytes put over them
+; once the code is read back (%cc-gen-jump-bytes!).
+
+(def %cc-gen-jumps ())      ; ((name label . pos) ...), the routines called
+
+(def %cc-gen-jump-name?
+  (fn (_ name) (if (string=? name "setjmp") #t (string=? name "longjmp"))))
+
+(def %cc-gen-jump-label
+  (fn (_ name)
+    (def go (fn (self es)
+              (match
+                ((null? es) ())
+                ((string=? (first (first es)) name) (first (rest (first es))))
+                (#t (self (rest es))))))
+    (def hit (go %cc-gen-jumps))
+    (if (not (null? hit)) hit
+      (let ((l (%cc-gen-label)))
+        (do (set! %cc-gen-jumps (pair (pair name (pair l 0)) %cc-gen-jumps)) l)))))
+
+(def %cc-gen-jump-call!
+  (fn (_ name args)
+    (if (not (= (length args) (if (string=? name "setjmp") 1 2)))
+      (%cc-gen-no (string-append name " with other than its arguments")))
+    (%cc-gen-expr! (first args))
+    (if (string=? name "longjmp")
+      (do (asm-push! %cc-gen-asm x0)
+          (%cc-gen-expr! (first (rest args)))
+          (%cc-gen! (lit mov) x1 x0)
+          (asm-pop! %cc-gen-asm x0))
+      ())
+    (%cc-gen! %cc-gen-callop (label (%cc-gen-jump-label name)))))
+
+; a routine's bytes on TARGET
+(def %cc-gen-jump-routine
+  (fn (_ target name)
+    (if (%cc-gen-arm64? target)
+      (%cc-gen-cat
+        (map %cc-gen-le32
+          (if (string=? name "setjmp")
+            ; stp x19, x20, [x0]; add x9, sp, #0; stp x9, x30, [x0, #16];
+            ; movz x0, #0; ret
+            (list 0xA9005013 0x910003E9 0xA9017809 0xD2800000 0xD65F03C0)
+            ; ldp x19, x20, [x0]; ldp x9, x30, [x0, #16]; add sp, x9, #0;
+            ; cmp x1, #0; csinc x0, x1, xzr, ne; ret
+            (list 0xA9405013 0xA9417809 0x9100013F 0xF100003F 0x9A9F1420 0xD65F03C0))))
+      (if (string=? name "setjmp")
+        ; mov [rax], rbx; mov [rax+8], r12; lea r11, [rsp+8];
+        ; mov [rax+16], r11; mov r11, [rsp]; mov [rax+24], r11;
+        ; xor eax, eax; ret
+        (list 0x48 0x89 0x18 0x4C 0x89 0x60 0x08 0x4C 0x8D 0x5C 0x24 0x08
+              0x4C 0x89 0x58 0x10 0x4C 0x8B 0x1C 0x24 0x4C 0x89 0x58 0x18
+              0x31 0xC0 0xC3)
+        ; mov rbx, [rax]; mov r12, [rax+8]; mov r11, [rax+24];
+        ; mov rsp, [rax+16]; mov rax, rsi; test rax, rax; jnz +5;
+        ; mov eax, 1; jmp r11
+        (list 0x48 0x8B 0x18 0x4C 0x8B 0x60 0x08 0x4C 0x8B 0x58 0x18
+              0x48 0x8B 0x60 0x10 0x48 0x89 0xF0 0x48 0x85 0xC0 0x75 0x05
+              0xB8 0x01 0x00 0x00 0x00 0x41 0xFF 0xE3)))))
+
+; each routine called, at its label, as nops as long as it is; each entry
+; takes the position its nops start at
+(def %cc-gen-jumps!
+  (fn (_ target)
+    (def nops (fn (self n) (if (> n 0) (do (%cc-gen! (lit nop)) (self (- n 1))) ())))
+    (def go
+      (fn (self es acc)
+        (if (null? es) (set! %cc-gen-jumps acc)
+          (let ((e (first es)))
+            (asm-label! %cc-gen-asm (first (rest e)))
+            (let ((at (asm-pos %cc-gen-asm))
+                  (n (length (%cc-gen-jump-routine target (first e)))))
+              (nops (if (%cc-gen-arm64? target) (>> n 2) n))
+              (self (rest es) (pair (pair (first e) (pair (first (rest e)) at)) acc)))))))
+    (go %cc-gen-jumps ())))
+
+; CODE, the bytes read back, with each routine's bytes over its nops
+(def %cc-gen-jump-bytes!
+  (fn (_ target code)
+    ; CS from byte I on, with BS from byte AT; ACC what came before, reversed
+    (def put
+      (fn (self cs i at bs acc)
+        (match
+          ((null? bs) (append (reverse acc) cs))
+          ((< i at) (self (rest cs) (+ i 1) at bs (pair (first cs) acc)))
+          (#t (self (rest cs) (+ i 1) at (rest bs) (pair (first bs) acc))))))
+    (def go
+      (fn (self es cs)
+        (if (null? es) cs
+          (let ((e (first es)))
+            (self (rest es)
+              (put cs 0 (rest (rest e)) (%cc-gen-jump-routine target (first e)) ()))))))
+    (go %cc-gen-jumps code)))
 
 (def %cc-gen-imports ())    ; ((name . offset) ...), the C library's functions called
 
@@ -2917,6 +3025,7 @@
     ; gate takes up again (%cc-gen-gate-bytes)
     (%cc-gen-data! () 8 8)
     (set! %cc-gen-thunks ())
+    (set! %cc-gen-jumps ())
     ; the ones a load reaches first, then the arrays and structs, which are
     ; only ever reached through their address
     (def gdecls (filter (fn (_ it) (eq? (first it) (lit gdecl))) prog))
@@ -2972,9 +3081,10 @@
                     (error err (if (Err err? err) (err msg) "cc: compile failed"))))
       (let ((go (fn (self fs) (if (null? fs) () (do (%cc-gen-fun! (first fs)) (self (rest fs)))))))
         (do (go (pair main others))
+            (%cc-gen-jumps! target)
             (%cc-gen-thunks!))))
     (def n (asm-pos a))
-    (def code (%cc-gen-read (asm-finalize! a) (- n 1) ()))
+    (def code (%cc-gen-jump-bytes! target (%cc-gen-read (asm-finalize! a) (- n 1) ())))
     (asm-free! a)
     (set! %cc-gen-asm ())
     ; the gate follows the code, where the label the thunks branch to is
