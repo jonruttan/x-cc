@@ -106,22 +106,27 @@
       (list
         (each (list (lit ptr) (lit void))
           (list "malloc" "calloc" "realloc" "memcpy" "memmove" "memset" "memchr"
-                "bsearch" "fopen" "fdopen" "freopen" "tmpfile" "popen"))
+                "bsearch" "fopen" "fdopen" "freopen" "tmpfile" "popen" "gmtime"
+                "gmtime_r" "localtime" "localtime_r" "opendir" "readdir"))
         (each (list (lit ptr) plain-char)
           (list "strcpy" "strncpy" "strcat" "strncat" "strchr" "strrchr" "strstr"
-                "strpbrk" "strtok" "strdup" "strndup" "strerror" "getenv" "fgets"
-                "gets" "setlocale" "ctime" "asctime" "realpath" "basename"
-                "dirname" "stpcpy"))
+                "strpbrk" "strtok" "strtok_r" "strsep" "strdup" "strndup" "strerror"
+                "strsignal" "strcasestr" "getenv" "fgets" "gets" "setlocale" "ctime"
+                "ctime_r" "asctime" "asctime_r" "realpath" "basename" "dirname"
+                "stpcpy" "stpncpy" "getcwd" "mkdtemp" "mktemp" "ttyname" "index"
+                "rindex"))
+        ; errno's address, through the function each platform's errno.h names
+        (each (list (lit ptr) (lit int)) (list "__error" "__errno_location"))
         (each (lit ulong)
           (list "strlen" "strnlen" "strspn" "strcspn" "fread" "fwrite" "strtoul"
                 "strtoull" "strftime" "wcslen"))
         (each (lit long)
           (list "labs" "llabs" "atol" "atoll" "strtol" "strtoll" "ftell" "read"
                 "write" "pread" "pwrite" "lseek" "time" "clock" "getline"
-                "getdelim" "sysconf" "random"))
+                "getdelim" "sysconf" "random" "mktime" "timegm"))
         (each (lit void)
           (list "free" "exit" "_exit" "abort" "qsort" "srand" "srandom" "perror"
-                "rewind" "setbuf" "clearerr"))
+                "rewind" "setbuf" "clearerr" "__assert_rtn" "__assert_fail"))
         (cat (map (fn (_ e) (each (lit double) (rest e))) library-double-fns))))))
 
 (def library-c-type
