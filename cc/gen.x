@@ -3114,9 +3114,11 @@
 ; answer its status.  With INPUT nil, it reads the caller's standard input.
 (def cc-exe-run-with
   (fn (_ src input argv)
+    ; a program of several files is named for their texts together
+    (def text (if (str? src) src (string-concat (map (fn (_ u) (rest u)) src))))
     (def path
       (string-append "/tmp/x-cc-exe-"
-        (substring (sha256-hex-n src (byte-len src)) 0 16)))
+        (substring (sha256-hex-n text (byte-len text)) 0 16)))
     (cc-compile src path)
     (let ((r (proc-capture
                (if (null? input)

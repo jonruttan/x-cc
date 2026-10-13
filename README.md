@@ -207,6 +207,14 @@ as the command line gives it, or `<stdin>` for text from no file; // and /* */
 comments.  `x -l cc -- run prog.c ARG ...` hands main the file's name
 and the ARGs as its argv, and fd 0 as its standard input.
 
+A program may be several files: `x -l cc -- build main.c lib/vec.c -o
+prog`, or `run` with its files before the program's words, the files
+being the words up to the first not ending in `.c`.  Each file is
+preprocessed on its own, `#include "x.h"` read from the including file's
+directory -- a header's own `#include "..."` from the header's -- and the
+files are one program: a name declared `static` at file scope is that
+file's, and a global one file defines, the others declare `extern`.
+
 Structs, too: `struct S { ... };`, `typedef struct { ... } T;`,
 fields by `.` and `->`, nested structs, arrays of structs, pointers to
 structs stepping by the struct's size, struct assignment as a byte
@@ -295,7 +303,7 @@ Paired with x-lang v0.28.0 (`lang.xon` is the checkable row).
     cc/image.x        the byte image an executable is built in
     cc/macho.x        the macOS executable and its ad-hoc signature
     cc/elf.x          the Linux executable
-    cc/cli.x          run FILE.c | build FILE.c [-o OUT]
+    cc/cli.x          run FILE.c... | build FILE.c... [-o OUT]
     tests/            markdown specs + the platform's runner, vendored nowhere
 
 <p align="center"><img src="docs/bitwise-mark.svg" alt="Bitwise" width="96"></p>
