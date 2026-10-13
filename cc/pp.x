@@ -10,8 +10,8 @@
 ; a time, a line ending at a newline token.  A line whose first token is #
 ; is a directive:
 ;
-;   #include <H>    a standard header defines the few macros programs use
-;                   with it (%cc-headers); the header itself is dropped
+;   #include <H>    a standard header's lines of C (%cc-headers) take the
+;                   #include's place; any other header is dropped
 ;   #define         an object-like macro (NAME obj . TOKENS), or, when a (
 ;                   follows the name with no blank between, a function-like
 ;                   one (NAME fn PARAMS . TOKENS)
@@ -280,64 +280,157 @@
     (not (= 0 (cc-parse-const
                 (map (fn (_ t) (if (%cc-name? t) (list (lit num) 0) (cc-token t))) toks))))))
 
-; The macros a standard header gives that programs use with the runtime's
-; functions: (HEADER (NAME . BODY) ...).  The header itself is dropped, and
-; an #include of one defines these.
+; The standard headers: (HEADER LINE ...), each LINE a line of C that an
+; #include of HEADER puts in place of its own line.  A header gives the
+; macros, types and declarations programs use with the C library's
+; functions, which are the library's own; its C types are macros, as
+; size_t is an unsigned long.  A header that declares anything guards it,
+; so a second #include declares nothing.
+(def %cc-null "#define NULL ((void *)0)")
+(def %cc-size-t "#define size_t unsigned long")
+
+; inttypes.h's printf conversions, PRId8 through PRIXMAX: a long is 64
+; bits, an int 32, and a narrower argument goes as an int
+(def %cc-pri-lines
+  (let ((width (list (pair "8" "") (pair "16" "") (pair "32" "") (pair "64" "l")
+                     (pair "PTR" "l") (pair "MAX" "l")))
+        (conv (list "d" "i" "o" "u" "x" "X")))
+    (def go
+      (fn (self ws acc)
+        (if (null? ws) (reverse acc)
+          (self (rest ws)
+            (append (reverse
+                      (map (fn (_ c) (string-append "#define PRI" c (first (first ws)) " \""
+                                       (rest (first ws)) c "\""))
+                        conv))
+              acc)))))
+    (go width ())))
+
 (def %cc-headers
-  (list (list "stdio.h" (pair "EOF" "(-1)") (pair "NULL" "((void *)0)") (pair "FILE" "void")
-          (pair "size_t" "unsigned long"))
-        (list "stdlib.h" (pair "NULL" "((void *)0)") (pair "size_t" "unsigned long")
-          (pair "EXIT_SUCCESS" "0") (pair "EXIT_FAILURE" "1"))
-        (list "string.h" (pair "NULL" "((void *)0)") (pair "size_t" "unsigned long"))
-        (list "stddef.h" (pair "NULL" "((void *)0)") (pair "size_t" "unsigned long")
-          (pair "ptrdiff_t" "long"))
-        (list "stdarg.h" (pair "va_list" "__builtin_va_list")
-          (pair "va_start" "__builtin_va_start") (pair "va_arg" "__builtin_va_arg")
-          (pair "va_end" "__builtin_va_end") (pair "va_copy" "__builtin_va_copy"))
+  (list (list "stdio.h" "#define EOF (-1)" %cc-null "#define FILE void" %cc-size-t)
+        (list "stdlib.h" %cc-null %cc-size-t "#define EXIT_SUCCESS 0" "#define EXIT_FAILURE 1")
+        (list "string.h" %cc-null %cc-size-t)
+        (list "stddef.h" %cc-null %cc-size-t "#define ptrdiff_t long")
+        (list "stdarg.h" "#define va_list __builtin_va_list"
+          "#define va_start __builtin_va_start" "#define va_arg __builtin_va_arg"
+          "#define va_end __builtin_va_end" "#define va_copy __builtin_va_copy")
+        (list "stdbool.h" "#define bool _Bool" "#define true 1" "#define false 0"
+          "#define __bool_true_false_are_defined 1")
+        (list "stdint.h"
+          "#define int8_t signed char" "#define uint8_t unsigned char"
+          "#define int16_t short" "#define uint16_t unsigned short"
+          "#define int32_t int" "#define uint32_t unsigned int"
+          "#define int64_t long" "#define uint64_t unsigned long"
+          "#define int_least8_t signed char" "#define uint_least8_t unsigned char"
+          "#define int_least16_t short" "#define uint_least16_t unsigned short"
+          "#define int_least32_t int" "#define uint_least32_t unsigned int"
+          "#define int_least64_t long" "#define uint_least64_t unsigned long"
+          "#define int_fast8_t signed char" "#define uint_fast8_t unsigned char"
+          "#define int_fast16_t short" "#define uint_fast16_t unsigned short"
+          "#define int_fast32_t int" "#define uint_fast32_t unsigned int"
+          "#define int_fast64_t long" "#define uint_fast64_t unsigned long"
+          "#define intptr_t long" "#define uintptr_t unsigned long"
+          "#define intmax_t long" "#define uintmax_t unsigned long"
+          "#define INT8_MIN (-128)" "#define INT8_MAX 127" "#define UINT8_MAX 255"
+          "#define INT16_MIN (-32768)" "#define INT16_MAX 32767" "#define UINT16_MAX 65535"
+          "#define INT32_MIN (-2147483647-1)" "#define INT32_MAX 2147483647"
+          "#define UINT32_MAX 4294967295U"
+          "#define INT64_MIN (-9223372036854775807L-1)" "#define INT64_MAX 9223372036854775807L"
+          "#define UINT64_MAX 18446744073709551615UL"
+          "#define INTPTR_MIN (-9223372036854775807L-1)" "#define INTPTR_MAX 9223372036854775807L"
+          "#define UINTPTR_MAX 18446744073709551615UL"
+          "#define INTMAX_MIN (-9223372036854775807L-1)" "#define INTMAX_MAX 9223372036854775807L"
+          "#define UINTMAX_MAX 18446744073709551615UL"
+          "#define PTRDIFF_MIN (-9223372036854775807L-1)" "#define PTRDIFF_MAX 9223372036854775807L"
+          "#define SIZE_MAX 18446744073709551615UL"
+          "#define INT8_C(c) c" "#define INT16_C(c) c" "#define INT32_C(c) c"
+          "#define UINT8_C(c) c" "#define UINT16_C(c) c" "#define UINT32_C(c) c ## U"
+          "#define INT64_C(c) c ## L" "#define UINT64_C(c) c ## UL"
+          "#define INTMAX_C(c) c ## L" "#define UINTMAX_C(c) c ## UL")
+        (pair "inttypes.h" (pair "#include <stdint.h>" %cc-pri-lines))
+        (list "sys/types.h" %cc-size-t "#define ssize_t long" "#define off_t long"
+          "#define pid_t int" "#define uid_t unsigned int" "#define gid_t unsigned int"
+          "#define time_t long")
+        ; struct tm as both platforms' C libraries lay it out
+        (list "time.h" %cc-null %cc-size-t "#define time_t long"
+          (if os-darwin? "#define clock_t unsigned long" "#define clock_t long")
+          "#define CLOCKS_PER_SEC 1000000"
+          "#ifndef __XCC_STRUCT_TM"
+          "#define __XCC_STRUCT_TM"
+          "struct tm {"
+          "  int tm_sec; int tm_min; int tm_hour; int tm_mday; int tm_mon; int tm_year;"
+          "  int tm_wday; int tm_yday; int tm_isdst; long tm_gmtoff; char *tm_zone;"
+          "};"
+          "#endif")
+        ; errno is the C library's, through the function that answers its
+        ; address; the numbers through ERANGE are the same on both platforms
+        (list "errno.h"
+          (if os-darwin? "#define errno (*__error())" "#define errno (*__errno_location())")
+          "#define EPERM 1" "#define ENOENT 2" "#define ESRCH 3" "#define EINTR 4"
+          "#define EIO 5" "#define ENXIO 6" "#define E2BIG 7" "#define ENOEXEC 8"
+          "#define EBADF 9" "#define ECHILD 10" "#define ENOMEM 12" "#define EACCES 13"
+          "#define EFAULT 14" "#define EBUSY 16" "#define EEXIST 17" "#define EXDEV 18"
+          "#define ENODEV 19" "#define ENOTDIR 20" "#define EISDIR 21" "#define EINVAL 22"
+          "#define ENFILE 23" "#define EMFILE 24" "#define ENOTTY 25" "#define EFBIG 27"
+          "#define ENOSPC 28" "#define ESPIPE 29" "#define EROFS 30" "#define EMLINK 31"
+          "#define EPIPE 32" "#define EDOM 33" "#define ERANGE 34"
+          (if os-darwin? "#define EAGAIN 35" "#define EAGAIN 11"))
+        ; assert.h reads NDEBUG at each #include; a failed assertion is the
+        ; C library's report and abort
+        (list "assert.h"
+          "#undef assert"
+          "#ifdef NDEBUG"
+          "#define assert(e) ((void)0)"
+          "#else"
+          (if os-darwin?
+            "#define assert(e) ((e) ? (void)0 : __assert_rtn((char *)0, __FILE__, __LINE__, #e))"
+            "#define assert(e) ((e) ? (void)0 : __assert_fail(#e, __FILE__, __LINE__, (char *)0))")
+          "#endif")
         (list "math.h"
-          (pair "M_E" "2.71828182845904523536028747135266250")
-          (pair "M_LOG2E" "1.44269504088896340735992468100189214")
-          (pair "M_LOG10E" "0.434294481903251827651128918916605082")
-          (pair "M_LN2" "0.693147180559945309417232121458176568")
-          (pair "M_LN10" "2.30258509299404568401799145468436421")
-          (pair "M_PI" "3.14159265358979323846264338327950288")
-          (pair "M_PI_2" "1.57079632679489661923132169163975144")
-          (pair "M_PI_4" "0.785398163397448309615660845819875721")
-          (pair "M_1_PI" "0.318309886183790671537767526745028724")
-          (pair "M_2_PI" "0.636619772367581343075535053490057448")
-          (pair "M_2_SQRTPI" "1.12837916709551257389615890312154517")
-          (pair "M_SQRT2" "1.41421356237309504880168872420969808")
-          (pair "M_SQRT1_2" "0.707106781186547524400844362104849039"))
+          "#define M_E 2.71828182845904523536028747135266250"
+          "#define M_LOG2E 1.44269504088896340735992468100189214"
+          "#define M_LOG10E 0.434294481903251827651128918916605082"
+          "#define M_LN2 0.693147180559945309417232121458176568"
+          "#define M_LN10 2.30258509299404568401799145468436421"
+          "#define M_PI 3.14159265358979323846264338327950288"
+          "#define M_PI_2 1.57079632679489661923132169163975144"
+          "#define M_PI_4 0.785398163397448309615660845819875721"
+          "#define M_1_PI 0.318309886183790671537767526745028724"
+          "#define M_2_PI 0.636619772367581343075535053490057448"
+          "#define M_2_SQRTPI 1.12837916709551257389615890312154517"
+          "#define M_SQRT2 1.41421356237309504880168872420969808"
+          "#define M_SQRT1_2 0.707106781186547524400844362104849039")
         ; the platforms' C types: long 64 bits, plain char as plain-char says
         (list "limits.h"
-          (pair "CHAR_BIT" "8")
-          (pair "SCHAR_MIN" "(-128)") (pair "SCHAR_MAX" "127") (pair "UCHAR_MAX" "255")
-          (pair "CHAR_MIN" (if (eq? plain-char (lit uchar)) "0" "(-128)"))
-          (pair "CHAR_MAX" (if (eq? plain-char (lit uchar)) "255" "127"))
-          (pair "SHRT_MIN" "(-32768)") (pair "SHRT_MAX" "32767") (pair "USHRT_MAX" "65535")
-          (pair "INT_MIN" "(-2147483647-1)") (pair "INT_MAX" "2147483647")
-          (pair "UINT_MAX" "4294967295U")
-          (pair "LONG_MIN" "(-9223372036854775807L-1)") (pair "LONG_MAX" "9223372036854775807L")
-          (pair "ULONG_MAX" "18446744073709551615UL")
-          (pair "LLONG_MIN" "(-9223372036854775807L-1)") (pair "LLONG_MAX" "9223372036854775807L")
-          (pair "ULLONG_MAX" "18446744073709551615UL"))))
+          "#define CHAR_BIT 8"
+          "#define SCHAR_MIN (-128)" "#define SCHAR_MAX 127" "#define UCHAR_MAX 255"
+          (if (eq? plain-char (lit uchar)) "#define CHAR_MIN 0" "#define CHAR_MIN (-128)")
+          (if (eq? plain-char (lit uchar)) "#define CHAR_MAX 255" "#define CHAR_MAX 127")
+          "#define SHRT_MIN (-32768)" "#define SHRT_MAX 32767" "#define USHRT_MAX 65535"
+          "#define INT_MIN (-2147483647-1)" "#define INT_MAX 2147483647"
+          "#define UINT_MAX 4294967295U"
+          "#define LONG_MIN (-9223372036854775807L-1)" "#define LONG_MAX 9223372036854775807L"
+          "#define ULONG_MAX 18446744073709551615UL"
+          "#define LLONG_MIN (-9223372036854775807L-1)" "#define LLONG_MAX 9223372036854775807L"
+          "#define ULLONG_MAX 18446744073709551615UL")))
 
-; the macros #include ARG defines: those of the standard header it names in
-; <...>, none for any other
-(def %cc-header-macros
-  (fn (_ arg)
-    (def n (byte-len arg))
+; The lines #include ARG puts in place of its own, numbered N: those of the
+; standard header it names in <...>, none for any other
+(def %cc-header-lines
+  (fn (_ arg n)
+    (def len (byte-len arg))
     (def name
-      (if (if (> n 1) (if (= (byte-at arg 0) 60) (= (byte-at arg (- n 1)) 62) #f) #f)
-        (substring arg 1 (- n 1))
+      (if (if (> len 1) (if (= (byte-at arg 0) 60) (= (byte-at arg (- len 1)) 62) #f) #f)
+        (substring arg 1 (- len 1))
         ""))
     (def go
       (fn (self hs)
         (match
           ((null? hs) ())
           ((string=? (first (first hs)) name)
-            (map (fn (_ e) (pair (first e) (pair (lit obj) (%cc-body-tokens (rest e)))))
-              (rest (first hs))))
+            (map (fn (_ l) (pair n (rest l)))
+              (%cc-lines (cc-raw-tokens (string-concat (map (fn (_ s) (string-append s "\n"))
+                                                             (rest (first hs))))))))
           (#t (self (rest hs))))))
     (go %cc-headers)))
 
@@ -430,8 +523,8 @@
                       (self (rest ls) n macros (rest stack) () out2)))
                   ((not on) (self (rest ls) n macros stack () out2))
                   ((string=? word "include")
-                    (self (rest ls) n (append (%cc-header-macros (%cc-spell (%cc-no-sp args))) macros)
-                      stack () out2))
+                    (self (append (%cc-header-lines (%cc-spell (%cc-no-sp args)) n) (rest ls))
+                      n macros stack () out2))
                   ((string=? word "define")
                     (self (rest ls) n (pair (%cc-define args) macros) stack () out2))
                   ((string=? word "undef")

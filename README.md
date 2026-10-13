@@ -185,9 +185,13 @@ truncating division; if/else, while, do, for, break, continue, return;
 functions with recursion and prototypes; globals; static locals, made
 once on first reach; string literals (interned, and joined when side by
 side); character constants; C's escapes, octal and hex among them;
-`#include` (dropped -- the C library provides the functions -- and one
-of a standard header defines its macros: `EOF`, `NULL`, `EXIT_SUCCESS`,
-`EXIT_FAILURE`, `<math.h>`'s `M_PI` and the rest, `<limits.h>`'s limits),
+`#include` (the C library provides the functions; a standard header is
+lines of C in place of the `#include` that give its macros and types --
+`EOF`, `NULL`, `EXIT_SUCCESS`, `<math.h>`'s `M_PI`, `<limits.h>`'s and
+`<stdint.h>`'s limits and fixed-width types, `<stdbool.h>`'s `bool`,
+`<inttypes.h>`'s `PRId64` and the rest, `<time.h>`'s `struct tm`,
+`<errno.h>`'s `errno` and its numbers, `<assert.h>`'s `assert`,
+`<sys/types.h>`'s `ssize_t` and the like -- and any other is dropped),
 object-like `#define` spliced token-wise; `__LINE__`; `__FILE__`, the path
 as the command line gives it, or `<stdin>` for text from no file; // and /* */
 comments.  `x -l cc -- run prog.c ARG ...` hands main the file's name
