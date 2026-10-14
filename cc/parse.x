@@ -32,8 +32,8 @@
 ; Refused loudly: `long double`, a recorded pending.
 (module cc/parse)
 
-(import cc/prims append byte-len convert length map reverse set-first! string-append
-  string=?)
+(import cc/prims append byte-at byte-len convert length map reverse set-first! string-append
+  string=? substring)
 
 ; The type handle this file asks convert for, fetched by name through the
 ; platform's public door and private to this module.
@@ -138,6 +138,8 @@
             ((eq? k (lit volatile)) #t)
             ((eq? k (lit register)) #t)
             ((eq? k (lit auto)) #t)
+            ((eq? k (lit inline)) #t)
+            ((eq? k (lit restrict)) #t)
             ((eq? k (lit static)) #t)
             (#t (eq? k (lit extern)))))
         #f))))
@@ -162,10 +164,10 @@
 
 ; The scalar the specifiers name.  `unsigned`/`signed` pick the signedness and
 ; the width keyword picks the width; `long long` is `long`, and specifiers
-; that say nothing about either (const, volatile, register, auto, static,
-; extern) are swallowed: nothing is kept in a register, so every access to
-; a volatile is one.  A `char` that says neither `signed` nor `unsigned` is
-; plain-char.
+; that say nothing about either (const, volatile, restrict, register, auto,
+; inline, static, extern) are swallowed: nothing is kept in a register, so
+; every access to a volatile is one, and a call to an inline function is a
+; call.  A `char` that says neither `signed` nor `unsigned` is plain-char.
 (def %cc-p-scalar-of
   (fn (_ toks)
     (def go
@@ -488,6 +490,8 @@
               ((eq? k (lit volatile)) #t)
               ((eq? k (lit register)) #t)
               ((eq? k (lit auto)) #t)
+              ((eq? k (lit inline)) #t)
+              ((eq? k (lit restrict)) #t)
               ((eq? k (lit static)) #t)
               (#t (eq? k (lit extern))))
           (self (rest toks) ts)
@@ -617,9 +621,13 @@
                     (let ((r (%cc-p-args (rest (rest toks)))))
                       (pair (list (lit call) (first (rest tok)) (first r))
                         (rest r)))))
-                ; an enum constant is its number, right here
+                ; an enum constant is its number, right here; __func__ the
+                ; name of the function it is in
                 (let ((ev (%cc-p-enum-value (first (rest tok)))))
-                  (pair (if (null? ev) (list (lit var) (first (rest tok))) (list (lit num) ev))
+                  (pair (match
+                          ((not (null? ev)) (list (lit num) ev))
+                          ((string=? (first (rest tok)) "__func__") (list (lit str) %cc-p-function))
+                          (#t (list (lit var) (first (rest tok)))))
                     (rest toks))))
               (if (%cc-p-op? toks "(")
                 (let ((r (%cc-e-comma (rest toks))))
@@ -1135,8 +1143,8 @@
                         (%cc-p-err
                           (string-append "not built yet: "
                             (convert (first (rest (first toks))) %string)))
-                        (if (%cc-p-kw? toks (lit typedef))
-                          (pair (list (lit block) ()) (%cc-p-typedef (rest toks)))
+                        (if (%cc-p-declares-nothing? toks)
+                          (pair (list (lit block) ()) (%cc-p-declare-nothing toks))
                         (if (%cc-p-c-type-start? toks)
                           (let ((r (%cc-p-decl-line toks)))
                             (pair (pair (lit decls)
@@ -1302,6 +1310,39 @@
           (#t (map (fn (_ x) (self x scopes)) node)))))
     (walk body ())))
 
+; _Static_assert ( CONSTANT , "MESSAGE" ) ; -- refused with MESSAGE when the
+; constant is 0, else nothing; the tokens after it
+(def %cc-p-static-assert
+  (fn (_ toks)
+    (def c (%cc-e-assign (%cc-p-eat (rest toks) "(")))
+    (def m (%cc-p-eat (rest c) ","))
+    (if (not (eq? (first (first m)) (lit str))) (%cc-p-err "_Static_assert without its message"))
+    (if (= (%cc-p-const (first c)) 0)
+      (%cc-p-err (string-append "static assertion failed: " (first (rest (first m))))))
+    (%cc-p-eat (%cc-p-eat (rest m) ")") ";")))
+
+; a typedef or a _Static_assert: a declaration that leaves nothing in the
+; program, where a statement or a top-level declaration may stand
+(def %cc-p-declares-nothing?
+  (fn (_ toks) (if (%cc-p-kw? toks (lit typedef)) #t (%cc-p-kw? toks (lit _Static_assert)))))
+
+; the tokens after one
+(def %cc-p-declare-nothing
+  (fn (_ toks)
+    (if (%cc-p-kw? toks (lit typedef)) (%cc-p-typedef (rest toks)) (%cc-p-static-assert toks))))
+
+; the name of the function whose body is being read, as __func__ spells it
+(def %cc-p-function "")
+
+; NAME as the program wrote it: a file's static is renamed NAME.N (cc/pp),
+; and a name of C's has no dot
+(def %cc-p-c-name
+  (fn (_ name)
+    (def n (byte-len name))
+    (def go (fn (self i) (match ((>= i n) name) ((= (byte-at name i) #\.) (substring name 0 i))
+                           (#t (self (+ i 1))))))
+    (go 0)))
+
 ; PROG with a global declared more than once -- `extern int n;` before
 ; `int n = 10;`, or `extern int t[];` before `int t[3] = {...};` -- as one
 ; gdecl at its last declaration: the declaration with an initializer, when
@@ -1359,8 +1400,8 @@
             (%cc-p-err
               (string-append "not built yet: "
                 (convert (first (rest (first ts))) %string)))
-          (if (%cc-p-kw? ts (lit typedef))
-            (self (%cc-p-typedef (rest ts)) acc)
+          (if (%cc-p-declares-nothing? ts)
+            (self (%cc-p-declare-nothing ts) acc)
             (let ((tr (%cc-p-c-type ts)))
               (def ts2 (rest tr))
               (if (%cc-p-op? ts2 ";")
@@ -1374,8 +1415,8 @@
                     (let ((pr (%cc-p-params (rest (rest ts2)))))
                       (if (%cc-p-op? (rest pr) ";")
                         (self (rest (rest pr)) acc)
-                        (let ((b (%cc-p-block
-                                   (%cc-p-eat (rest pr) "{"))))
+                        (let ((b (do (set! %cc-p-function (%cc-p-c-name name))
+                                     (%cc-p-block (%cc-p-eat (rest pr) "{")))))
                           ; (fun NAME PARAMS BODY C-TYPES RET-C-TYPE)
                           (self (rest b)
                             (pair (list (lit fun) name (first (first pr))

@@ -111,8 +111,9 @@
     (go l)))
 
 ; From TS, just past a function-like macro's name: ((ARG ...) . the tokens
-; after its `)`), each ARG a token list split at a top-level comma, or nil
-; when no `(` follows -- then the name is an ordinary identifier
+; after its `)`), each ARG a token list split at a top-level comma, with the
+; blanks around it, or nil when no `(` follows -- then the name is an
+; ordinary identifier
 (def %cc-macro-args
   (fn (_ ts)
     (def ts0 (%cc-skip-sp ts))
@@ -123,10 +124,10 @@
             (match
               ((%cc-op-is? t "(") (self (rest ts) (+ depth 1) (pair t arg) args))
               ((if (%cc-op-is? t ")") (= depth 1) #f)
-                (pair (reverse (pair (%cc-trim-sp (reverse arg)) args)) (rest ts)))
+                (pair (reverse (pair (reverse arg) args)) (rest ts)))
               ((%cc-op-is? t ")") (self (rest ts) (- depth 1) (pair t arg) args))
               ((if (%cc-op-is? t ",") (= depth 1) #f)
-                (self (rest ts) depth () (pair (%cc-trim-sp (reverse arg)) args)))
+                (self (rest ts) depth () (pair (reverse arg) args)))
               (#t (self (rest ts) depth (pair t arg) args)))))))
     (if (if (null? ts0) #t (not (%cc-op-is? (first ts0) "("))) ()
       (go (rest ts0) 1 () ()))))
@@ -192,6 +193,26 @@
               (#t (self (rest ts) (append (reverse (tokens-of t)) acc))))))))
     (go body ())))
 
+; A variadic macro's ARGS, as read with their blanks, each trimmed: its N
+; named parameters' first, and then the rest as one, __VA_ARGS__'s -- their
+; tokens with a comma between each and the blanks the call had, as #
+; spells them, or none when there are none; ARGS as they are when there
+; are fewer than N
+(def %cc-va-args
+  (fn (_ args n)
+    (def go
+      (fn (self as i acc)
+        (match
+          ((null? as) (if (< i n) () (reverse (pair () acc))))
+          ((< i n) (self (rest as) (+ i 1) (pair (%cc-trim-sp (first as)) acc)))
+          (#t (reverse (pair (%cc-trim-sp (join as ())) acc))))))
+    (def join
+      (fn (self as out)
+        (if (null? (rest as)) (append (reverse out) (first as))
+          (self (rest as) (pair (list (lit op) ",") (append (reverse (first as)) out))))))
+    (def r (go args 0 ()))
+    (if (null? r) (map %cc-trim-sp args) r)))
+
 ; TS with the macros expanded.  OPEN holds the names whose expansion this
 ; is, which do not expand again inside it, so a macro that names itself
 ; ends.  An expansion is read again for macros with its own name open.
@@ -216,13 +237,15 @@
                     (let ((params (first (rest (rest m)))))
                       ; F() is no arguments, when F takes none
                       (def args
-                        (if (if (null? params) (if (null? (rest (first ar))) (null? (first (first ar))) #f) #f)
+                        (if (if (null? params) (if (null? (rest (first ar))) (null? (%cc-trim-sp (first (first ar)))) #f) #f)
                           () (first ar)))
-                      (if (not (= (length params) (length args)))
+                      (def variadic? (if (null? params) #f (string=? (first (reverse params)) "__VA_ARGS__")))
+                      (def given (if variadic? (%cc-va-args args (- (length params) 1)) (map %cc-trim-sp args)))
+                      (if (not (= (length params) (length given)))
                         (Err raise (lit cc) (string-append "cc: wrong argument count for macro " (first m)) ()))
                       (go (rest ar)
                         (append
-                          (reverse (self (%cc-subst (rest (rest (rest m))) params args)
+                          (reverse (self (%cc-subst (rest (rest (rest m))) params given)
                                      macros (pair (first m) open)))
                           acc)))))))))))
     (go ts ())))
@@ -250,6 +273,8 @@
                     ((null? ts) (%cc-oops "unterminated macro parameter list"))
                     ((%cc-op-is? (first ts) ")") (pair (reverse acc) (rest ts)))
                     ((%cc-name? (first ts)) (self (rest ts) (pair (%cc-text (first ts)) acc)))
+                    ; ... takes the arguments past the named ones, as __VA_ARGS__
+                    ((%cc-op-is? (first ts) "...") (self (rest ts) (pair "__VA_ARGS__" acc)))
                     (#t (self (rest ts) acc))))))
         (let ((pr (go (rest after) ())))
           (pair name (pair (lit fn) (pair (first pr) (%cc-trim-sp (rest pr)))))))
@@ -475,7 +500,8 @@
           (if os-darwin?
             "#define assert(e) ((e) ? (void)0 : __assert_rtn((char *)0, __FILE__, __LINE__, #e))"
             "#define assert(e) ((e) ? (void)0 : __assert_fail(#e, __FILE__, __LINE__, (char *)0))")
-          "#endif")
+          "#endif"
+          "#define static_assert _Static_assert")
         (list "math.h"
           "#define M_E 2.71828182845904523536028747135266250"
           "#define M_LOG2E 1.44269504088896340735992468100189214"

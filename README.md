@@ -119,6 +119,14 @@ handed to a function past its declared parameters goes as a double.
 A `_Bool` is one byte holding 0 or 1: any value converted to it, by a
 store, an initializer, an argument, a return or a cast, is 1 unless it
 compares equal to 0.
+`inline` and `restrict` are taken and change nothing: an inline function
+is called, and nothing is kept in a register for `restrict` to speak to.
+`_Static_assert`, at file scope or in a block, and `<assert.h>`'s
+`static_assert` refuse the program with their message when the constant
+is 0.  `__func__` is the name of the function it is in.  A function-like
+macro's `...` takes the arguments past the named ones as `__VA_ARGS__`.
+A hexadecimal floating constant (`0x1.8p3`) is not read yet: the Lexer's
+number rule takes `0x` and hex digits only.
 `setjmp` and `longjmp` are the compiler's own, as the C library's would
 keep the frame of the gate its calls go through: setjmp keeps the frame's
 base, the frame stack's top, the machine stack's pointer and where the
