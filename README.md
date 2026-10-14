@@ -250,7 +250,13 @@ lines; an inactive region still tracks its nesting.  An `#if` or
 a constant expression, folded as an enumerator's is.  Initializer lists lay
 values into memory by C type -- `int a[] = {…}` sized by the list,
 `struct P p = {…}`, nested lists for arrays of structs, missing
-trailing items zero, `char s[] = "…"` from the string's bytes.
+trailing items zero, `char s[] = "…"` from the string's bytes.  C99's
+designators -- `.field =`, `[index] =`, chained as `.a.z =` -- place an
+item, and the next plain one follows it; a list with any is laid out in
+full, each place none names a zero.  A compound literal, `(TYPE){…}`, is
+an object made where its statement starts, then used as any variable is;
+one in a loop's condition or step, or in a global's initializer, is
+refused by name.
 
 Enums fold at parse time (`enum { A, B = 1 << 3, C }` -- constant
 expressions, counting on from the last; the C type is a scalar; `case

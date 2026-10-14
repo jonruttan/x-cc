@@ -709,9 +709,37 @@
                           (pair (list (lit szof) (first r)) (rest r))))
                       (if (%cc-cast? toks)
                         (let ((tr (%cc-p-type-name (rest toks))))
-                          (let ((r (self (%cc-p-eat (rest tr) ")"))))
-                            (pair (list (lit cast) (first tr) (first r)) (rest r))))
+                          (def after (%cc-p-eat (rest tr) ")"))
+                          (if (%cc-p-op? after "{")
+                            (%cc-e-postfix (%cc-p-literal (first tr) (rest after)))
+                            (let ((r (self after)))
+                              (pair (list (lit cast) (first tr) (first r)) (rest r)))))
                         (%cc-e-postfix toks)))))))))))))
+
+; C99's compound literal, (TYPE){ INIT }: an object made where the
+; statement it is in starts, its name one no C name can be.  Its
+; declaration goes on the list the statement takes it from (%cc-p-stmt),
+; and the tokens after the literal's } come back with that name in front,
+; so . [ and the like go on from it as from any variable.
+(def %cc-p-literals ())   ; the declarations the statement being read takes
+(def %cc-p-nliterals 0)
+(def %cc-p-literal
+  (fn (_ c-type toks)
+    (def r (%cc-p-initlist toks))
+    (def init (%cc-p-designate c-type (first r)))
+    (def name (string-append "%literal" (convert %cc-p-nliterals %string)))
+    (set! %cc-p-nliterals (+ %cc-p-nliterals 1))
+    (set! %cc-p-literals
+      (pair (list (lit decl) name (%cc-p-size-c-type c-type init) init) %cc-p-literals))
+    (pair (list (lit id) name) (rest r))))
+
+; refused: a compound literal in what is evaluated more than once in a
+; loop, which would be made once, before the loop -- WHAT says where; N is
+; how many literals were waiting before it was read
+(def %cc-p-no-literals
+  (fn (_ n what)
+    (if (> (length %cc-p-literals) n)
+      (%cc-p-err (string-append "not built yet: a compound literal in " what)))))
 
 ; one flat driver for the left-associative binary levels: OPS is the
 ; level's operator list, SUB the tighter level, MK the node builder
@@ -889,26 +917,128 @@
       (let ((ir (if (%cc-p-op? (rest ts3) "{")
                   (%cc-p-initlist (rest (rest ts3)))
                   (%cc-e-assign (rest ts3)))))
-        (pair (list (lit decl) name (%cc-p-size-c-type c-type (first ir)) (first ir))
+        (def init (%cc-p-designate c-type (first ir)))
+        (pair (list (lit decl) name (%cc-p-size-c-type c-type init) init)
           (rest ir)))
       (if (if (%cc-p-unsized? c-type) (not %cc-p-file-scope?) #f)
         (%cc-p-err "an array without a size needs an initializer")
         (pair (list (lit decl) name c-type ()) ts3)))))
 
-; { init (, init)* [,] } -> (initlist ITEMS), items nested lists or exprs
+; { init (, init)* [,] } -> (initlist ITEMS), items nested lists or exprs,
+; or (desig CHAIN VALUE) for C99's designated one: .NAME and [CONSTANT]
+; designators, (field NAME) and (index N), then = and its value
 (def %cc-p-initlist
   (fn (self toks)
+    (def chain
+      (fn (self2 ts acc)
+        (match
+          ((%cc-p-op? ts ".")
+            (do (if (not (%cc-p-id? (rest ts))) (%cc-p-err "expected a field name after ."))
+                (self2 (rest (rest ts)) (pair (list (lit field) (first (rest (first (rest ts))))) acc))))
+          ((%cc-p-op? ts "[")
+            (let ((r (%cc-e-tern (rest ts))))
+              (self2 (%cc-p-eat (rest r) "]") (pair (list (lit index) (%cc-p-const (first r))) acc))))
+          (#t (pair (reverse acc) (%cc-p-eat ts "="))))))
+    (def item
+      (fn (_ ts)
+        (if (if (%cc-p-op? ts ".") #t (%cc-p-op? ts "["))
+          (let ((c (chain ts ())))
+            (def v (value (rest c)))
+            (pair (list (lit desig) (first c) (first v)) (rest v)))
+          (value ts))))
+    (def value (fn (_ ts) (if (%cc-p-op? ts "{") (self (rest ts)) (%cc-e-assign ts))))
     (def go
       (fn (self2 ts acc)
         (if (%cc-p-op? ts "}")
           (pair (list (lit initlist) (reverse acc)) (rest ts))
-          (let ((r (if (%cc-p-op? ts "{") (self (rest ts)) (%cc-e-assign ts))))
+          (let ((r (item ts)))
             (if (%cc-p-op? (rest r) ",")
               (self2 (rest (rest r)) (pair (first r) acc))
               (if (%cc-p-op? (rest r) "}")
                 (pair (list (lit initlist) (reverse (pair (first r) acc))) (rest (rest r)))
                 (%cc-p-err "expected , or } in an initializer")))))))
     (go toks ())))
+
+; does INIT, a braced list, hold a designator at any depth
+(def %cc-p-designated?
+  (fn (self init)
+    (if (if (pair? init) (eq? (first init) (lit initlist)) #f)
+      (let ((go (fn (go is)
+                  (match
+                    ((null? is) #f)
+                    ((eq? (first (first is)) (lit desig)) #t)
+                    ((self (first is)) #t)
+                    (#t (go (rest is)))))))
+        (go (first (rest init))))
+      #f)))
+
+; INIT, a braced list for C-TYPE, with its designators placed: a list in
+; order with every element or field there, each one no designator names a
+; 0, or an empty list for an array or a struct, so all of it is set.  A
+; designator's place is where the next item goes after it, and a later one
+; for the same place wins.  A list with no designator stays as it is.
+(def %cc-p-designate
+  (fn (self c-type init)
+    (def k c-type)
+    (def array? (if (pair? k) (eq? (first k) (lit array)) #f))
+    (def struct? (if (pair? k) (eq? (first k) (lit struct)) #f))
+    (def fields (if struct? (rest (rest (struct-entry (first (rest k))))) ()))
+    (def elem (if array? (if (null? (rest (rest k))) (lit int) (first (rest (rest k)))) ()))
+    ; the C type of the place at I
+    (def place-type
+      (fn (_ i)
+        (if array? elem
+          (let ((go (fn (go fs j) (if (null? fs) (%cc-p-err "too many initializers for a struct")
+                                    (if (= j 0) (first (rest (rest (first fs)))) (go (rest fs) (- j 1)))))))
+            (go fields i)))))
+    ; the place a designator names
+    (def place
+      (fn (_ d)
+        (if (eq? (first d) (lit index))
+          (if array? (first (rest d)) (%cc-p-err "an index designator for something not an array"))
+          (if (not struct?) (%cc-p-err "a field designator for something not a struct")
+            (let ((go (fn (go fs j)
+                        (match
+                          ((null? fs) (%cc-p-err (string-append "no field " (first (rest d)))))
+                          ((string=? (first (first fs)) (first (rest d))) j)
+                          (#t (go (rest fs) (+ j 1)))))))
+              (go fields 0))))))
+    (def zero
+      (fn (_ t) (if (if (pair? t) (if (eq? (first t) (lit array)) #t (eq? (first t) (lit struct))) #f)
+                  (list (lit initlist) ()) (list (lit num) 0))))
+    ; SLOTS ((I . VALUE) ...), the last set first
+    (def get (fn (self2 ss i) (match ((null? ss) ()) ((= (first (first ss)) i) (rest (first ss))) (#t (self2 (rest ss) i)))))
+    (def put (fn (_ ss i v) (pair (pair i v) ss)))
+    (def fill
+      (fn (fill is i ss most)
+        (if (null? is) (pair ss most)
+          (let ((it (first is)))
+            (if (eq? (first it) (lit desig))
+              (let ((j (place (first (first (rest it))))) (more (rest (first (rest it)))))
+                (def v (first (rest (rest it))))
+                ; a designator chain goes on into the list at its first place
+                (def v2 (if (null? more) v
+                          (let ((old (get ss j)))
+                            (list (lit initlist)
+                              (append (if (if (null? old) #f (eq? (first old) (lit initlist))) (first (rest old)) ())
+                                (list (list (lit desig) more v)))))))
+                (fill (rest is) (+ j 1) (put ss j v2) (if (> (+ j 1) most) (+ j 1) most)))
+              (fill (rest is) (+ i 1) (put ss i it) (if (> (+ i 1) most) (+ i 1) most)))))))
+    (if (not (%cc-p-designated? init)) init
+      (let ((r (fill (first (rest init)) 0 () 0)))
+        (def n (match
+                 (struct? (length fields))
+                 ((if array? (not (null? (first (rest k)))) #f) (first (rest k)))
+                 (#t (rest r))))
+        (def out
+          (fn (out i acc)
+            (if (>= i n) (reverse acc)
+              (let ((v (get (first r) i)) (t (place-type i)))
+                (out (+ i 1)
+                  (pair (if (null? v) (zero t)
+                          (if (eq? (first v) (lit initlist)) (self t v) v))
+                    acc))))))
+        (list (lit initlist) (out 0 ()))))))
 
 ; an unsized array takes its size from the initializer: the list's
 ; length, or a string's bytes plus its NUL
@@ -1057,7 +1187,7 @@
 
 ; --- statements --------------------------------------------------------------
 
-(set! %cc-p-stmt
+(def %cc-p-stmt-one
   (fn (_ toks)
     (if (%cc-p-op? toks "{")
       (%cc-p-block (rest toks))
@@ -1085,6 +1215,7 @@
           (%cc-p-switch toks)
         (if (%cc-p-kw? toks (lit while))
           (let ((c (%cc-e-comma (%cc-p-eat (rest toks) "("))))
+            (%cc-p-no-literals 0 "a while loop's condition")
             (def b (%cc-p-stmt (%cc-p-eat (rest c) ")")))
             (pair (list (lit while) (first c) (first b)) (rest b)))
           (if (%cc-p-kw? toks (lit do))
@@ -1093,6 +1224,7 @@
                 (%cc-p-err "expected while after do")
                 (let ((c (%cc-e-comma
                            (%cc-p-eat (rest (rest b)) "("))))
+                  (%cc-p-no-literals 0 "a do loop's condition")
                   (pair (list (lit do) (first b) (first c))
                     (%cc-p-eat (%cc-p-eat (rest c) ")") ";")))))
             (if (%cc-p-kw? toks (lit for))
@@ -1106,6 +1238,7 @@
                     ((%cc-p-op? ts ";") (pair () ts))
                     (#t (%cc-e-comma ts))))
                 (def ts2 (if (null? d-r) (%cc-p-eat (rest i-r) ";") (rest d-r)))
+                (def n (length %cc-p-literals))
                 (def c-r
                   (if (%cc-p-op? ts2 ";") (pair () ts2)
                     (%cc-e-comma ts2)))
@@ -1113,6 +1246,7 @@
                 (def u-r
                   (if (%cc-p-op? ts3 ")") (pair () ts3)
                     (%cc-e-comma ts3)))
+                (%cc-p-no-literals n "a for loop's condition or step")
                 (def b (%cc-p-stmt (%cc-p-eat (rest u-r) ")")))
                 (def loop (list (lit for) (first i-r) (first c-r) (first u-r) (first b)))
                 (pair
@@ -1147,6 +1281,23 @@
                           (let ((r (%cc-e-comma toks)))
                             (pair (list (lit expr) (first r))
                               (%cc-p-eat (rest r) ";"))))))))))))))))))))
+
+; A statement, its compound literals' declarations in front of it: a
+; declaration's go into its own list, which a block takes as its own, and
+; any other statement becomes a block of them and it.  A statement within
+; it keeps its own.
+(set! %cc-p-stmt
+  (fn (_ toks)
+    (def saved %cc-p-literals)
+    (set! %cc-p-literals ())
+    (def r (%cc-p-stmt-one toks))
+    (def lits (reverse %cc-p-literals))
+    (set! %cc-p-literals saved)
+    (match
+      ((null? lits) r)
+      ((eq? (first (first r)) (lit decls))
+        (pair (pair (lit decls) (append lits (rest (first r)))) (rest r)))
+      (#t (pair (list (lit block) (append lits (list (first r)))) (rest r))))))
 
 ; switch (E) { case V: ... default: ... } -> (switch E CLAUSES), each
 ; clause (VALUE stmt...) in order, VALUE () for default; fallthrough is
@@ -1350,6 +1501,8 @@
     (set! %cc-p-typedefs (list (pair "__builtin_va_list" %cc-p-va-list)))
     (set! %cc-p-enums ())
     (set! %cc-p-anon 0)
+    (set! %cc-p-literals ())
+    (set! %cc-p-nliterals 0)
     (set! %cc-p-file-scope? #f)
     (def go
       (fn (self ts acc)
@@ -1385,6 +1538,7 @@
                     ; globals: reuse the declarator line from ts
                     (let ((r (do (set! %cc-p-file-scope? #t) (%cc-p-decl-line ts))))
                       (set! %cc-p-file-scope? #f)
+                      (%cc-p-no-literals 0 "a global's initializer")
                       (self (rest r)
                         (append
                           (reverse
