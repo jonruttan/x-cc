@@ -26,8 +26,8 @@
 ; literals joined, as C's translation joins them.
 (module cc/pp)
 
-(import cc/prims append byte-at byte-len convert filter length map reverse string-append
-  string-concat string=? substring)
+(import cc/prims append byte-at byte-len convert file-exists? file-read-all filter length map
+  reverse string-append string-concat string=? substring)
 (import cc/tokens cc-raw-tokens cc-token)
 (import cc/parse cc-parse-const cc-token-lines! plain-char)
 
@@ -504,9 +504,53 @@
           "#define LLONG_MIN (-9223372036854775807L-1)" "#define LLONG_MAX 9223372036854775807L"
           "#define ULLONG_MAX 18446744073709551615UL")))
 
+; PATH's directory, up to and with its last /, or "" for a path with none
+(def %cc-dir
+  (fn (_ path)
+    (def go (fn (self i) (match ((< i 0) "") ((= (byte-at path i) #\/) (substring path 0 (+ i 1)))
+                           (#t (self (- i 1))))))
+    (go (- (byte-len path) 1))))
+
+; the directory of the file being read, where #include "..." looks
+(def %cc-pp-dir "")
+
 ; The lines #include ARG puts in place of its own, numbered N: those of the
-; standard header it names in <...>, none for any other
+; standard header it names in <...>, none for any other; those of the file
+; it names in "...", from the directory of the file being read
 (def %cc-header-lines
+  (fn (_ arg n)
+    (def len (byte-len arg))
+    (def quoted? (if (> len 1) (if (= (byte-at arg 0) #\") (= (byte-at arg (- len 1)) #\") #f) #f))
+    (if quoted? (%cc-local-lines (substring arg 1 (- len 1)) n)
+      (%cc-standard-lines arg n))))
+
+; the lines of the file NAME, numbered N: NAME is as an #include names it,
+; from the directory of the file being read unless it starts with /.  An
+; #include "..." among them names its file from NAME's own directory, so
+; it is put as from the file being read.
+(def %cc-local-lines
+  (fn (_ name n)
+    (def absolute? (if (> (byte-len name) 0) (= (byte-at name 0) #\/) #f))
+    (def path (if absolute? name (string-append %cc-pp-dir name)))
+    (if (not (file-exists? path)) (%cc-oops (string-append "#include \"" path "\": no such file")))
+    (def dir (%cc-dir name))
+    ; a line's tokens, an #include "..." among them put from DIR
+    (def from-dir
+      (fn (_ ts)
+        (def a (%cc-skip-sp ts))
+        (def b (if (if (null? a) #f (%cc-op-is? (first a) "#")) (%cc-skip-sp (rest a)) ()))
+        (def c (if (if (null? b) #f (if (%cc-name? (first b)) (string=? (%cc-text (first b)) "include") #f))
+                 (%cc-skip-sp (rest b)) ()))
+        (def s (if (if (null? c) #f (%cc-tag? (first c) (lit str))) (%cc-text (first c)) ""))
+        (if (if (> (byte-len s) 2) (not (= (byte-at s 1) #\/)) #f)
+          (append (list (first a) (first b) (list (lit sp) " ")
+                    (list (lit str) (string-append "\"" dir (substring s 1 (byte-len s)))))
+            (rest c))
+          ts)))
+    (map (fn (_ l) (pair n (if (string=? dir "") (rest l) (from-dir (rest l)))))
+      (%cc-lines (cc-raw-tokens (file-read-all path))))))
+
+(def %cc-standard-lines
   (fn (_ arg n)
     (def len (byte-len arg))
     (def name
@@ -538,6 +582,7 @@
     (set! %cc-pp-lines ())
     (def file-macro
       (list "__FILE__" (lit obj) (%cc-stringize (list (list (lit id) %cc-pp-file)))))
+    (set! %cc-pp-dir (if (string=? %cc-pp-file "<stdin>") "" (%cc-dir %cc-pp-file)))
     (set! %cc-pp-file "<stdin>")
     (def live?
       (fn (self st) (if (null? st) #t (if (first (first st)) (self (rest st)) #f))))
@@ -622,11 +667,123 @@
                   (#t (%cc-oops (string-append "unsupported directive #" word))))))))))
     (go (%cc-lines (cc-raw-tokens src)) 1 () () () ())))
 
-; The parser's tokens for SRC: preprocessed, the blanks out, each token
-; made the parser's, and a string literal right after another joined to it
+; --- several files -------------------------------------------------------------
+; A program of several files is one stream of tokens, each file preprocessed
+; on its own -- its own macros, its own include guards -- and its names with
+; internal linkage, those declared static at file scope, renamed NAME.N for
+; its place N among the files, so two files' static helpers of one name are
+; two functions.  Every identifier of that name in the file is renamed, but
+; a field: one named after . or ->, or declared in a struct's or a union's
+; body, which a header the files share lays out alike for all of them.
+
+(def %cc-kw-text? (fn (_ t s) (if (%cc-tag? t (lit kw)) (string=? (%cc-text t) s) #f)))
+
+; the names TS, a file's raw tokens, declares static at file scope: each
+; declarator's name -- the identifier before its =, its , or ; or [, or a
+; function's ( -- of a declaration that starts with static outside any brace
+(def %cc-file-statics
+  (fn (_ ts)
+    ; DEPTH the braces open outside a declaration; in one, P the parentheses
+    ; and brackets open, Q the nesting of an initializer being passed over
+    ; (-1 when none is), NAME the last identifier, FN? whether a function's
+    ; name was taken, and B the braces of a struct's body open in it
+    (def outside
+      (fn (self ts depth acc)
+        (match
+          ((null? ts) acc)
+          ((%cc-op-is? (first ts) "{") (self (rest ts) (+ depth 1) acc))
+          ((%cc-op-is? (first ts) "}") (self (rest ts) (- depth 1) acc))
+          ((if (= depth 0) (%cc-kw-text? (first ts) "static") #f)
+            (inside (rest ts) 0 -1 () #f 0 acc))
+          (#t (self (rest ts) depth acc)))))
+    (def take (fn (_ name acc) (if (null? name) acc (pair name acc))))
+    (def inside
+      (fn (self ts p q name fn? b acc)
+        (if (null? ts) acc
+          (let ((t (first ts)))
+            (match
+              ((%cc-tag? t (lit sp)) (self (rest ts) p q name fn? b acc))
+              ; an initializer, to its , or ; at its own level
+              ((>= q 0)
+                (match
+                  ((if (%cc-op-is? t "(") #t (%cc-op-is? t "{")) (self (rest ts) p (+ q 1) () fn? b acc))
+                  ((if (%cc-op-is? t ")") #t (%cc-op-is? t "}")) (self (rest ts) p (- q 1) () fn? b acc))
+                  ((if (= q 0) (%cc-op-is? t ",") #f) (self (rest ts) p -1 () fn? b acc))
+                  ((if (= q 0) (%cc-op-is? t ";") #f) (outside (rest ts) 0 acc))
+                  (#t (self (rest ts) p q () fn? b acc))))
+              ; a struct's body among the specifiers
+              ((> b 0)
+                (match
+                  ((%cc-op-is? t "{") (self (rest ts) p q () fn? (+ b 1) acc))
+                  ((%cc-op-is? t "}") (self (rest ts) p q () fn? (- b 1) acc))
+                  (#t (self (rest ts) p q () fn? b acc))))
+              ((%cc-tag? t (lit id)) (self (rest ts) p q (%cc-text t) fn? b acc))
+              ((%cc-op-is? t "(")
+                (if (if (= p 0) (not (null? name)) #f)
+                  (self (rest ts) 1 q () #t b (pair name acc))
+                  (self (rest ts) (+ p 1) q () fn? b acc)))
+              ((%cc-op-is? t "[")
+                (self (rest ts) (+ p 1) q () fn? b (if (= p 0) (take name acc) acc)))
+              ((if (%cc-op-is? t ")") #t (%cc-op-is? t "]")) (self (rest ts) (- p 1) q () fn? b acc))
+              ((> p 0) (self (rest ts) p q () fn? b acc))
+              ((%cc-op-is? t "=") (self (rest ts) p 0 () fn? b (take name acc)))
+              ((%cc-op-is? t ",") (self (rest ts) p q () fn? b (take name acc)))
+              ((%cc-op-is? t ";") (outside (rest ts) 0 (take name acc)))
+              ; a function's body, or a struct's
+              ((%cc-op-is? t "{") (if fn? (outside (rest ts) 1 acc) (self (rest ts) p q () fn? 1 acc)))
+              (#t (self (rest ts) p q () fn? b acc)))))))
+    (outside ts 0 ())))
+
+; TS, a file's raw tokens, with each of NAMES renamed NAME.N, but a field
+(def %cc-rename-statics
+  (fn (_ ts names n)
+    (def suffix (string-append "." (convert n %string)))
+    (def static? (fn (_ s) (%cc-member-s? s names)))
+    ; PREV the last token not a blank; TAG 1 just after a struct or union
+    ; keyword and 2 just after its tag, where a { opens its body, else 0; B
+    ; the braces of the struct's body open.  A tag is never renamed.
+    (def go
+      (fn (self ts prev tag b acc)
+        (if (null? ts) (reverse acc)
+          (let ((t (first ts)))
+            (match
+              ((%cc-tag? t (lit sp)) (self (rest ts) prev tag b (pair t acc)))
+              ((%cc-op-is? t "{")
+                (self (rest ts) t 0 (if (if (> tag 0) #t (> b 0)) (+ b 1) 0) (pair t acc)))
+              ((%cc-op-is? t "}") (self (rest ts) t 0 (if (> b 0) (- b 1) 0) (pair t acc)))
+              ((if (%cc-kw-text? t "struct") #t (%cc-kw-text? t "union")) (self (rest ts) t 1 b (pair t acc)))
+              ((if (= tag 1) (%cc-tag? t (lit id)) #f) (self (rest ts) t 2 b (pair t acc)))
+              ((if (%cc-tag? t (lit id))
+                 (if (static? (%cc-text t))
+                   (if (= b 0)
+                     (if (null? prev) #t
+                       (not (if (%cc-op-is? prev ".") #t (%cc-op-is? prev "->"))))
+                     #f)
+                   #f)
+                 #f)
+                (self (rest ts) t 0 b
+                  (pair (pair (first t) (pair (string-append (%cc-text t) suffix) (rest (rest t)))) acc)))
+              (#t (self (rest ts) t 0 b (pair t acc))))))))
+    (if (null? names) ts (go ts () 0 0 ()))))
+
+; The parser's tokens for SRC: a program's text, or a list of its files,
+; each (PATH . TEXT), in order.  Each is preprocessed, the blanks out, each
+; token made the parser's, and a string literal right after another joined
+; to it.
 (def cc-lex
   (fn (_ src)
-    (def raw (%cc-preprocess src))
+    (def units (if (str? src) (list (pair %cc-pp-file src)) src))
+    (def many? (not (null? (rest units))))
+    ; the raw tokens and their lines of every file, each list reversed
+    (def read
+      (fn (self us n ts ns)
+        (if (null? us) (pair ts ns)
+          (do (set! %cc-pp-file (first (first us)))
+              (let ((raw (%cc-preprocess (rest (first us)))))
+                (def lines (reverse %cc-pp-lines))
+                (def raw2 (if many? (%cc-rename-statics raw (%cc-file-statics raw) n) raw))
+                (self (rest us) (+ n 1) (append (reverse raw2) ts) (append (reverse lines) ns)))))))
+    (def all (read units 1 () ()))
     ; TS and NS, each token's line, walked together: (TOKENS . LINES)
     (def go
       (fn (self ts ns acc lacc)
@@ -645,7 +802,7 @@
                     (rest acc))
                   lacc)
                 (self (rest ts) ns2 (pair t acc) (pair n lacc))))))))
-    (def r (go raw (reverse %cc-pp-lines) () ()))
+    (def r (go (reverse (first all)) (reverse (rest all)) () ()))
     ; the parser reports an error at its token's line
     (cc-token-lines! (first r) (rest r))
     (first r)))

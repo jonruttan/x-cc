@@ -471,9 +471,27 @@
           (let ((ts2 (if (%cc-p-id? (rest ts)) (rest (rest ts)) (rest ts))))
             (pair (lit int)
               (if (%cc-p-op? ts2 "{") (%cc-p-enum-body (rest ts2)) ts2)))
-          (if (%cc-p-typedef-name? ts)
+          ; a typedef's name is the type only where no type keyword came
+          ; before it: in `typedef long coord;` again, coord is the name
+          (if (if (%cc-p-typedef-name? ts) (%cc-p-qualifiers-only? toks ts) #f)
             (pair (%cc-p-typedef-c-type (first (rest (first ts)))) (rest ts))
             (%cc-p-scalar-of toks)))))))
+
+; are the keywords of TOKS up to TS only qualifiers and storage classes,
+; none naming a type
+(def %cc-p-qualifiers-only?
+  (fn (self toks ts)
+    (if (eq? toks ts) #t
+      (let ((k (first (rest (first toks)))))
+        (if (match
+              ((eq? k (lit const)) #t)
+              ((eq? k (lit volatile)) #t)
+              ((eq? k (lit register)) #t)
+              ((eq? k (lit auto)) #t)
+              ((eq? k (lit static)) #t)
+              (#t (eq? k (lit extern))))
+          (self (rest toks) ts)
+          #f)))))
 
 ; the array suffix after a declarator's name: (C-TYPE . rest).  Each [N]
 ; wraps the C type the dimensions after it make, so int m[2][3] is two
