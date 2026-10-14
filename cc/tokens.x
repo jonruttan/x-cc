@@ -36,14 +36,15 @@
 ; platform's public door and private to this module.
 (def %symbol (Type named SYMBOL))
 
-; Every C89 keyword, and C99's _Bool, so the parser refuses the
-; unimplemented ones by name rather than reading them as identifiers.
+; Every C89 keyword, C99's _Bool, inline and restrict, and C11's
+; _Static_assert, so the parser refuses the unimplemented ones by name rather
+; than reading them as identifiers.
 (def %cc-keywords
   (list "auto" "break" "case" "char" "const" "continue" "default" "do"
         "double" "else" "enum" "extern" "float" "for" "goto" "if" "int"
         "long" "register" "return" "short" "signed" "sizeof" "static"
         "struct" "switch" "typedef" "union" "unsigned" "void" "volatile"
-        "while" "_Bool"))
+        "while" "_Bool" "inline" "restrict" "_Static_assert"))
 
 ; C's punctuators, the longest that matches
 (def %cc-ops
