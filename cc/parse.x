@@ -506,17 +506,187 @@
       (if (%cc-p-op? (rest ts) "]")
         (let ((inner (self k (rest (rest ts)))))
           (pair (list (lit array) () (first inner)) (rest inner)))
-        ; the count is a constant expression: N + 1, sizeof x / 2, an enum
+        ; the count is a constant expression: N + 1, sizeof x / 2, an enum;
+        ; where a variable-length array may stand, any other is (vla E)
         (let ((r (%cc-e-assign (rest ts))))
           (let ((inner (self k (%cc-p-eat (rest r) "]"))))
-            (pair (list (lit array) (%cc-p-const (first r)) (first inner)) (rest inner)))))
+            (def n (if %cc-p-vla-ok? (guard (e ()) (%cc-p-const (first r))) (%cc-p-const (first r))))
+            (pair (list (lit array) (if (null? n) (list (lit vla) (first r)) n) (first inner))
+              (rest inner)))))
       (pair k ts))))
+
+; --- variable-length arrays ----------------------------------------------------
+; C99's T a[E1][E2]...: each dimension E is evaluated once, where the
+; declaration is, into a long of its own, and a is a pointer to T into room
+; taken then off the frame stack, (valloc BYTES).  a[i] goes on from a by i
+; times the product of the dimensions after the first, and [ ] after the
+; last is an element; sizeof is the product of the dimensions left, times
+; T's size.  A parameter T m[E1][E2]... is a pointer to T whose dimensions
+; are the expressions themselves.  A loop whose body declares one marks the
+; frame stack's top before it, (vmark), and puts it back at the top of each
+; time round, (vreset MARK), so each time round takes its room again.
+; Anywhere else -- a global, a struct, a typedef, a cast -- one is refused.
+
+(def %cc-p-vla-ok? #f)    ; whether the array suffix being read may be one
+(def %cc-p-vlas ())       ; ((NAME DIMS T PARAM?) | (NAME) ...), the innermost first
+(def %cc-p-param-vlas ()) ; those of the parameters last read
+(def %cc-p-nvla 0)        ; how many have been declared, for names and loops
+(def %cc-p-vla-last ())   ; (NODE . SIZE) for the last chain that ended on an array
+
+; an array's element: (array N) holds ints
+(def %cc-p-array-elem
+  (fn (_ k) (if (null? (rest (rest k))) (lit int) (first (rest (rest k))))))
+
+(def %cc-p-array? (fn (_ k) (if (pair? k) (eq? (first k) (lit array)) #f)))
+
+; does K have a dimension known only as it runs
+(def %cc-p-vla?
+  (fn (self k)
+    (if (%cc-p-array? k)
+      (let ((n (first (rest k))))
+        (if (if (pair? n) (eq? (first n) (lit vla)) #f) #t (self (%cc-p-array-elem k))))
+      #f)))
+
+; K, an array with a dimension known only as it runs: (DIMS . T), DIMS each
+; dimension's expression, T what is past the last
+(def %cc-p-vla-shape
+  (fn (self k)
+    (if (not (%cc-p-array? k)) (pair () k)
+      (let ((n (first (rest k))) (inner (self (%cc-p-array-elem k))))
+        (def d (match
+                 ((null? n) (%cc-p-err "a variable-length array without a dimension"))
+                 ((pair? n) (first (rest n)))
+                 (#t (list (lit num) n))))
+        (pair (pair d (first inner)) (rest inner))))))
+
+; the entry NAME has, or nil: one a declaration that is not one hides
+(def %cc-p-vla-find
+  (fn (_ name)
+    (def go (fn (self es) (match ((null? es) ()) ((string=? (first (first es)) name)
+                                                  (if (null? (rest (first es))) () (first es)))
+                               (#t (self (rest es))))))
+    (go %cc-p-vlas)))
+
+; does NODE take room as it runs, a (valloc ...) anywhere in it
+(def %cc-p-valloc-in?
+  (fn (self node)
+    (if (not (pair? node)) #f
+      (if (eq? (first node) (lit valloc)) #t
+        (let ((go (fn (go xs) (if (pair? xs) (if (self (first xs)) #t (go (rest xs))) #f))))
+          (go (rest node)))))))
+
+; a loop, MAKE of its BODY, as it stands when the body takes no room as it
+; runs; else in a block after a mark of the frame stack's top, its body
+; putting the mark back first each time round
+(def %cc-p-vla-loop
+  (fn (_ body make)
+    (if (not (%cc-p-valloc-in? body)) (make body)
+      (let ((mark (string-append "%vlamark" (convert %cc-p-nvla %string))))
+        (set! %cc-p-nvla (+ %cc-p-nvla 1))
+        (list (lit block)
+          (list (list (lit decl) mark (lit long) (list (lit vmark)))
+                (make (list (lit block)
+                        (list (list (lit expr) (list (lit vreset) (list (lit var) mark)))
+                              body)))))))))
+
+; a local declaration's line, where a declarator may be a variable-length
+; array
+(def %cc-p-local-line
+  (fn (_ toks)
+    (set! %cc-p-vla-ok? #t)
+    (def r (%cc-p-decl-line toks))
+    (set! %cc-p-vla-ok? #f)
+    r))
+
+; THUNK's answer, read where no variable-length array may stand: a struct's
+; fields, a type name
+(def %cc-p-no-vla
+  (fn (_ thunk)
+    (def saved %cc-p-vla-ok?)
+    (set! %cc-p-vla-ok? #f)
+    (def v (thunk))
+    (set! %cc-p-vla-ok? saved)
+    v))
+
+; the product of DIMS, a long, 1 for none
+(def %cc-p-vla-product
+  (fn (self dims)
+    (match
+      ((null? dims) (list (lit num) 1 (lit long)))
+      ((null? (rest dims)) (first dims))
+      (#t (list (lit bin) "*" (first dims) (self (rest dims)))))))
+
+; a block's declarations DS, each one a variable-length array made its
+; dimensions' longs and its pointer, and each other name hiding one
+(def %cc-p-local-decls
+  (fn (_ ds)
+    (def one
+      (fn (_ d)
+        (def name (first (rest d)))
+        (def k (first (rest (rest d))))
+        (if (not (%cc-p-vla? k))
+          (do (if (null? (%cc-p-vla-find name)) () (set! %cc-p-vlas (pair (list name) %cc-p-vlas)))
+              (list d))
+          (let ((shape (%cc-p-vla-shape k)))
+            (if (not (null? (first (rest (rest (rest d))))))
+              (%cc-p-err "a variable-length array with an initializer"))
+            (if (not (null? (rest (rest (rest (rest d))))))
+              (%cc-p-err "a static variable-length array"))
+            (def n %cc-p-nvla)
+            (set! %cc-p-nvla (+ n 1))
+            (def dim-name
+              (fn (_ i) (string-append "%vla" (convert n %string) "." (convert i %string))))
+            (def dims
+              (let ((go (fn (self ds i acc)
+                          (if (null? ds) (reverse acc)
+                            (self (rest ds) (+ i 1)
+                              (pair (list (lit decl) (dim-name i) (lit long) (first ds)) acc))))))
+                (go (first shape) 0 ())))
+            (def vars (map (fn (_ dd) (list (lit var) (first (rest dd)))) dims))
+            (def t (rest shape))
+            (set! %cc-p-vlas (pair (list name vars t #f) %cc-p-vlas))
+            (append dims
+              (list (list (lit decl) name (%cc-p-pointer-to t)
+                      (list (lit cast) (%cc-p-pointer-to t)
+                        (list (lit valloc)
+                          (list (lit bin) "*" (%cc-p-vla-product vars)
+                            (list (lit num) (c-type-size t) (lit long))))))))))))
+    (let ((go (fn (self ds) (if (null? ds) () (append (one (first ds)) (self (rest ds)))))))
+      (go ds))))
+
+; after a variable-length array's NAME, the [ ]s that go into it: (NODE .
+; rest), NODE a pointer into it while dimensions are left, else an element;
+; a chain that ends on an array is %cc-p-vla-last's, for sizeof
+(def %cc-p-vla-chain
+  (fn (_ entry ts)
+    (def t (first (rest (rest entry))))
+    (def param? (first (rest (rest (rest entry)))))
+    (def go
+      (fn (self node dims ts indexed?)
+        (if (if (null? dims) #t (not (%cc-p-op? ts "[")))
+          (do (if (if (null? dims) #t (if param? (not indexed?) #f)) ()
+                (set! %cc-p-vla-last
+                  (pair node (list (lit bin) "*" (%cc-p-vla-product dims)
+                               (list (lit num) (c-type-size t) (lit long))))))
+              (pair node ts))
+          (let ((ir (%cc-e-comma (rest ts))))
+            (def after (%cc-p-eat (rest ir) "]"))
+            (if (null? (rest dims))
+              (self (list (lit idx) node (first ir)) () after #t)
+              (self (list (lit bin) "+" node
+                      (list (lit bin) "*" (first ir) (%cc-p-vla-product (rest dims))))
+                (rest dims) after #t))))))
+    (go (list (lit var) (first entry)) (first (rest entry)) ts #f)))
+
+; a type name, where no variable-length array may stand
+(def %cc-p-type-name
+  (fn (_ toks) (%cc-p-no-vla (fn (_) (%cc-p-type-name-in toks)))))
 
 ; a type name, as a cast or sizeof takes it: TYPE, then [N]... for an
 ; array, (*)[N]... for a pointer to one, or (*)(params) for a pointer to a
 ; function, (fnptr RET) with TYPE its RET and the parameters' types not
 ; kept, as a declarator's.  (C-TYPE . rest)
-(def %cc-p-type-name
+(def %cc-p-type-name-in
   (fn (_ toks)
     (def tr (%cc-p-c-type toks))
     (def ts (rest tr))
@@ -651,7 +821,10 @@
 
 (def %cc-e-postfix
   (fn (_ toks)
-    (def r (%cc-e-primary toks))
+    (def r0 (%cc-e-primary toks))
+    ; a variable-length array's name takes its [ ]s first
+    (def entry (if (eq? (first (first r0)) (lit var)) (%cc-p-vla-find (first (rest (first r0)))) ()))
+    (def r (if (null? entry) r0 (%cc-p-vla-chain entry (rest r0))))
     (def go
       (fn (self ast ts)
         (if (%cc-p-op? ts "[")
@@ -713,8 +886,11 @@
                         (let ((tr (%cc-p-type-name (rest (rest toks)))))
                           (pair (list (lit num) (c-type-size (first tr)) (lit ulong))
                             (%cc-p-eat (rest tr) ")")))
-                        (let ((r (self (rest toks))))
-                          (pair (list (lit szof) (first r)) (rest r))))
+                        (let ((r (do (set! %cc-p-vla-last ()) (self (rest toks)))))
+                          ; a variable-length array's size is worked out as it runs
+                          (if (if (null? %cc-p-vla-last) #f (eq? (first %cc-p-vla-last) (first r)))
+                            (pair (list (lit cast) (lit ulong) (rest %cc-p-vla-last)) (rest r))
+                            (pair (list (lit szof) (first r)) (rest r)))))
                       (if (%cc-cast? toks)
                         (let ((tr (%cc-p-type-name (rest toks))))
                           (def after (%cc-p-eat (rest tr) ")"))
@@ -1147,7 +1323,7 @@
                 (pair (pair name (pair (round-up (bytes bits) align) (reverse fields)))
                   %cc-p-structs))
               (rest ts))
-          (let ((r (%cc-p-field-line ts)))
+          (let ((r (%cc-p-no-vla (fn (_) (%cc-p-field-line ts)))))
             (def lay
               (fn (self2 ds b a fs)
                 (if (null? ds) (list b a fs)
@@ -1225,7 +1401,8 @@
           (let ((c (%cc-e-comma (%cc-p-eat (rest toks) "("))))
             (%cc-p-no-literals 0 "a while loop's condition")
             (def b (%cc-p-stmt (%cc-p-eat (rest c) ")")))
-            (pair (list (lit while) (first c) (first b)) (rest b)))
+            (pair (%cc-p-vla-loop (first b) (fn (_ body) (list (lit while) (first c) body)))
+              (rest b)))
           (if (%cc-p-kw? toks (lit do))
             (let ((b (%cc-p-stmt (rest toks))))
               (if (not (%cc-p-kw? (rest b) (lit while)))
@@ -1233,13 +1410,15 @@
                 (let ((c (%cc-e-comma
                            (%cc-p-eat (rest (rest b)) "("))))
                   (%cc-p-no-literals 0 "a do loop's condition")
-                  (pair (list (lit do) (first b) (first c))
+                  (pair (%cc-p-vla-loop (first b) (fn (_ body) (list (lit do) body (first c))))
                     (%cc-p-eat (%cc-p-eat (rest c) ")") ";")))))
             (if (%cc-p-kw? toks (lit for))
               (let ((ts (%cc-p-eat (rest toks) "(")))
                 ; C99's declaration in place of the first expression:
                 ; (DECLS . rest past its ;), its scope the loop's own block
-                (def d-r (if (%cc-p-c-type-start? ts) (%cc-p-decl-line ts) ()))
+                (def d-r (if (%cc-p-c-type-start? ts)
+                           (let ((r (%cc-p-local-line ts))) (pair (%cc-p-local-decls (first r)) (rest r)))
+                           ()))
                 (def i-r
                   (match
                     ((not (null? d-r)) (pair () ()))
@@ -1256,7 +1435,9 @@
                     (%cc-e-comma ts3)))
                 (%cc-p-no-literals n "a for loop's condition or step")
                 (def b (%cc-p-stmt (%cc-p-eat (rest u-r) ")")))
-                (def loop (list (lit for) (first i-r) (first c-r) (first u-r) (first b)))
+                (def loop
+                  (%cc-p-vla-loop (first b)
+                    (fn (_ body) (list (lit for) (first i-r) (first c-r) (first u-r) body))))
                 (pair
                   (if (null? d-r) loop (list (lit block) (append (first d-r) (list loop))))
                   (rest b)))
@@ -1280,11 +1461,12 @@
                         (if (%cc-p-declares-nothing? toks)
                           (pair (list (lit block) ()) (%cc-p-declare-nothing toks))
                         (if (%cc-p-c-type-start? toks)
-                          (let ((r (%cc-p-decl-line toks)))
+                          (let ((r (%cc-p-local-line toks)))
                             (pair (pair (lit decls)
-                                    (if (%cc-p-static? toks)
-                                      (map (fn (_ d) (append d (list (lit static)))) (first r))
-                                      (first r)))
+                                    (%cc-p-local-decls
+                                      (if (%cc-p-static? toks)
+                                        (map (fn (_ d) (append d (list (lit static)))) (first r))
+                                        (first r))))
                               (rest r)))
                           (let ((r (%cc-e-comma toks)))
                             (pair (list (lit expr) (first r))
@@ -1339,10 +1521,13 @@
 ; { ... }: statements and declarations, decls flattened in
 (set! %cc-p-block
   (fn (_ toks)
+    ; the variable-length arrays declared in the block end with it
+    (def saved %cc-p-vlas)
     (def go
       (fn (self ts acc)
         (if (%cc-p-op? ts "}")
-          (pair (list (lit block) (reverse acc)) (rest ts))
+          (do (set! %cc-p-vlas saved)
+              (pair (list (lit block) (reverse acc)) (rest ts)))
           (if (null? ts)
             (%cc-p-err "expected }")
             (let ((r (%cc-p-stmt ts)))
@@ -1358,6 +1543,7 @@
 ; arguments past the fixed ones (%cc-p-va-handed).
 (def %cc-p-params
   (fn (_ toks)
+    (set! %cc-p-param-vlas ())
     (if (%cc-p-op? toks ")")
       (pair (pair () ()) (rest toks))
       (if (if (%cc-p-kw? toks (lit void)) (%cc-p-op? (rest toks) ")") #f)
@@ -1373,15 +1559,27 @@
               (def head
                 (if (if (%cc-p-op? (rest sr) ",") #t (%cc-p-op? (rest sr) ")"))
                   (pair "" sr)
-                  (%cc-p-declarator-head (rest tr) (first tr))))
+                  (do (set! %cc-p-vla-ok? #t)
+                      (let ((h (%cc-p-declarator-head (rest tr) (first tr))))
+                        (set! %cc-p-vla-ok? #f)
+                        h))))
               (let ((name (first head)))
                 ; a parameter declared an array is a pointer to its
-                ; element, as C adjusts it
+                ; element, as C adjusts it; one whose element is a
+                ; variable-length array is a pointer to what is past its
+                ; dimensions, which index it as they run
                 (def c-type
                   (let ((k (first (rest head))))
-                    (if (if (pair? k) (eq? (first k) (lit array)) #f)
-                      (%cc-p-pointer-to (first (rest (rest k))))
-                      k)))
+                    (match
+                      ((%cc-p-vla? k)
+                        (let ((shape (%cc-p-vla-shape (%cc-p-array-elem k))))
+                          (set! %cc-p-param-vlas
+                            (pair (list name (pair (list (lit num) 0 (lit long)) (first shape))
+                                    (rest shape) #t)
+                              %cc-p-param-vlas))
+                          (%cc-p-pointer-to (rest shape))))
+                      ((%cc-p-array? k) (%cc-p-pointer-to (%cc-p-array-elem k)))
+                      (#t k))))
                 (def ts3 (rest (rest head)))
                 (if (%cc-p-op? ts3 ",")
                   (go (rest ts3) (pair name names) (pair c-type c-types))
@@ -1544,6 +1742,9 @@
     (set! %cc-p-anon 0)
     (set! %cc-p-literals ())
     (set! %cc-p-nliterals 0)
+    (set! %cc-p-vla-ok? #f)
+    (set! %cc-p-vlas ())
+    (set! %cc-p-nvla 0)
     (set! %cc-p-file-scope? #f)
     (def go
       (fn (self ts acc)
@@ -1569,6 +1770,7 @@
                       (if (%cc-p-op? (rest pr) ";")
                         (self (rest (rest pr)) acc)
                         (let ((b (do (set! %cc-p-function (%cc-p-c-name name))
+                                     (set! %cc-p-vlas %cc-p-param-vlas)
                                      (%cc-p-block (%cc-p-eat (rest pr) "{")))))
                           ; (fun NAME PARAMS BODY C-TYPES RET-C-TYPE)
                           (self (rest b)

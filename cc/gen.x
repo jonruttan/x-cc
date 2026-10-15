@@ -1556,6 +1556,9 @@
         ((if (eq? t (lit var)) (%cc-gen-stream? (first (rest node))) #f)
           (list (lit ptr) (lit void)))
         ((eq? t (lit va-here)) (list (lit ptr) (lit char)))
+        ((eq? t (lit valloc)) (list (lit ptr) (lit void)))
+        ((eq? t (lit vmark)) (lit long))
+        ((eq? t (lit vreset)) (lit void))
         ((eq? t (lit var)) (%cc-gen-place-c-type (%cc-gen-place-of (first (rest node)))))
         ((eq? t (lit num)) (%cc-gen-num-c-type node))
         ((eq? t (lit szof)) (lit ulong))
@@ -1707,6 +1710,19 @@
       (match
         ((eq? t (lit num)) (%cc-gen-const-c-type! (first (rest node)) (%cc-gen-num-c-type node)))
         ((eq? t (lit str)) (%cc-gen-string-at! (first (rest node))))
+        ; a variable-length array's room, taken off the frame stack below
+        ; this frame, sixteen-aligned; the frame stack's top, marked and put
+        ; back for a loop that takes it each time round (cc/parse)
+        ((eq? t (lit valloc))
+          (do (self (first (rest node)))
+              (%cc-gen! (lit add) x0 x0 (imm 15))
+              (%cc-gen! (lit mov) x2 (imm 4))
+              (%cc-gen! (lit lsrv) x0 x0 x2)
+              (%cc-gen! (lit lslv) x0 x0 x2)
+              (%cc-gen! (lit sub) x20 x20 x0)
+              (%cc-gen! (lit mov) x0 x20)))
+        ((eq? t (lit vmark)) (%cc-gen! (lit mov) x0 x20))
+        ((eq? t (lit vreset)) (do (self (first (rest node))) (%cc-gen! (lit mov) x20 x0)))
         ((eq? t (lit szof))
           (%cc-gen-const-c-type! (c-type-size (%cc-gen-c-type-of (first (rest node)))) (lit ulong)))
         ; a function's name, or & of it, is its address
@@ -2270,9 +2286,10 @@
 ; itself.  The pointer's C type names no parameters, so each argument's own
 ; C type lays it out, an array going as a pointer.  The address waits on
 ; the stack under the arguments and is taken into x19 last, every argument
-; register being spoken for; x19 is the frame's base, which equals x20
-; between calls, so it is put back from x20 once the callee returns.  It
-; answers what the pointer's RET says, a struct into the call's own slot.
+; register being spoken for; x19, the frame's base, waits under it and is
+; put back once the callee returns, x20 being lower when a variable-length
+; array has taken room.  It answers what the pointer's RET says, a struct
+; into the call's own slot.
 (def %cc-gen-call-through!
   (fn (_ node target0 args)
     ; * of a pointer to a function is the function, which is the pointer
@@ -2297,7 +2314,8 @@
              (let ((ak (%cc-gen-c-type-of a)))
                (if (%cc-gen-array? ak) (list (lit ptr) (c-type-elem ak)) ak)))
         args))
-    (do (%cc-gen-expr! target)
+    (do (asm-push! %cc-gen-asm x19)
+        (%cc-gen-expr! target)
         (asm-push! %cc-gen-asm x0)
         (%cc-gen-call-laid! node args c-types (%cc-gen-struct? (first (rest k)))
           (fn (_) ())
@@ -2305,7 +2323,7 @@
             (do (asm-pop! %cc-gen-asm x19)
                 (%cc-gen! (lit add) x19 x19 (imm %cc-gen-thunk-direct))
                 (%cc-gen! (lit blr) x19)
-                (%cc-gen! (lit mov) x19 x20)))))))
+                (asm-pop! %cc-gen-asm x19)))))))
 
 (def %cc-gen-call-fun!
   (fn (_ node)
@@ -2989,6 +3007,9 @@
     ; falling off the end answers 0, which is what C says of main
     (%cc-gen-const! 0)
     (asm-label! %cc-gen-asm %cc-gen-epilogue)
+    ; the frame stack's top back at this frame's base, below which a
+    ; variable-length array may have taken room, then above the frame
+    (%cc-gen! (lit mov) x20 x19)
     (%cc-gen-step-x20! (lit add) frame)
     (asm-pop! %cc-gen-asm x19)
     (if (null? %cc-gen-link) () (asm-pop! %cc-gen-asm %cc-gen-link))
