@@ -264,7 +264,12 @@ item, and the next plain one follows it; a list with any is laid out in
 full, each place none names a zero.  A compound literal, `(TYPE){…}`, is
 an object made where its statement starts, then used as any variable is;
 one in a loop's condition or step, or in a global's initializer, is
-refused by name.
+refused by name.  A variable-length array, `T a[n][m]`, takes its
+dimensions once where it is declared and its room then off the stack;
+its [ ]s and sizeof work from those dimensions as it runs, a parameter
+`T m[n][n]` indexes by its own, and a loop whose body declares one takes
+the room back at the top of each time round.  One at file scope, in a
+struct, a typedef or a cast, with an initializer, or static is refused.
 
 Enums fold at parse time (`enum { A, B = 1 << 3, C }` -- constant
 expressions, counting on from the last; the C type is a scalar; `case

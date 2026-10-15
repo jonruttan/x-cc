@@ -1200,6 +1200,16 @@
         (let ((v (%cc-k-a node)))
           (pair (if (null? (rest (rest node))) (lit int) (%cc-k-b node)) (fn (_ fp) v))))
       ((eq? t (lit var)) (%cc-k-var (%cc-k-a node)))
+      ; a variable-length array's room, off the stack as it runs, and the
+      ; stack's top marked and put back for a loop that takes it each time
+      ; round (cc/parse)
+      ((eq? t (lit valloc))
+        (let ((f (rest (%cc-k-expr (%cc-k-a node)))))
+          (pair (list (lit ptr) (lit void)) (fn (_ fp) (%cc-alloca (f fp))))))
+      ((eq? t (lit vmark)) (pair (lit long) (fn (_ fp) %cc-sp)))
+      ((eq? t (lit vreset))
+        (let ((f (rest (%cc-k-expr (%cc-k-a node)))))
+          (pair (lit void) (fn (_ fp) (set! %cc-sp (f fp))))))
       ((eq? t (lit str))
         (let ((text (%cc-k-a node)))
           (def a (%cc-intern text))
