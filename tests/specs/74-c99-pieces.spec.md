@@ -4,10 +4,11 @@
 C99's and C11's smaller pieces: a variadic macro, its arguments past the
 named ones as `__VA_ARGS__`; `__func__`, the name of the function it is
 in; `inline` and `restrict`, which change nothing here; `_Static_assert`
-at file scope and in a block, and `<assert.h>`'s `static_assert`.  The
-case runs under `run`, then compiled, and shows both outputs and both
-statuses; the expectation is what the same source prints through
-/usr/bin/cc, on macOS and on glibc alike.
+at file scope and in a block, and `<assert.h>`'s `static_assert`; a
+hexadecimal floating constant.  Each case runs under `run`, then
+compiled, and shows both outputs and both statuses; the expectation is
+what the same source prints through /usr/bin/cc, on macOS and on glibc
+alike.
 
 ## C99 and C11
 
@@ -43,4 +44,24 @@ helper(4), 10 -> 10
 ---
 ```output
 cc: parse: line 1: static assertion failed: int is two bytes
+```
+
+### hexadecimal floating constants, a float's and a global table's among them
+
+`0x1.8p3` is 1.5 times 2 to the 3rd: a hex fraction and a `p` exponent of
+decimal digits, the Lexer's number rule reading it whole and the C
+library's strtod its value.  A hex integer, `e` among its digits, stays an
+integer.
+
+```cc
+(def src "#include <stdio.h>\nstatic const double table[] = { 0x1.8p3, 0x.8p-1, 0X1P+4, 0x1.p2 };\nint main(void) {\n  float f = 0x1.4p1f;\n  double sum = 0;\n  for (int i = 0; i < 4; i++) sum += table[i];\n  printf(\"%.4f %.4f %.4f %.4f\\n\", table[0], table[1], table[2], table[3]);\n  printf(\"%.3f %.2f %d %d\\n\", sum, f, (int)(0x1p10 + 0x1e), 0x1e);\n  return (int)sum;\n}\n")
+(display (list (cc-run src) (cc-exe-run src)))
+```
+---
+```output
+12.0000 0.2500 16.0000 4.0000
+32.250 2.50 1054 30
+12.0000 0.2500 16.0000 4.0000
+32.250 2.50 1054 30
+(32 32)
 ```
