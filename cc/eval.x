@@ -24,8 +24,8 @@
 (module cc/eval)
 
 (import cc/prims append byte-at byte-len length
-  map mem-make mem-ptr mem-ref-at mem-set-at! ptr-int reverse string-append
-  string-concat string=? substring x-write fx+ fx- fx* fx< fx<< fx>>
+  map mem-make mem-ptr mem-ref-at mem-set-at! ptr-int reverse set-first! string-append
+  string-concat string=? substring x-write fx+ fx- fx* fx< fx<< fx>> fx& fx| fx^
   mem-fill! int-ptr heap-count heap-collect evals)
 (import cc/pp cc-lex)
 (import cc/parse cc-parse c-type-size plain-char round-up struct-entry struct-table)
@@ -335,14 +335,24 @@
 (def %cc-eval-mark 0)   ; the evaluations counted when it ran
 (def %cc-in-library 0)  ; callbacks the C library is making now
 
+; Reading the evaluation count costs about a thousand evaluations of its
+; own, as much as the rest of a loop's pass, so it is read only every
+; %cc-tick-every times the check is reached; a collection is then due at
+; most that many passes late.
+(def %cc-ticks 0)
+(def %cc-tick-every 64)
+
 (def %cc-collect?
   (fn (_)
-    (if (fx< 0 %cc-in-library) ()
-      (if (fx< (fx+ %cc-eval-mark %cc-heap-mark) (evals))
-        (do (heap-collect)
-            (set! %cc-heap-mark (heap-count))
-            (set! %cc-eval-mark (evals)))
-        ()))))
+    (set! %cc-ticks (fx+ %cc-ticks 1))
+    (if (fx< %cc-ticks %cc-tick-every) ()
+      (do (set! %cc-ticks 0)
+          (if (fx< 0 %cc-in-library) ()
+            (if (fx< (fx+ %cc-eval-mark %cc-heap-mark) (evals))
+              (do (heap-collect)
+                  (set! %cc-heap-mark (heap-count))
+                  (set! %cc-eval-mark (evals)))
+              ()))))))
 
 ; stack bytes, zero-filled, eight-aligned; answers the base address
 (def %cc-alloca
@@ -909,16 +919,26 @@
   (fn (_ k)
     (if (%cc-bits? k) (fn (_ a) (%cc-bits-read a k))
       (let ((w (%cc-width k)))
+        ; %cc-raw-ref's check and read, here, so a read is one call
         (if (if (signed? k) (< w 8) #f)
-          (fn (_ a) (%cc-sext (%cc-raw-ref a w) w))
-          (fn (_ a) (%cc-raw-ref a w)))))))
+          ; the sign bit's value and the width's span, worked out once
+          (let ((top (fx<< 1 (fx- (fx* 8 w) 1))) (span (fx<< 1 (fx* 8 w))))
+            (fn (_ a)
+              (if (fx< a 4096) (%cc-oops "a read through a null pointer"))
+              (def v (mem-ref-at %cc-memp (fx- a %cc-base) w))
+              (if (fx< v top) v (fx- v span))))
+          (fn (_ a)
+            (if (fx< a 4096) (%cc-oops "a read through a null pointer"))
+            (mem-ref-at %cc-memp (fx- a %cc-base) w)))))))
 
 ; a write of a K at an address
 (def %cc-k-store
   (fn (_ k)
     (if (%cc-bits? k) (fn (_ a v) (%cc-bits-write! a v k))
       (let ((w (%cc-width k)))
-        (fn (_ a v) (%cc-raw-set! a v w))))))
+        (fn (_ a v)
+          (if (fx< a 4096) (%cc-oops "a write through a null pointer"))
+          (mem-set-at! %cc-memp (fx- a %cc-base) v w))))))
 
 ; V converted to K as a cast does (%cc-convert)
 (def %cc-k-conv
@@ -931,8 +951,9 @@
             (if (>= w 8) %cc-id
               (let ((m (- (<< 1 (* 8 w)) 1)))
                 (if (signed? k)
-                  (fn (_ v) (%cc-sext (& v m) w))
-                  (fn (_ v) (& v m))))))))))
+                  (let ((top (fx<< 1 (fx- (fx* 8 w) 1))) (span (fx<< 1 (fx* 8 w))))
+                    (fn (_ v) (def u (fx& v m)) (if (fx< u top) u (fx- u span))))
+                  (fn (_ v) (fx& v m))))))))))
 
 ; V of the C type FROM as TO takes it (%cc-convert-from)
 (def %cc-k-from
@@ -986,7 +1007,7 @@
         (pair k
           (match
             ((eq? (first p) (lit local))
-              (if (%cc-c-type-decays? k) (fn (_ fp) (+ fp at)) (fn (_ fp) (ld (+ fp at)))))
+              (if (%cc-c-type-decays? k) (fn (_ fp) (fx+ fp at)) (fn (_ fp) (ld (fx+ fp at)))))
             ((%cc-c-type-decays? k) (fn (_ fp) at))
             (#t (fn (_ fp) (ld at)))))))))
 
@@ -1021,14 +1042,14 @@
       ((string=? op "*") fx*)
       ((string=? op "/") (if wide? (fn (_ x y) (%cc-udiv x y #f)) (fn (_ x y) (%cc-div x y))))
       ((string=? op "%") (if wide? (fn (_ x y) (%cc-udiv x y #t)) (fn (_ x y) (%cc-mod x y))))
-      ((string=? op "&") (fn (_ x y) (& x y)))
-      ((string=? op "|") (fn (_ x y) (| x y)))
-      ((string=? op "^") (fn (_ x y) (^ x y)))
-      ((string=? op "<<") (fn (_ x y) (<< x y)))
+      ((string=? op "&") fx&)
+      ((string=? op "|") fx|)
+      ((string=? op "^") fx^)
+      ((string=? op "<<") fx<<)
       ((string=? op ">>")
         (if wide?
           (fn (_ x y) (if (if (< x 0) (> y 0) #f) (& (>> x y) (- (<< 1 (- 64 y)) 1)) (>> x y)))
-          (fn (_ x y) (>> x y))))
+          fx>>))
       (#t (fn (_ x y) (%cc-oops "unknown operator"))))))
 
 ; OP on the values of FA and FB, of the C types KA and KB, as C does it: both
@@ -1045,10 +1066,17 @@
       ((if shift? (real? kb) #f)
         (fn (_ fp) (%cc-oops (string-append "the operator " op " by a floating value"))))
       (#t
+        ; an operand already of K is already its range, and goes in as it
+        ; is; the answer is cut to K's width
         (let ((c (%cc-k-conv k)) (g (%cc-k-int-op op k)))
-          (if shift?
-            (fn (_ fp) (def x (c (fa fp))) (c (g x (fb fp))))
-            (fn (_ fp) (def x (c (fa fp))) (c (g x (c (fb fp)))))))))))
+          (match
+            (shift?
+              (if (eq? ka k)
+                (fn (_ fp) (def x (fa fp)) (c (g x (fb fp))))
+                (fn (_ fp) (def x (c (fa fp))) (c (g x (fb fp))))))
+            ((if (eq? ka k) (eq? kb k) #f)
+              (fn (_ fp) (def x (fa fp)) (c (g x (fb fp)))))
+            (#t (fn (_ fp) (def x (c (fa fp))) (c (g x (c (fb fp))))))))))))
 
 ; a comparison OP in the integer C type K: an unsigned long compares with its
 ; top bit flipped, which is unsigned order
@@ -1068,8 +1096,18 @@
     (if (real? k)
       (let ((ca (%cc-k-from ka k)) (cb (%cc-k-from kb k)))
         (fn (_ fp) (def x (ca (fa fp))) (%cc-b (real-compare op x (cb (fb fp)) k))))
-      (let ((c (%cc-k-conv k)) (flip (if (eq? k (lit ulong)) (<< 1 63) 0)) (t (%cc-k-cmp-op op)))
-        (fn (_ fp) (def x (^ (c (fa fp)) flip)) (%cc-b (t x (^ (c (fb fp)) flip))))))))
+      ; an operand already of K is already its range -- a load, a constant,
+      ; an operation's answer -- so it compares as it is; an unsigned long
+      ; compares with its top bit flipped, which is unsigned order
+      (let ((t (%cc-k-cmp-op op)))
+        (match
+          ((eq? k (lit ulong))
+            (let ((c (%cc-k-conv k)) (flip (fx<< 1 63)))
+              (fn (_ fp) (def x (fx^ (c (fa fp)) flip)) (%cc-b (t x (fx^ (c (fb fp)) flip))))))
+          ((if (eq? ka k) (eq? kb k) #f)
+            (fn (_ fp) (def x (fa fp)) (%cc-b (t x (fb fp)))))
+          (#t (let ((c (%cc-k-conv k)))
+                (fn (_ fp) (def x (c (fa fp))) (%cc-b (t x (c (fb fp))))))))))))
 
 ; a unary operator: * reads, & is the place's address, and - ~ ! in the
 ; operand's C type, promoted
@@ -1271,7 +1309,7 @@
           (match
             ((null? p) (%cc-oops (string-append "undefined: " (%cc-k-a node))))
             ((eq? (first p) (lit local))
-              (let ((off (first (rest p)))) (pair (rest (rest p)) (fn (_ fp) (+ fp off)))))
+              (let ((off (first (rest p)))) (pair (rest (rest p)) (fn (_ fp) (fx+ fp off)))))
             (#t (let ((a (first (rest p)))) (pair (rest (rest p)) (fn (_ fp) a)))))))
       ; A[I] is at A + I, and C lets either be the address
       ((eq? t (lit idx))
@@ -1282,7 +1320,7 @@
           (def f (%cc-k-field (first l) (%cc-k-b node)))
           (def off (first f))
           (def fa (rest l))
-          (pair (rest f) (fn (_ fp) (+ (fa fp) off)))))
+          (pair (rest f) (fn (_ fp) (fx+ (fa fp) off)))))
       ((eq? t (lit arrow))
         (let ((e (%cc-k-expr (%cc-k-a node))))
           (def f (%cc-k-field (c-type-elem (first e)) (%cc-k-b node)))
@@ -1665,9 +1703,23 @@
 (def %cc-k-ccall-call
   (fn (_ name ks fs)
     (def cs (%cc-k-arg-convs name ks))
+    ; what the name calls, found at the first call and kept: the
+    ; function's translation, or the library
+    (def cell (pair () ()))
     (pair (%cc-k-named-c-type name)
       (fn (_ fp next)
-        (%cc-k-cargs fs fp (fn (_ vs) (%cc-call-k name (%cc-k-conv-all cs vs) next)))))))
+        (%cc-k-cargs fs fp (fn (_ vs) (%cc-call-at cell name (%cc-k-conv-all cs vs) next)))))))
+
+; NAME called with ARGS, then NEXT with what it answers, through CELL, a
+; call site's: the function's translation or the library, looked up once
+(def %cc-call-at
+  (fn (_ cell name args next)
+    (if (null? (first cell))
+      (set-first! cell (if (null? (%cc-fun name)) (lit library) (%cc-k-fun name))))
+    (def t (first cell))
+    (if (eq? t (lit library))
+      (next (%cc-call-library name args))
+      (%cc-call-tr name t args next))))
 
 ; a call through a value: the function first, then the arguments
 (def %cc-k-ccall-through
@@ -2080,9 +2132,12 @@
 ; with the rest of the call as its continuation, so the caller waits on the
 ; heap, not on x's stack
 (def %cc-call-fun
-  (fn (_ name args next)
+  (fn (_ name args next) (%cc-call-tr name (%cc-k-fun name) args next)))
+
+; the function NAME, translated as TR, called with ARGS
+(def %cc-call-tr
+  (fn (_ name tr args next)
     (%cc-collect?)
-    (def tr (%cc-k-fun name))
     (def saved-sp %cc-sp)
     (def n (first (rest (rest (rest (rest tr))))))
     (if (if (null? n) #f (fx< (length args) n))
@@ -2117,7 +2172,9 @@
     ; (return V C-TYPE): V in the C type the function answers
     (def v
       (if (%cc-ctrl? c (lit return))
-        (%cc-convert-from (first (rest c)) (first (rest (rest c))) ret)
+        ; a value already of RET is already in its range
+        (let ((k (first (rest (rest c)))))
+          (if (eq? k ret) (first (rest c)) (%cc-convert-from (first (rest c)) k ret)))
         0))
     (set! %cc-sp saved-sp)
     (next (if (%cc-struct-c-type? ret) (%cc-moved-out v (c-type-size ret)) v))))
