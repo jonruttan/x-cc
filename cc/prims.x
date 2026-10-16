@@ -72,8 +72,8 @@
 (def mem-ref-byte (fn (_ p i) (%cc-ptr-ref p i 1)))
 ; W bytes at an offset, W one of 1 2 4 8; a read is zero-extended, so a
 ; signed type sign-extends it itself
-(def mem-ref-at (fn (_ p i w) (%cc-ptr-ref p i w)))
-(def mem-set-at! (fn (_ p i v w) (%cc-ptr-set p i v w)))
+(def mem-ref-at %cc-ptr-ref)
+(def mem-set-at! %cc-ptr-set)
 ; N bytes from a pointer, each set to B: one C memset
 (def mem-fill! (prim-ref (lit mem) (lit set)))
 ; an address as a pointer
@@ -83,8 +83,8 @@
 ; of what is not live; there is no automatic one
 (def heap-count (fn (_) (Heap count)))
 (def heap-collect (fn (_) (Heap collect)))
-; the evaluations the engine has made, a counter it keeps: a clock read in
-; constant time
+; the evaluations the engine has made, a counter it keeps: a clock that does
+; not grow with the heap, though a read costs about a thousand evaluations
 (def evals (fn (_) (eval-count)))
 
 ; The engine's integer prims, for what run does at every step: an address,
@@ -100,6 +100,10 @@
 (def fx< (prim-ref (lit int) (lit <)))
 (def fx<< (prim-ref (lit int) (lit <<)))
 (def fx>> (prim-ref (lit int) (lit >>)))
+(def fx& (prim-ref (lit int) (lit &)))
+(def fx| (prim-ref (lit int) (lit |)))
+; there is no exclusive or among them: the bits in either but not both
+(def fx^ (fn (_ x y) (fx- (fx| x y) (fx& x y))))
 
 ; the first N bytes of a buffer, digested
 (def sha256-hex-n (fn (_ s n) (Sha256 hex-n s n)))
@@ -141,6 +145,8 @@
   vec-make vec-ref vec-set!
   mem-make mem-ptr ptr-int word-ref word-set! mem-set-byte! mem-ref-byte
   mem-ref-at mem-set-at! mem-fill! int-ptr heap-count heap-collect evals fx+ fx- fx* fx< fx<< fx>>
+  fx& fx| fx^
+  fx& fx| fx^
   file-close file-open-read file-read file-read-all file-seek file-exists? file-write
   file-write-exec!
   sha256-hex-n sha256-jit! proc-capture
