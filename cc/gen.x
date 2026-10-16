@@ -605,6 +605,8 @@
 ; (OFFSET . C-TYPE) of the field FNAME of the struct C type K
 (def %cc-gen-field
   (fn (_ k fname)
+    (if (not (%cc-gen-struct? k))
+      (%cc-gen-no (string-append "the field " fname " of something that is not a struct")))
     (def entry (struct-entry (first (rest k))))
     (if (null? entry) (%cc-gen-no (string-append "the struct " (first (rest k)))))
     (def go
