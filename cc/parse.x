@@ -33,7 +33,7 @@
 (module cc/parse)
 
 (import cc/prims append byte-at byte-len convert length map reverse set-first! string-append
-  string=? substring)
+  string=? substring heap-collect)
 
 ; The type handle this file asks convert for, fetched by name through the
 ; platform's public door and private to this module.
@@ -377,6 +377,20 @@
               ((string=? op "|")  (| a b))
               ((string=? op "^")  (^ a b))
               (#t (no)))))
+        ; a cast to an integer narrower than a long wraps to its width
+        ((eq? t (lit cast))
+          (let ((k (arg 1)))
+            (def v (self (arg 2)))
+            (match
+              ((eq? k (lit bool)) (b01 (not (= v 0))))
+              ((if (eq? k (lit long)) #t (if (eq? k (lit ulong)) #t (pair? k))) v)
+              ((if (eq? k (lit double)) #t (eq? k (lit float))) (no))
+              (#t
+                (let ((m (<< 1 (* 8 (c-type-size k)))))
+                  (def w (& v (- m 1)))
+                  (if (if (eq? k (lit uchar)) #f (if (eq? k (lit ushort)) #f (if (eq? k (lit uint)) #f (>= w (/ m 2)))))
+                    (- w m)
+                    w))))))
         (#t (no))))))
 
 ; what follows the first N of a list
@@ -420,6 +434,15 @@
 (def %cc-p-fnptr-start?
   (fn (_ toks)
     (if (%cc-p-op? toks "(") (%cc-p-op? (rest toks) "*") #f)))
+
+; a declarator's name in parentheses, `int (NAME) (...)`, as lua.h writes
+; its prototypes to keep a function-like macro of that name from expanding:
+; TOKS with the parentheses dropped
+(def %cc-p-unparen
+  (fn (_ toks)
+    (if (if (%cc-p-op? toks "(") (if (%cc-p-id? (rest toks)) (%cc-p-op? (rest (rest toks)) ")") #f) #f)
+      (pair (first (rest toks)) (rest (rest (rest toks))))
+      toks)))
 
 ; a pointer keeps its pointee: arithmetic on it scales by the pointee's size,
 ; `->` needs its fields, and a read through it takes its width
@@ -1059,7 +1082,7 @@
 (def %cc-p-declarator-head
   (fn (_ toks base)
     (def sr (%cc-p-stars base toks))
-    (def ts (rest sr))
+    (def ts (%cc-p-unparen (rest sr)))
     (if (%cc-p-fnptr-start? ts)
       (let ((ts2 (rest (rest ts))))
         (if (not (%cc-p-id? ts2))
@@ -1696,7 +1719,8 @@
 ; `int n = 10;`, or `extern int t[];` before `int t[3] = {...};` -- as one
 ; gdecl at its last declaration: the declaration with an initializer, when
 ; one has one, or the last.  An array whose size no declaration gives is
-; refused here.
+; dropped: `extern const char lua_ident[];` declares what another file
+; defines, and a use of it with no definition fails as an unknown name.
 (def %cc-p-merge-globals
   (fn (_ prog)
     (def gdecl? (fn (_ it) (eq? (first it) (lit gdecl))))
@@ -1728,9 +1752,14 @@
           ((later? (rest its) (name (first its))) (self (rest its) acc))
           (#t (let ((it (let ((d (chosen prog (name (first its)) ()))) (if (null? d) (first its) d))))
                 (if (%cc-p-unsized? (c-type it))
-                  (%cc-p-err "an array without a size needs an initializer"))
-                (self (rest its) (pair it acc)))))))
+                  (self (rest its) acc)
+                  (self (rest its) (pair it acc))))))))
     (go prog ())))
+
+; the declarations read since the last collect, and whether the parse may
+; collect: not with a token list as long as cc/pp's %cc-long live
+(def %cc-p-read 0)
+(def %cc-p-collect? #f)
 
 (def cc-parse
   (fn (_ toks)
@@ -1746,8 +1775,14 @@
     (set! %cc-p-vlas ())
     (set! %cc-p-nvla 0)
     (set! %cc-p-file-scope? #f)
+    ; the lexer's garbage goes before the parse, the parse's every few
+    ; declarations: nothing collects on its own
+    (set! %cc-p-collect? (< (length toks) 20000))
+    (if %cc-p-collect? (heap-collect) ())
     (def go
       (fn (self ts acc)
+        (set! %cc-p-read (+ %cc-p-read 1))
+        (if (< %cc-p-read 32) () (do (set! %cc-p-read 0) (if %cc-p-collect? (heap-collect) ())))
         (if (null? ts)
           (%cc-p-merge-globals (reverse acc))
           (if (%cc-p-hard? ts)
@@ -1757,7 +1792,7 @@
           (if (%cc-p-declares-nothing? ts)
             (self (%cc-p-declare-nothing ts) acc)
             (let ((tr (%cc-p-c-type ts)))
-              (def ts2 (rest tr))
+              (def ts2 (%cc-p-unparen (rest tr)))
               (if (%cc-p-op? ts2 ";")
                 ; `struct S { ... };` -- a definition, nothing declared
                 (self (rest ts2) acc)

@@ -25,7 +25,7 @@
 ; (kw SYM) (op S), a number its value and C type, a literal its bytes.
 (module cc/tokens)
 
-(import cc/prims byte-at byte-len convert length reverse set-first! string-append string=?
+(import cc/prims byte-at byte-len convert length map reverse set-first! string-append string=?
   substring)
 (import x/reader/lexer)
 (import x/num/float Float)
@@ -45,6 +45,14 @@
         "long" "register" "return" "short" "signed" "sizeof" "static"
         "struct" "switch" "typedef" "union" "unsigned" "void" "volatile"
         "while" "_Bool" "inline" "restrict" "_Static_assert"))
+
+; each keyword's symbol, made once: a conversion to a symbol costs more
+; than reading the token, and every keyword token asks for one
+(def %cc-keyword-symbols (map (fn (_ k) (pair k (convert k %symbol))) %cc-keywords))
+(def %cc-keyword-symbol
+  (fn (_ text)
+    (def go (fn (self ks) (if (string=? (first (first ks)) text) (rest (first ks)) (self (rest ks)))))
+    (go %cc-keyword-symbols)))
 
 ; C's punctuators, the longest that matches
 (def %cc-ops
@@ -231,7 +239,7 @@
     (match
       ((eq? tag (lit id)) t)
       ((eq? tag (lit op)) t)
-      ((eq? tag (lit kw)) (list (lit kw) (convert text %symbol)))
+      ((eq? tag (lit kw)) (list (lit kw) (%cc-keyword-symbol text)))
       ((eq? tag (lit num))
         (if (= (first (rest (rest t))) 2) (%cc-real-token text) (%cc-int-token text)))
       ((eq? tag (lit str)) (list (lit str) (%cc-str-bytes text 1)))
