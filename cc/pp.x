@@ -146,25 +146,29 @@
                       (if (if (= c 34) #t (= c 92)) (pair "\\" acc) acc)))))))
     (list (lit str) (go 0 (list "\"")))))
 
-; The body with each parameter replaced by its argument's tokens.  # PARAM is
-; the argument spelled as a string literal, and A ## B pastes: the last
-; token before it and the first after it are one token, read again from
-; their joined text.  No parentheses are added: SQ(a+b) with x*x is
-; a+b*a+b, as in C.
+; The body with each parameter replaced by its argument's tokens: the
+; argument macro-expanded first, from EXPANDED, as C does before it
+; substitutes; the argument as written, from ARGS, beside # and ##.  #
+; PARAM is the argument spelled as a string literal, and A ## B pastes:
+; the last token before it and the first after it are one token, read
+; again from their joined text.  No parentheses are added: SQ(a+b) with
+; x*x is a+b*a+b, as in C.
 (def %cc-subst
-  (fn (_ body params args)
-    ; (TOKENS) for a parameter T, else nil
-    (def arg-of
-      (fn (_ t)
+  (fn (_ body params args expanded)
+    ; (TOKENS) for a parameter T in AS, else nil
+    (def arg-in
+      (fn (_ t as)
         (if (not (%cc-name? t)) ()
           (let ((go (fn (self ps as)
                       (if (null? ps) ()
                         (if (string=? (first ps) (%cc-text t)) (list (first as))
                           (self (rest ps) (rest as)))))))
-            (go params args)))))
-    ; the tokens T stands for: its argument's, or itself
-    (def tokens-of
-      (fn (_ t) (let ((a (arg-of t))) (if (null? a) (list t) (first a)))))
+            (go params as)))))
+    (def arg-of (fn (_ t) (arg-in t args)))
+    ; the tokens T stands for: its argument's, as written or expanded, or
+    ; itself
+    (def tokens-in
+      (fn (_ t as) (let ((a (arg-in t as))) (if (null? a) (list t) (first a)))))
     ; ACC (reversed) with its last token pasted to the first of NEXT
     (def paste
       (fn (_ acc next)
@@ -184,13 +188,17 @@
               ((%cc-op-is? t "##")
                 (let ((after (%cc-skip-sp (rest ts))))
                   (if (null? after) (self after acc)
-                    (self (rest after) (paste acc (tokens-of (first after)))))))
+                    (self (rest after) (paste acc (tokens-in (first after) args))))))
               ((%cc-op-is? t "#")
                 (let ((after (%cc-skip-sp (rest ts))))
                   (def a (if (null? after) () (arg-of (first after))))
                   (if (null? a) (self (rest ts) (pair t acc))
                     (self (rest after) (pair (%cc-stringize (first a)) acc)))))
-              (#t (self (rest ts) (append (reverse (tokens-of t)) acc))))))))
+              ; a parameter before ## is pasted as written
+              (#t
+                (let ((after (%cc-skip-sp (rest ts))))
+                  (def raw? (if (null? after) #f (%cc-op-is? (first after) "##")))
+                  (self (rest ts) (append (reverse (tokens-in t (if raw? args expanded))) acc)))))))))
     (go body ())))
 
 ; A variadic macro's ARGS, as read with their blanks, each trimmed: its N
@@ -245,7 +253,8 @@
                         (Err raise (lit cc) (string-append "cc: wrong argument count for macro " (first m)) ()))
                       (go (rest ar)
                         (append
-                          (reverse (self (%cc-subst (rest (rest (rest m))) params given)
+                          (reverse (self (%cc-subst (rest (rest (rest m))) params given
+                                           (map (fn (_ a) (self a macros open)) given))
                                      macros (pair (first m) open)))
                           acc)))))))))))
     (go ts ())))

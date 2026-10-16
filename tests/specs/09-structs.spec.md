@@ -96,3 +96,13 @@ three bytes of padding, and the struct's size rounds up to four.
 12 1 2 70000 -2
 0
 ```
+
+### -> on a value that is not a struct's address is refused by name when compiled
+
+```cc
+(display (guard (e (e msg)) (cc-exe-run "struct s { struct s *n; };\nint main(void) { struct s a; a.n = &a; return (nosuch(&a))->n != 0; }\n")))
+```
+---
+```output
+cc: compile: not built yet: the field n of something that is not a struct
+```
