@@ -26,8 +26,9 @@
 ; literals joined, as C's translation joins them.
 (module cc/pp)
 
-(import cc/prims append byte-at byte-len convert file-exists? file-read-all filter length map
-  reverse string-append string-concat string=? substring)
+(import cc/prims append byte-at byte-len char->integer convert file-exists? file-read-all filter
+  fx& fx* fx+ fx- fx< heap-collect length map
+  reverse string-append string-concat string=? substring vec-make vec-ref vec-set!)
 (import cc/tokens cc-raw-tokens cc-token)
 (import cc/parse cc-parse-const cc-token-lines! plain-char)
 
@@ -62,20 +63,37 @@
   (fn (_ text)
     (%cc-trim-sp (filter (fn (_ t) (not (%cc-tag? t (lit nl)))) (cc-raw-tokens text)))))
 
+; does LINE, a line's tokens so far, last first, end in a lone backslash
+(def %cc-splice?
+  (fn (_ line)
+    (def l (%cc-skip-sp line))
+    (if (null? l) #f
+      (if (%cc-tag? (first l) (lit bad)) (string=? (%cc-text (first l)) "\\") #f))))
+
 ; the raw tokens split at the newlines: ((N . TOKENS) ...), N the number of
 ; the line a line starts on.  A block comment is a blank, its newlines
 ; counted, so the line after it has its own number.
 (def %cc-lines
   (fn (_ ts)
+    ; the newlines in S, found by Str8's byte search: a comment's every
+    ; byte read here was most of a header's cost
     (def nls
       (fn (_ s)
-        (def end (byte-len s))
-        (def go (fn (self i k) (if (>= i end) k (self (+ i 1) (if (= (byte-at s i) 10) (+ k 1) k)))))
+        (def go
+          (fn (self i k)
+            (def at (Str8 %find-bytes "\n" i s))
+            (if (null? at) k (self (+ at 1) (+ k 1)))))
         (go 0 0)))
     (def go
       (fn (self ts n start line acc)
         (match
           ((null? ts) (reverse (if (null? line) acc (pair (pair start (reverse line)) acc))))
+          ; a backslash right before the newline joins the next line to this
+          ; one, as C splices them before it reads tokens; the backslash
+          ; goes, a blank in its place
+          ((if (%cc-tag? (first ts) (lit nl)) (%cc-splice? line) #f)
+            (self (rest ts) (+ n 1) start
+              (pair (list (lit sp) " ") (rest (%cc-skip-sp line))) acc))
           ((%cc-tag? (first ts) (lit nl))
             (self (rest ts) (+ n 1) (+ n 1) () (pair (pair start (reverse line)) acc)))
           ((%cc-tag? (first ts) (lit cmt))
@@ -95,15 +113,48 @@
   (fn (_ path) (set! %cc-pp-file path)))
 
 ; --- macros ------------------------------------------------------------------
+; The macros, (EXTRA . BUCKETS): EXTRA a short list of entries looked at
+; first -- __LINE__ and __FILE__, which change from line to line -- and
+; BUCKETS a vector of lists of entries, (NAME KIND . BODY), a name's bucket
+; picked by its length and its first and last bytes.  A walk of every macro
+; for every name was most of a header's cost.  A file's walk goes one way,
+; so #define and #undef change the buckets in place, a newer entry in front.
+
+(def %cc-nbuckets 128)
+(def %cc-macros-new (fn (_) (pair () (vec-make %cc-nbuckets ()))))
+(def %cc-bucket
+  (fn (_ name)
+    (def len (byte-len name))
+    (if (fx< len 1) 0
+      (fx& (fx+ (fx* len 31)
+             (fx+ (fx* (char->integer (byte-at name 0)) 7) (char->integer (byte-at name (fx- len 1)))))
+        (fx- %cc-nbuckets 1)))))
+
+; the entry NAME in ES, or nil
+(def %cc-macro-in
+  (fn (self es name)
+    (if (null? es) ()
+      (if (string=? (first (first es)) name) (first es) (self (rest es) name)))))
 
 ; the macro NAME, or nil
 (def %cc-macro
   (fn (_ macros name)
-    (def go
-      (fn (self es)
-        (if (null? es) ()
-          (if (string=? (first (first es)) name) (first es) (self (rest es))))))
-    (go macros)))
+    (def e (%cc-macro-in (first macros) name))
+    (if (null? e) (%cc-macro-in (vec-ref (rest macros) (%cc-bucket name)) name) e)))
+
+; MACROS with the entry E defined, in place
+(def %cc-macro-define!
+  (fn (_ macros e)
+    (def i (%cc-bucket (first e)))
+    (vec-set! (rest macros) i (pair e (vec-ref (rest macros) i)))
+    macros))
+
+; MACROS without NAME, in place
+(def %cc-macro-undef!
+  (fn (_ macros name)
+    (def i (%cc-bucket name))
+    (vec-set! (rest macros) i (filter (fn (_ e) (not (string=? (first e) name))) (vec-ref (rest macros) i)))
+    macros))
 
 (def %cc-member-s?
   (fn (_ s l)
@@ -236,6 +287,8 @@
                 ()))
             (match
               ((null? m) (go (rest ts) (pair t acc)))
+              ((eq? (first (rest m)) (lit line))
+                (go (rest ts) (pair (list (lit num) (convert (first (rest (rest m))) %string) 1) acc)))
               ((eq? (first (rest m)) (lit obj))
                 (go (rest ts)
                   (append (reverse (self (rest (rest m)) macros (pair (first m) open))) acc)))
@@ -341,10 +394,12 @@
     (go width ())))
 
 (def %cc-headers
-  (list (list "stdio.h" "#define EOF (-1)" %cc-null "#define FILE void" %cc-size-t)
+  (list (list "stdio.h" "#define EOF (-1)" %cc-null "#define FILE void" %cc-size-t
+          (if os-darwin? "#define BUFSIZ 1024" "#define BUFSIZ 8192"))
         (list "stdlib.h" %cc-null %cc-size-t "#define EXIT_SUCCESS 0" "#define EXIT_FAILURE 1")
         (list "string.h" %cc-null %cc-size-t)
-        (list "stddef.h" %cc-null %cc-size-t "#define ptrdiff_t long")
+        (list "stddef.h" %cc-null %cc-size-t "#define ptrdiff_t long"
+          "#define offsetof(t, m) ((size_t)&((t *)0)->m)")
         (list "stdarg.h" "#define va_list __builtin_va_list"
           "#define va_start __builtin_va_start" "#define va_arg __builtin_va_arg"
           "#define va_end __builtin_va_end" "#define va_copy __builtin_va_copy")
@@ -612,6 +667,21 @@
 ; tracks its own nesting, so its #endif pairs; its other directives are
 ; not read.  WAIT holds the live lines' tokens, reversed, until the next
 ; directive expands them under the macros as they stand.
+; Collecting: nothing collects on its own, and what a line makes is far
+; more than it leaves, so the walk collects every few thousand tokens out
+; (a line counts as eight).  Only while the tokens made, which lists
+; hold whole, are under %cc-long: the engine marks a list one C frame a
+; pair, and a collect with a list of some 25,000 live can overflow the stack.
+(def %cc-long 20000)
+(def %cc-pp-walked 0)
+(def %cc-pp-made 0)
+(def %cc-pp-collect!
+  (fn (_ n)
+    (set! %cc-pp-walked (fx+ %cc-pp-walked n))
+    (if (fx< %cc-pp-walked 4096) ()
+      (do (set! %cc-pp-walked 0)
+          (if (fx< %cc-pp-made %cc-long) (heap-collect) ())))))
+
 (def %cc-preprocess
   (fn (_ src)
     (set! %cc-pp-lines ())
@@ -621,19 +691,19 @@
     (set! %cc-pp-file "<stdin>")
     (def live?
       (fn (self st) (if (null? st) #t (if (first (first st)) (self (rest st)) #f))))
-    (def undef
-      (fn (_ name macros) (filter (fn (_ e) (not (string=? (first e) name))) macros)))
     ; a conditional's opening entry: off-and-taken under a dead parent
     (def open (fn (_ on v) (if on (pair v v) (pair #f #t))))
-    ; WAIT expanded onto OUT, __LINE__ the number of the line N
+    ; WAIT expanded onto OUT, __LINE__ the number of the line N, spelled
+    ; only where it is met: a conversion to text costs more than a line
     (def flush
       (fn (_ wait n macros out)
         (if (null? wait) out
           (let ((e (%cc-expand (reverse wait)
-                     (pair (list "__LINE__" (lit obj) (list (lit num) (convert n %string) 1))
-                       (pair file-macro macros))
+                     (pair (list (list "__LINE__" (lit line) n) file-macro) (rest macros))
                      ())))
             (def mark (fn (self ts) (if (null? ts) () (do (set! %cc-pp-lines (pair n %cc-pp-lines))
+                                                         (set! %cc-pp-made (fx+ %cc-pp-made 1))
+                                                         (%cc-pp-collect! 1)
                                                          (self (rest ts))))))
             (mark e)
             (append (reverse e) out)))))
@@ -653,6 +723,7 @@
             (%cc-oops "unterminated #if")
             (reverse (flush wait prev macros out)))
           (let ((line (%cc-skip-sp (rest (first ls)))) (n (first (first ls))))
+            (%cc-pp-collect! 8)
             (def on (live? stack))
             (if (if (null? line) #t (not (%cc-op-is? (first line) "#")))
               ; a line break is a blank between the lines' tokens; a line
@@ -696,11 +767,11 @@
                     (self (append (%cc-header-lines (%cc-spell (%cc-no-sp args)) n) (rest ls))
                       n macros stack () out2))
                   ((string=? word "define")
-                    (self (rest ls) n (pair (%cc-define args) macros) stack () out2))
+                    (self (rest ls) n (%cc-macro-define! macros (%cc-define args)) stack () out2))
                   ((string=? word "undef")
-                    (self (rest ls) n (undef (%cc-directive-name "#undef" args) macros) stack () out2))
+                    (self (rest ls) n (%cc-macro-undef! macros (%cc-directive-name "#undef" args)) stack () out2))
                   (#t (%cc-oops (string-append "unsupported directive #" word))))))))))
-    (go (%cc-lines (cc-raw-tokens src)) 1 () () () ())))
+    (go (%cc-lines (cc-raw-tokens src)) 1 (%cc-macros-new) () () ())))
 
 ; --- several files -------------------------------------------------------------
 ; A program of several files is one stream of tokens, each file preprocessed
@@ -807,6 +878,7 @@
 ; to it.
 (def cc-lex
   (fn (_ src)
+    (set! %cc-pp-made 0)
     (def units (if (str? src) (list (pair %cc-pp-file src)) src))
     (def many? (not (null? (rest units))))
     ; the raw tokens and their lines of every file, each list reversed
@@ -824,6 +896,7 @@
       (fn (self ts ns acc lacc)
         (def n (if (null? ns) 0 (first ns)))
         (def ns2 (if (null? ns) ns (rest ns)))
+        (%cc-pp-collect! 1)
         (match
           ((null? ts) (pair (reverse acc) (reverse lacc)))
           ((%cc-tag? (first ts) (lit sp)) (self (rest ts) ns2 acc lacc))
