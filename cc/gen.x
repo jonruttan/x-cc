@@ -49,7 +49,7 @@
 (import x/platform/syscall)
 (import cc/prims append byte-at byte-len convert filter length map mem-ref-byte
   proc-capture reverse sha256-hex-n string-append string-concat string=?
-  substring)
+  substring heap-collect)
 (import cc/pp cc-lex)
 (import cc/parse cc-parse c-type-size c-type-align plain-char round-up struct-entry)
 (import cc/eval common-c-type c-type-elem library-c-type
@@ -843,6 +843,17 @@
                   (self (rest es))))))
     (go %cc-gen-globals)))
 
+; what holds the initializer being worked out -- "the global N", "the
+; static N" -- or "" for none
+(def %cc-gen-initializing "")
+
+; the refusal of an initializer that is no constant, naming what holds it
+(def %cc-gen-not-constant
+  (fn (_)
+    (if (string=? %cc-gen-initializing "")
+      "a global initialized by something other than a constant"
+      (string-append %cc-gen-initializing " initialized by something other than a constant"))))
+
 ; A global takes room of its C type, with its initializer's bytes in it.
 ; The initializer is a constant, as C asks, so the bytes are worked out
 ; here.  An address in the data would move with the executable, which the
@@ -857,7 +868,9 @@
       (%cc-gen-no (string-append "a second declaration of " name)))
     (def init (first (rest (rest (rest node)))))
     (set! %cc-gen-pending ())
+    (set! %cc-gen-initializing (string-append "the global " name))
     (def off (%cc-gen-data! (%cc-gen-init-bytes c-type init) (c-type-size c-type) (c-type-align c-type)))
+    (set! %cc-gen-initializing "")
     (%cc-gen-keep-fixups! off)
     (set! %cc-gen-globals (pair (pair name (pair off c-type)) %cc-gen-globals))))
 
@@ -1007,9 +1020,11 @@
   (fn (_ node)
     (def c-type (%cc-gen-c-type! (first (rest (rest node))) "a local"))
     (set! %cc-gen-pending ())
+    (set! %cc-gen-initializing (string-append "the static " (first (rest node))))
     (def off
       (%cc-gen-data! (%cc-gen-init-bytes c-type (first (rest (rest (rest node)))))
         (c-type-size c-type) (c-type-align c-type)))
+    (set! %cc-gen-initializing "")
     (set! %cc-gen-static-scope
       (pair (pair (first (rest node)) (pair off c-type)) %cc-gen-static-scope))
     (%cc-gen-keep-fixups! off)
@@ -1210,9 +1225,9 @@
         ((eq? t (lit cast))
           (let ((k (first (rest node))) (e (first (rest (rest node)))))
             (if (if (eq? k (lit void)) #t (%cc-gen-aggregate? k))
-              (%cc-gen-no "a global initialized by something other than a constant"))
+              (%cc-gen-no (%cc-gen-not-constant)))
             (%cc-gen-form (convert-real (self e) (%cc-gen-c-type-of e) k) k)))
-        (#t (%cc-gen-no "a global initialized by something other than a constant"))))))
+        (#t (%cc-gen-no (%cc-gen-not-constant)))))))
 
 ; OP on the constants A and B, in C-TYPE: each operand converted to it first,
 ; but a shift's count, which keeps its own
@@ -3102,8 +3117,14 @@
     (guard (err (do (asm-free! a)
                     (set! %cc-gen-asm ())
                     (error err (if (Err err? err) (err msg) "cc: compile failed"))))
-      (let ((go (fn (self fs) (if (null? fs) () (do (%cc-gen-fun! (first fs)) (self (rest fs)))))))
-        (do (go (pair main others))
+      ; a function's garbage is far more than its code, and nothing collects
+      ; on its own: every 16 functions, the heap is collected
+      (let ((go (fn (self fs n)
+                  (if (null? fs) ()
+                    (do (%cc-gen-fun! (first fs))
+                        (if (< n 16) (self (rest fs) (+ n 1))
+                          (do (heap-collect) (self (rest fs) 0))))))))
+        (do (go (pair main others) 0)
             (%cc-gen-jumps! target)
             (%cc-gen-thunks!))))
     (def n (asm-pos a))

@@ -395,7 +395,10 @@
 
 (def %cc-headers
   (list (list "stdio.h" "#define EOF (-1)" %cc-null "#define FILE void" %cc-size-t
-          (if os-darwin? "#define BUFSIZ 1024" "#define BUFSIZ 8192"))
+          (if os-darwin? "#define BUFSIZ 1024" "#define BUFSIZ 8192")
+          "#define _IOFBF 0" "#define _IOLBF 1" "#define _IONBF 2"
+          "#define SEEK_SET 0" "#define SEEK_CUR 1" "#define SEEK_END 2"
+          (if os-darwin? "#define L_tmpnam 1024" "#define L_tmpnam 20"))
         (list "stdlib.h" %cc-null %cc-size-t "#define EXIT_SUCCESS 0" "#define EXIT_FAILURE 1")
         (list "string.h" %cc-null %cc-size-t)
         (list "stddef.h" %cc-null %cc-size-t "#define ptrdiff_t long"
@@ -440,6 +443,31 @@
         (list "sys/types.h" %cc-size-t "#define ssize_t long" "#define off_t long"
           "#define pid_t int" "#define uid_t unsigned int" "#define gid_t unsigned int"
           "#define time_t long")
+        ; struct lconv as both platforms' C libraries lay it out, and each
+        ; one's numbers for the categories
+        (pair "locale.h"
+          (append
+            (list %cc-null
+              "#ifndef __XCC_STRUCT_LCONV"
+              "#define __XCC_STRUCT_LCONV"
+              "struct lconv {"
+              "  char *decimal_point; char *thousands_sep; char *grouping;"
+              "  char *int_curr_symbol; char *currency_symbol; char *mon_decimal_point;"
+              "  char *mon_thousands_sep; char *mon_grouping; char *positive_sign;"
+              "  char *negative_sign; char int_frac_digits; char frac_digits;"
+              "  char p_cs_precedes; char p_sep_by_space; char n_cs_precedes;"
+              "  char n_sep_by_space; char p_sign_posn; char n_sign_posn;"
+              "  char int_p_cs_precedes; char int_n_cs_precedes; char int_p_sep_by_space;"
+              "  char int_n_sep_by_space; char int_p_sign_posn; char int_n_sign_posn;"
+              "};"
+              "#endif")
+            (if os-darwin?
+              (list "#define LC_ALL 0" "#define LC_COLLATE 1" "#define LC_CTYPE 2"
+                "#define LC_MONETARY 3" "#define LC_NUMERIC 4" "#define LC_TIME 5"
+                "#define LC_MESSAGES 6")
+              (list "#define LC_CTYPE 0" "#define LC_NUMERIC 1" "#define LC_TIME 2"
+                "#define LC_COLLATE 3" "#define LC_MONETARY 4" "#define LC_MESSAGES 5"
+                "#define LC_ALL 6"))))
         ; struct tm as both platforms' C libraries lay it out
         (list "time.h" %cc-null %cc-size-t "#define time_t long"
           (if os-darwin? "#define clock_t unsigned long" "#define clock_t long")
@@ -579,7 +607,20 @@
           "#define M_2_PI 0.636619772367581343075535053490057448"
           "#define M_2_SQRTPI 1.12837916709551257389615890312154517"
           "#define M_SQRT2 1.41421356237309504880168872420969808"
-          "#define M_SQRT1_2 0.707106781186547524400844362104849039")
+          "#define M_SQRT1_2 0.707106781186547524400844362104849039"
+          ; past the largest double, a literal reads as infinity
+          "#define HUGE_VAL 1e999")
+        ; IEEE 754's single and double, as both platforms have them
+        (list "float.h"
+          "#define FLT_RADIX 2"
+          "#define FLT_MANT_DIG 24" "#define FLT_DIG 6" "#define FLT_EPSILON 1.19209290e-7F"
+          "#define FLT_MIN_EXP (-125)" "#define FLT_MAX_EXP 128"
+          "#define FLT_MIN_10_EXP (-37)" "#define FLT_MAX_10_EXP 38"
+          "#define FLT_MIN 1.17549435e-38F" "#define FLT_MAX 3.40282347e+38F"
+          "#define DBL_MANT_DIG 53" "#define DBL_DIG 15" "#define DBL_EPSILON 2.2204460492503131e-16"
+          "#define DBL_MIN_EXP (-1021)" "#define DBL_MAX_EXP 1024"
+          "#define DBL_MIN_10_EXP (-307)" "#define DBL_MAX_10_EXP 308"
+          "#define DBL_MIN 2.2250738585072014e-308" "#define DBL_MAX 1.7976931348623157e+308")
         ; the platforms' C types: long 64 bits, plain char as plain-char says
         (list "limits.h"
           "#define CHAR_BIT 8"
@@ -669,18 +710,14 @@
 ; directive expands them under the macros as they stand.
 ; Collecting: nothing collects on its own, and what a line makes is far
 ; more than it leaves, so the walk collects every few thousand tokens out
-; (a line counts as eight).  Only while the tokens made, which lists
-; hold whole, are under %cc-long: the engine marks a list one C frame a
-; pair, and a collect with a list of some 25,000 live can overflow the stack.
-(def %cc-long 20000)
+; (a line counts as eight).
 (def %cc-pp-walked 0)
-(def %cc-pp-made 0)
 (def %cc-pp-collect!
   (fn (_ n)
     (set! %cc-pp-walked (fx+ %cc-pp-walked n))
     (if (fx< %cc-pp-walked 4096) ()
       (do (set! %cc-pp-walked 0)
-          (if (fx< %cc-pp-made %cc-long) (heap-collect) ())))))
+          (heap-collect)))))
 
 (def %cc-preprocess
   (fn (_ src)
@@ -702,7 +739,6 @@
                      (pair (list (list "__LINE__" (lit line) n) file-macro) (rest macros))
                      ())))
             (def mark (fn (self ts) (if (null? ts) () (do (set! %cc-pp-lines (pair n %cc-pp-lines))
-                                                         (set! %cc-pp-made (fx+ %cc-pp-made 1))
                                                          (%cc-pp-collect! 1)
                                                          (self (rest ts))))))
             (mark e)
@@ -878,7 +914,6 @@
 ; to it.
 (def cc-lex
   (fn (_ src)
-    (set! %cc-pp-made 0)
     (def units (if (str? src) (list (pair %cc-pp-file src)) src))
     (def many? (not (null? (rest units))))
     ; the raw tokens and their lines of every file, each list reversed
