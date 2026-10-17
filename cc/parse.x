@@ -1495,12 +1495,21 @@
                             (pair (list (lit expr) (first r))
                               (%cc-p-eat (rest r) ";"))))))))))))))))))))
 
+; the parse's garbage goes every 32 statements and declarations, a
+; function's own among them: nothing collects on its own
+(def %cc-p-read 0)
+(def %cc-p-collect!
+  (fn (_)
+    (set! %cc-p-read (+ %cc-p-read 1))
+    (if (< %cc-p-read 32) () (do (set! %cc-p-read 0) (heap-collect)))))
+
 ; A statement, its compound literals' declarations in front of it: a
 ; declaration's go into its own list, which a block takes as its own, and
 ; any other statement becomes a block of them and it.  A statement within
 ; it keeps its own.
 (set! %cc-p-stmt
   (fn (_ toks)
+    (%cc-p-collect!)
     (def saved %cc-p-literals)
     (set! %cc-p-literals ())
     (def r (%cc-p-stmt-one toks))
@@ -1756,11 +1765,6 @@
                   (self (rest its) (pair it acc))))))))
     (go prog ())))
 
-; the declarations read since the last collect, and whether the parse may
-; collect: not with a token list as long as cc/pp's %cc-long live
-(def %cc-p-read 0)
-(def %cc-p-collect? #f)
-
 (def cc-parse
   (fn (_ toks)
     (set! %cc-p-all (if (eq? toks %cc-p-lexed) toks ()))
@@ -1775,14 +1779,11 @@
     (set! %cc-p-vlas ())
     (set! %cc-p-nvla 0)
     (set! %cc-p-file-scope? #f)
-    ; the lexer's garbage goes before the parse, the parse's every few
-    ; declarations: nothing collects on its own
-    (set! %cc-p-collect? (< (length toks) 20000))
-    (if %cc-p-collect? (heap-collect) ())
+    ; the lexer's garbage goes before the parse
+    (heap-collect)
     (def go
       (fn (self ts acc)
-        (set! %cc-p-read (+ %cc-p-read 1))
-        (if (< %cc-p-read 32) () (do (set! %cc-p-read 0) (if %cc-p-collect? (heap-collect) ())))
+        (%cc-p-collect!)
         (if (null? ts)
           (%cc-p-merge-globals (reverse acc))
           (if (%cc-p-hard? ts)

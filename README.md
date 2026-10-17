@@ -207,7 +207,9 @@ lines of C in place of the `#include` that give its macros and types --
 `<errno.h>`'s `errno` and its numbers, `<assert.h>`'s `assert`,
 `<sys/types.h>`'s `ssize_t` and the like, `<sys/stat.h>`'s and `<dirent.h>`'s
 `struct stat` and `struct dirent` as each platform lays them out,
-`<unistd.h>`, `<signal.h>`'s `SIGUSR1` and `SIG_IGN`, `<setjmp.h>`'s `jmp_buf`
+`<unistd.h>`, `<signal.h>`'s `SIGUSR1` and `SIG_IGN`, `<setjmp.h>`'s `jmp_buf`,
+`<locale.h>`'s categories and `struct lconv`, `<stdio.h>`'s `BUFSIZ` and
+`_IONBF`, `<stddef.h>`'s `offsetof`, `<float.h>`'s limits, `<math.h>`'s `HUGE_VAL`
 -- and any other is dropped), a global declared more than once
 (`extern int n;` before `int n = 10;`) as one,
 object-like `#define` spliced token-wise; `__LINE__`; `__FILE__`, the path
@@ -302,7 +304,7 @@ A cast or `sizeof` takes a pointer to a function as a declaration does:
 
 Refused loudly, a recorded pending: `long double`.
 
-Paired with x-lang v0.32.0 (`lang.xon` is the checkable row).
+Paired with x-lang v0.33.0 (`lang.xon` is the checkable row).
 
 ## Tests
 
