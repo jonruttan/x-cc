@@ -92,4 +92,4 @@ tick
   (cc-exe-run "int one(void) { return 1; }\nint g = one();\nint main(void) { return g; }")))
 ```
 ---
-    refused: #<err:cc cc: compile: not built yet: a global initialized by something other than a constant>
+    refused: #<err:cc cc: compile: not built yet: the global g initialized by something other than a constant>

@@ -117,6 +117,7 @@
                 "rindex"))
         ; errno's address, through the function each platform's errno.h names
         (each (list (lit ptr) (lit int)) (list "__error" "__errno_location"))
+        (each (list (lit ptr) (list (lit struct) "lconv")) (list "localeconv"))
         ; the handler signal replaces
         (each (list (lit fnptr) (lit void)) (list "signal"))
         (each (lit ulong)
