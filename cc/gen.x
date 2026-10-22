@@ -47,7 +47,8 @@
 
 (import x/tool/asm)
 (import x/platform/syscall)
-(import cc/prims append byte-at byte-len convert filter length map mem-ref-byte
+(import cc/prims append byte-at byte-len convert filter length map mem-copy! mem-make mem-ptr
+  mem-ref-byte mem-set-byte!
   proc-capture reverse sha256-hex-n string-append string-concat string=?
   substring heap-collect)
 (import cc/pp cc-lex)
@@ -1946,7 +1947,7 @@
 ; where the setjmp's caller stood.  The routines name registers the portable
 ; model does not, so each is written out per target; it is placed after the
 ; program's functions as nops (%cc-gen-jumps!) and its bytes put over them
-; once the code is read back (%cc-gen-jump-bytes!).
+; once the code is made (%cc-gen-jumps-over!).
 
 (def %cc-gen-jumps ())      ; ((name label . pos) ...), the routines called
 
@@ -2021,23 +2022,34 @@
               (self (rest es) (pair (pair (first e) (pair (first (rest e)) at)) acc)))))))
     (go %cc-gen-jumps ())))
 
-; CODE, the bytes read back, with each routine's bytes over its nops
-(def %cc-gen-jump-bytes!
-  (fn (_ target code)
-    ; CS from byte I on, with BS from byte AT; ACC what came before, reversed
-    (def put
-      (fn (self cs i at bs acc)
-        (match
-          ((null? bs) (append (reverse acc) cs))
-          ((< i at) (self (rest cs) (+ i 1) at bs (pair (first cs) acc)))
-          (#t (self (rest cs) (+ i 1) at (rest bs) (pair (first bs) acc))))))
+; the byte values BS into memory at the pointer P from AT
+(def %cc-gen-poke!
+  (fn (self p at bs)
+    (if (null? bs) () (do (mem-set-byte! p at (first bs)) (self p (+ at 1) (rest bs))))))
+
+; the text, ENTRY's bytes, the N bytes of code at the pointer P with the
+; jump routines over their nops, and GATE's, in one block: (LENGTH . BUFFER)
+(def %cc-gen-text
+  (fn (_ target entry p n gate)
+    (def elen (length entry))
+    (def len (+ (+ elen n) (length gate)))
+    (def buf (mem-make len))
+    (def tp (mem-ptr buf))
+    (%cc-gen-poke! tp 0 entry)
+    (mem-copy! tp elen p n)
+    (%cc-gen-jumps-over! target tp elen)
+    (%cc-gen-poke! tp (+ elen n) gate)
+    (pair len buf)))
+
+; each routine's bytes over its nops, in the code at the pointer P from AT
+(def %cc-gen-jumps-over!
+  (fn (_ target p at)
     (def go
-      (fn (self es cs)
-        (if (null? es) cs
-          (let ((e (first es)))
-            (self (rest es)
-              (put cs 0 (rest (rest e)) (%cc-gen-jump-routine target (first e)) ()))))))
-    (go %cc-gen-jumps code)))
+      (fn (self es)
+        (if (null? es) ()
+          (do (%cc-gen-poke! p (+ at (rest (rest (first es)))) (%cc-gen-jump-routine target (first (first es))))
+              (self (rest es))))))
+    (go %cc-gen-jumps)))
 
 (def %cc-gen-imports ())    ; ((name . offset) ...), the C library's functions called
 
@@ -2124,9 +2136,14 @@
       (%cc-gen-no (string-append "a call to " name)))
     ; atof's string and strtod's string and end pointer are integers; only
     ; the answer is a double
+    ; ldexp's and frexp's first is a double, their second an int or a
+    ; pointer: one argument of each kind, each in the first slot of its own
+    (def mixed? (if (null? label) #f (if (string=? label "di->d") #t (string=? label "dp->d"))))
     (def doubles?
-      (if (null? label) #f (not (if (string=? label "s0->d") #t (string=? label "ii->d")))))
-    (if (if doubles? (not (= (length args) (if (string=? label "dd->d") 2 1))) #f)
+      (if (null? label) #f
+        (not (if (string=? label "s0->d") #t (if (string=? label "ii->d") #t mixed?)))))
+    (if (if (if doubles? #t mixed?)
+          (not (= (length args) (if (if (string=? label "dd->d") #t mixed?) 2 1))) #f)
       (%cc-gen-no (string-append "a call to " name " with the wrong number of arguments")))
     (def fixed (if (null? v) (length args) (first (rest v))))
     (def nvar (- (length args) fixed))
@@ -2135,14 +2152,15 @@
       (%cc-gen-no (string-append "a call to " name " with more than six arguments")))
     (def at (fn (_ off) (mem x19 (+ %cc-gen-ca off))))
     (def push-all
-      (fn (self as)
+      (fn (self as first?)
         (if (null? as) ()
           (do (%cc-gen-expr! (first as))
               ; a float goes as a double, C's default promotion
               (let ((k (%cc-gen-c-type-of (first as))))
-                (if (if doubles? #t (eq? k (lit float))) (%cc-gen-convert! (lit double) k) ()))
+                (if (if doubles? #t (if mixed? first? (eq? k (lit float))))
+                  (%cc-gen-convert! (lit double) k) ()))
               (asm-push! %cc-gen-asm x0)
-              (self (rest as))))))
+              (self (rest as) #f)))))
     ; the last pushed is on top: slots K down to 0 from BASE
     (def pop-into
       (fn (self k base)
@@ -2150,9 +2168,13 @@
           (do (asm-pop! %cc-gen-asm x0)
               (%cc-gen! (lit str) x0 (at (+ base (* 8 k))))
               (self (- k 1) base)))))
-    (do (push-all args)
-        (pop-into (- nvar 1) %cc-gen-ca-vars)
-        (pop-into (- fixed 1) (if doubles? %cc-gen-ca-doubles 0))
+    (do (push-all args #t)
+        (if mixed?
+          ; the second on top, to the first integer slot; the first, a
+          ; double, to the first double slot
+          (do (pop-into 0 0) (pop-into 0 %cc-gen-ca-doubles))
+          (do (pop-into (- nvar 1) %cc-gen-ca-vars)
+              (pop-into (- fixed 1) (if doubles? %cc-gen-ca-doubles 0))))
         (if (null? v) ()
           (do (%cc-gen-va-record!)
               (%cc-gen! (lit str) x0 (at (* 8 fixed)))))
@@ -2697,9 +2719,16 @@
       (guard (e (%cc-gen-no "a case label that is not a constant")) (%cc-gen-fold node))
       c-type)))
 
+; a function as long as an interpreter's loop makes far more than its code
+; before it ends, and nothing collects on its own: every 64 statements, a
+; nested one among them, the heap is collected
+(def %cc-gen-stmts 0)
+
 (def %cc-gen-stmt! ())
 (set! %cc-gen-stmt!
   (fn (self node)
+    (set! %cc-gen-stmts (+ %cc-gen-stmts 1))
+    (if (< %cc-gen-stmts 64) () (do (set! %cc-gen-stmts 0) (heap-collect)))
     (let ((t (first node)))
       (match
         ((eq? t (lit block))
@@ -2882,11 +2911,6 @@
                         (first (first es))))))))
     (go %cc-gen-labels)))
 
-; the bytes at P from offset 0 through I, as a list
-(def %cc-gen-read
-  (fn (self p i acc)
-    (if (< i 0) acc (self p (- i 1) (pair (mem-ref-byte p i) acc)))))
-
 ; --- a function --------------------------------------------------------------
 
 ; Every declaration in the body takes a slot before any code is emitted: the
@@ -3036,9 +3060,14 @@
 
 ; the image for SRC on TARGET, as (CODE . DATA): the entry, then main, then
 ; the rest.  main comes first because the entry branches to a fixed offset.
+
 (def cc-compile-image
   (fn (_ src target)
-    (def prog (cc-parse (cc-lex src)))
+    (def toks (cc-lex src))
+    (def ntoks (length toks))
+    (def prog (cc-parse toks))
+    ; the tokens are let go before the code is made
+    (set! toks ())
     (def funs (filter (fn (_ it) (eq? (first it) (lit fun))) prog))
     (def mains (filter (fn (_ f) (string=? (first (rest f)) "main")) funs))
     (if (null? mains) (%cc-gen-no "a program without main"))
@@ -3078,7 +3107,9 @@
     (set! %cc-gen-statics ())
     (set! %cc-gen-static-scope ())
     (%cc-gen-scan-statics! funs)
-    (def a (asm-new 262144))
+    ; the code takes a few bytes a token; the buffer is room reserved, not
+    ; written, so it is sized well past that
+    (def a (asm-new (+ 262144 (* 32 ntoks))))
     (set! %cc-gen-asm a)
     (set! %cc-gen-nlabels 0)
     (set! %cc-gen-link (if (%cc-gen-arm64? target) %cc-gen-lr ()))
@@ -3128,9 +3159,7 @@
             (%cc-gen-jumps! target)
             (%cc-gen-thunks!))))
     (def n (asm-pos a))
-    (def code (%cc-gen-jump-bytes! target (%cc-gen-read (asm-finalize! a) (- n 1) ())))
-    (asm-free! a)
-    (set! %cc-gen-asm ())
+    (def p (asm-finalize! a))
     ; the gate follows the code, where the label the thunks branch to is
     (def gatepos (+ (%cc-gen-entry-len target) n))
     (def dataat (%cc-gen-data-at target (+ gatepos (%cc-gen-gate-len target))))
@@ -3139,7 +3168,12 @@
     ; the layout did not expect would point them somewhere else
     (if (not (= (length entry) (%cc-gen-entry-len target)))
       (Err raise (lit cc) "cc: compile: the entry is not the length the layout takes it for" ()))
-    (pair (append entry (append code (%cc-gen-gate-bytes target gatepos dataat)))
+    ; the text, entry, code and gate, one block: a program's code is
+    ; megabytes, too many for a list of its bytes
+    (def text (%cc-gen-text target entry p n (%cc-gen-gate-bytes target gatepos dataat)))
+    (asm-free! a)
+    (set! %cc-gen-asm ())
+    (pair text
       (%cc-gen-data-bytes))))
 
 ; compile SRC to an executable at PATH

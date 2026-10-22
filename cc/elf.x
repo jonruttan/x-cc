@@ -26,7 +26,7 @@
 
 (import cc/prims append byte-at byte-len file-close file-open-read file-read file-seek
   length mem-make reverse substring)
-(import cc/image img-new img-u8! img-u16! img-u32! img-u64! img-bytes! img-pieces! img-write!)
+(import cc/image img-new img-u8! img-u16! img-u32! img-u64! img-bytes! img-code! img-pieces! img-write!)
 
 (def %cc-elf-base 0x400000)
 (def %cc-elf-phdrs-end 288)        ; the header and four program headers
@@ -123,7 +123,7 @@
     (def codeoff (%cc-elf-codeoff))
     (def gap (%cc-elf-gap machine))
     (def align (%cc-elf-align machine))
-    (def codelen (length code))
+    (def codelen (first code))
     (def datalen (first data))
     (def dataoff (- (+ codeoff (elf-data-at codelen machine)) gap))
     (def n (length imports))
@@ -179,7 +179,7 @@
     (%cc-elf-phdr! img 232 2 6 dyn (addr dyn) (* 16 ndyn) (* 16 ndyn) 8)
     (img-bytes! img %cc-elf-phdrs-end (%cc-elf-ascii interp))
 
-    (img-bytes! img codeoff code)
+    (img-code! img codeoff code)
     (img-pieces! img dataoff (rest data))
 
     ; the dynamic section

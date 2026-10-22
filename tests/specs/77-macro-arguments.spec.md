@@ -25,3 +25,21 @@ N 7 70 5
 N 7 70 5
 (3 3)
 ```
+
+### an expansion read again with what follows it
+
+A macro's expansion that ends in a function-like macro's name calls it
+with the ( that follows the expansion: `#define again twice`, then
+again(3), as Lua's `#define setobj2n setobj` is used.  A macro that names
+itself is still left alone.
+
+```cc
+(def src "#include <stdio.h>\n#define twice(x) ((x) * 2)\n#define again twice\n#define pick(n) twice\n#define h h\nint h(int a) { return a + 100; }\nint main(void) {\n  printf(\"%d %d %d\\n\", again(3), pick(0)(5), h(1));\n  return again(2);\n}\n")
+(display (list (cc-run src) (cc-exe-run src)))
+```
+---
+```output
+6 10 101
+6 10 101
+(4 4)
+```

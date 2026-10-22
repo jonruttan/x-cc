@@ -69,8 +69,11 @@
 ; The C library's functions on doubles, by how they take and answer them:
 ; (LABEL NAME ...), LABEL one of the platform's (x/num/float): "d->d" a
 ; double for a double, "dd->d" a double for two, "s0->d" a double for a
-; string, "ii->d" a double for two integers or pointers.  Each is called in
-; a way the others are not, so run and the compiler take these and no other.
+; string, "ii->d" a double for two integers or pointers, "di->d" a double
+; for a double and an int, "dp->d" a double for a double and a pointer.
+; The last two are the compiler's only: the platform has no stub for them.
+; Each is called in a way the others are not, so run and the compiler take
+; these and no other.
 (def library-double-fns
   (list
     (pair "d->d"
@@ -82,7 +85,9 @@
       (list "pow" "atan2" "fmod" "hypot" "fmin" "fmax" "fdim" "copysign"
             "remainder" "nextafter"))
     (pair "s0->d" (list "atof"))
-    (pair "ii->d" (list "strtod"))))
+    (pair "ii->d" (list "strtod" "difftime"))
+    (pair "di->d" (list "ldexp" "scalbn"))
+    (pair "dp->d" (list "frexp" "modf"))))
 
 ; the LABEL of the library's function on doubles NAME, or nil
 (def library-double-label
@@ -861,13 +866,18 @@
 ; first is its bits, and atof is strtod with no end pointer
 (def %cc-libm-call
   (fn (_ label name args)
-    (def n (if (if (string=? label "dd->d") #t (string=? label "ii->d")) 2 1))
+    (def n (if (string=? label "d->d") 1 (if (string=? label "s0->d") 1 2)))
     (if (not (= (length args) n))
       (%cc-oops (string-append "a call to " name " with the wrong number of arguments")))
     (match
+      ; the platform has no stub for a double and an integer together yet
+      ((if (string=? label "di->d") #t (string=? label "dp->d"))
+        (%cc-oops (string-append "not built yet under run: a call to " name)))
       ((string=? label "d->d") (first ((real-stub label name) (list (first args)))))
       ((string=? label "dd->d")
         (first ((real-stub label name) (list (first args)) (list (first (rest args))))))
+      ; difftime's two are times, no pointers
+      ((string=? name "difftime") ((real-stub label name) (first args) (first (rest args))))
       ((< (first args) 4096) (%cc-oops (string-append "a null pointer, handed to " name)))
       ; strtod with its end pointer, which may be null
       ((string=? label "ii->d") ((real-stub label name) (first args) (first (rest args))))
