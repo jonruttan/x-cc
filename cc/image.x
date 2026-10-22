@@ -11,7 +11,7 @@
 ; bytes alive, the pointer addresses them.
 (module cc/image)
 
-(import cc/prims byte-at byte-len file-write-exec! mem-fill! mem-make mem-ptr
+(import cc/prims byte-at byte-len file-write-exec! mem-copy! mem-fill! mem-make mem-ptr
   mem-set-byte!)
 
 ; a zeroed image of at least N bytes, the capacity rounded up to eight
@@ -51,6 +51,9 @@
     (if (null? bs) ()
       (do (img-u8! img at (first bs)) (self img (+ at 1) (rest bs))))))
 
+; CODE, a block of bytes (LENGTH . BUFFER), from AT
+(def img-code! (fn (_ img at code) (mem-copy! (rest img) at (mem-ptr (rest code)) (first code))))
+
 ; PIECES, ((OFFSET . BYTES) ...), each list of byte values at AT plus its
 ; offset; what no piece covers stays zero
 (def img-pieces!
@@ -73,4 +76,4 @@
   (fn (_ img path n) (file-write-exec! path (first img) n)))
 
 (provide cc/image img-new img-u8! img-u16! img-u32! img-u64! img-be32! img-be64!
-  img-bytes! img-pieces! img-ascii! img-write!)
+  img-bytes! img-code! img-pieces! img-ascii! img-write!)

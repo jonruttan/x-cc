@@ -26,7 +26,7 @@
 (import cc/prims append byte-at byte-len length reverse sha256-hex-n sha256-jit!
   string-append word-ref word-set! fx+ fx<)
 (import cc/image img-new img-u8! img-u16! img-u32! img-u64! img-be32! img-be64!
-  img-bytes! img-pieces! img-ascii! img-write!)
+  img-bytes! img-code! img-pieces! img-ascii! img-write!)
 
 (def %cc-macho-vmbase 0x100000000)
 (def %cc-macho-segalign 16384)         ; the arm64 page
@@ -209,7 +209,7 @@
   (fn (_ path code data imports)
     (def vmbase %cc-macho-vmbase)
     (def codeoff %cc-macho-codeoff)
-    (def codelen (length code))
+    (def codelen (first code))
     (def datalen (first data))
     ; __TEXT ends where the data begins, and the data takes whole pages: a
     ; program with none still gets one, so every executable has the segment.
@@ -299,7 +299,7 @@
     (%cc-macho-data-cmd! img 744 0x1D sigoff siglen)     ; LC_CODE_SIGNATURE
 
     ; the code, then the data a page later
-    (img-bytes! img codeoff code)
+    (img-code! img codeoff code)
     (img-pieces! img dataoff (rest data))
 
     ; the chained fixups, and each import's slot in the data as a bind

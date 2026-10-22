@@ -70,6 +70,17 @@
 (def mem-set-byte! (fn (_ p i b) (%cc-ptr-set p i (& b 255) 1)))
 (def %cc-ptr-ref (prim-ref (lit ptr) (lit ref)))
 (def mem-ref-byte (fn (_ p i) (%cc-ptr-ref p i 1)))
+; N bytes from the pointer SRC to the pointer DST at AT: a word at a time,
+; then the bytes past the last whole word
+(def mem-copy!
+  (fn (_ dst at src n)
+    (def words (fn (self i) (if (fx< n (fx+ i 8)) i (self (%mem-copy-word! dst at src i)))))
+    (def bytes (fn (self i) (if (fx< i n) (self (%mem-copy-byte! dst at src i)) ())))
+    (bytes (words 0))))
+(def %mem-copy-word!
+  (fn (_ dst at src i) (word-set! dst (fx+ at i) (word-ref src i)) (fx+ i 8)))
+(def %mem-copy-byte!
+  (fn (_ dst at src i) (mem-set-byte! dst (fx+ at i) (mem-ref-byte src i)) (fx+ i 1)))
 ; W bytes at an offset, W one of 1 2 4 8; a read is zero-extended, so a
 ; signed type sign-extends it itself
 (def mem-ref-at %cc-ptr-ref)
@@ -143,7 +154,7 @@
   string-length substring string-append string-concat string=?
   list->string convert length reverse append map filter set-first!
   vec-make vec-ref vec-set!
-  mem-make mem-ptr ptr-int word-ref word-set! mem-set-byte! mem-ref-byte
+  mem-make mem-ptr ptr-int word-ref word-set! mem-set-byte! mem-ref-byte mem-copy!
   mem-ref-at mem-set-at! mem-fill! int-ptr heap-count heap-collect evals fx+ fx- fx* fx< fx<< fx>>
   fx& fx| fx^
   fx& fx| fx^

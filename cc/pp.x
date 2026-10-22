@@ -29,7 +29,7 @@
 (import cc/prims append byte-at byte-len char->integer convert file-exists? file-read-all filter
   fx& fx* fx+ fx- fx< heap-collect length map
   reverse string-append string-concat string=? substring vec-make vec-ref vec-set!)
-(import cc/tokens cc-raw-tokens cc-token)
+(import cc/tokens cc-raw-tokens cc-token name-bucket name-buckets)
 (import cc/parse cc-parse-const cc-token-lines! plain-char)
 
 ; The type handle this file asks convert for, fetched by name through the
@@ -76,7 +76,7 @@
 (def %cc-lines
   (fn (_ ts)
     ; the newlines in S, found by Str8's byte search: a comment's every
-    ; byte read here was most of a header's cost
+    ; byte read by a walk here cost more than the rest of the split
     (def nls
       (fn (_ s)
         (def go
@@ -116,19 +116,11 @@
 ; The macros, (EXTRA . BUCKETS): EXTRA a short list of entries looked at
 ; first -- __LINE__ and __FILE__, which change from line to line -- and
 ; BUCKETS a vector of lists of entries, (NAME KIND . BODY), a name's bucket
-; picked by its length and its first and last bytes.  A walk of every macro
-; for every name was most of a header's cost.  A file's walk goes one way,
+; picked by cc/tokens's name-bucket.  A walk of every macro
+; for every name was half of what lua.h cost.  A file's walk goes one way,
 ; so #define and #undef change the buckets in place, a newer entry in front.
 
-(def %cc-nbuckets 128)
-(def %cc-macros-new (fn (_) (pair () (vec-make %cc-nbuckets ()))))
-(def %cc-bucket
-  (fn (_ name)
-    (def len (byte-len name))
-    (if (fx< len 1) 0
-      (fx& (fx+ (fx* len 31)
-             (fx+ (fx* (char->integer (byte-at name 0)) 7) (char->integer (byte-at name (fx- len 1)))))
-        (fx- %cc-nbuckets 1)))))
+(def %cc-macros-new (fn (_) (pair () (vec-make name-buckets ()))))
 
 ; the entry NAME in ES, or nil
 (def %cc-macro-in
@@ -140,26 +132,25 @@
 (def %cc-macro
   (fn (_ macros name)
     (def e (%cc-macro-in (first macros) name))
-    (if (null? e) (%cc-macro-in (vec-ref (rest macros) (%cc-bucket name)) name) e)))
+    (if (null? e) (%cc-macro-in (vec-ref (rest macros) (name-bucket name)) name) e)))
 
 ; MACROS with the entry E defined, in place
 (def %cc-macro-define!
   (fn (_ macros e)
-    (def i (%cc-bucket (first e)))
+    (def i (name-bucket (first e)))
     (vec-set! (rest macros) i (pair e (vec-ref (rest macros) i)))
     macros))
 
 ; MACROS without NAME, in place
 (def %cc-macro-undef!
   (fn (_ macros name)
-    (def i (%cc-bucket name))
+    (def i (name-bucket name))
     (vec-set! (rest macros) i (filter (fn (_ e) (not (string=? (first e) name))) (vec-ref (rest macros) i)))
     macros))
 
+; is S among the strings L
 (def %cc-member-s?
-  (fn (_ s l)
-    (def go (fn (self es) (if (null? es) #f (if (string=? (first es) s) #t (self (rest es))))))
-    (go l)))
+  (fn (self s l) (if (null? l) #f (if (string=? (first l) s) #t (self s (rest l))))))
 
 ; From TS, just past a function-like macro's name: ((ARG ...) . the tokens
 ; after its `)`), each ARG a token list split at a top-level comma, with the
@@ -272,6 +263,25 @@
     (def r (go args 0 ()))
     (if (null? r) (map %cc-trim-sp args) r)))
 
+; E, an expansion of NAME, and MORE, the tokens after the call: when E ends
+; in the name of a function-like macro, neither NAME nor one OPEN, and MORE
+; goes on with a (, that name goes back in front of MORE, as C reads an
+; expansion again with what follows it -- `#define setobj2n setobj`, then
+; setobj2n(L, a, b).  (E2 . MORE2)
+(def %cc-tail-call
+  (fn (_ e more name open macros)
+    (def back (%cc-skip-sp (reverse e)))
+    (def after (%cc-skip-sp more))
+    (def m
+      (if (null? back) ()
+        (if (not (%cc-name? (first back))) ()
+          (if (string=? (%cc-text (first back)) name) ()
+            (if (%cc-member-s? (%cc-text (first back)) open) ()
+              (%cc-macro macros (%cc-text (first back))))))))
+    (if (if (null? m) #f (if (eq? (first (rest m)) (lit fn)) (%cc-op-is? (if (null? after) (list (lit sp) " ") (first after)) "(") #f))
+      (pair (reverse (rest back)) (pair (first back) more))
+      (pair e more))))
+
 ; TS with the macros expanded.  OPEN holds the names whose expansion this
 ; is, which do not expand again inside it, so a macro that names itself
 ; ends.  An expansion is read again for macros with its own name open.
@@ -279,37 +289,41 @@
   (fn (self ts macros open)
     (def go
       (fn (go ts acc)
-        (if (null? ts) (reverse acc)
-          (let ((t (first ts)))
-            (def m
-              (if (%cc-name? t)
-                (if (%cc-member-s? (%cc-text t) open) () (%cc-macro macros (%cc-text t)))
-                ()))
-            (match
-              ((null? m) (go (rest ts) (pair t acc)))
-              ((eq? (first (rest m)) (lit line))
-                (go (rest ts) (pair (list (lit num) (convert (first (rest (rest m))) %string) 1) acc)))
-              ((eq? (first (rest m)) (lit obj))
-                (go (rest ts)
-                  (append (reverse (self (rest (rest m)) macros (pair (first m) open))) acc)))
-              (#t
-                (let ((ar (%cc-macro-args (rest ts))))
-                  (if (null? ar) (go (rest ts) (pair t acc))
-                    (let ((params (first (rest (rest m)))))
-                      ; F() is no arguments, when F takes none
-                      (def args
-                        (if (if (null? params) (if (null? (rest (first ar))) (null? (%cc-trim-sp (first (first ar)))) #f) #f)
-                          () (first ar)))
-                      (def variadic? (if (null? params) #f (string=? (first (reverse params)) "__VA_ARGS__")))
-                      (def given (if variadic? (%cc-va-args args (- (length params) 1)) (map %cc-trim-sp args)))
-                      (if (not (= (length params) (length given)))
-                        (Err raise (lit cc) (string-append "cc: wrong argument count for macro " (first m)) ()))
-                      (go (rest ar)
-                        (append
-                          (reverse (self (%cc-subst (rest (rest (rest m))) params given
-                                           (map (fn (_ a) (self a macros open)) given))
-                                     macros (pair (first m) open)))
-                          acc)))))))))))
+        ; a token no macro can name goes straight across
+        (match
+          ((null? ts) (reverse acc))
+          ((not (%cc-name? (first ts))) (go (rest ts) (pair (first ts) acc)))
+          (#t (step go ts acc (first ts)
+                (if (%cc-member-s? (%cc-text (first ts)) open) () (%cc-macro macros (%cc-text (first ts)))))))))
+    ; T, a name, at the front of TS, and M its macro or nil
+    (def step
+      (fn (_ go ts acc t m)
+        (match
+          ((null? m) (go (rest ts) (pair t acc)))
+          ((eq? (first (rest m)) (lit line))
+            (go (rest ts) (pair (list (lit num) (convert (first (rest (rest m))) %string) 1) acc)))
+          ((eq? (first (rest m)) (lit obj))
+            (let ((tc (%cc-tail-call (self (rest (rest m)) macros (pair (first m) open))
+                        (rest ts) (first m) open macros)))
+              (go (rest tc) (append (reverse (first tc)) acc))))
+          (#t
+            (let ((ar (%cc-macro-args (rest ts))))
+              (if (null? ar) (go (rest ts) (pair t acc))
+                (let ((params (first (rest (rest m)))))
+                  ; F() is no arguments, when F takes none
+                  (def args
+                    (if (if (null? params) (if (null? (rest (first ar))) (null? (%cc-trim-sp (first (first ar)))) #f) #f)
+                      () (first ar)))
+                  (def variadic? (if (null? params) #f (string=? (first (reverse params)) "__VA_ARGS__")))
+                  (def given (if variadic? (%cc-va-args args (- (length params) 1)) (map %cc-trim-sp args)))
+                  (if (not (= (length params) (length given)))
+                    (Err raise (lit cc) (string-append "cc: wrong argument count for macro " (first m)) ()))
+                  (let ((tc (%cc-tail-call
+                              (self (%cc-subst (rest (rest (rest m))) params given
+                                      (map (fn (_ a) (self a macros open)) given))
+                                macros (pair (first m) open))
+                              (rest ar) (first m) open macros)))
+                    (go (rest tc) (append (reverse (first tc)) acc))))))))))
     (go ts ())))
 
 ; --- directives --------------------------------------------------------------
@@ -719,9 +733,62 @@
       (do (set! %cc-pp-walked 0)
           (heap-collect)))))
 
+; --- include guards ----------------------------------------------------------
+; A header wrapped whole in #ifndef G ... #endif gives nothing a second time
+; once G is defined, so an #include of it is skipped without its text read
+; again: a header a dozen others include is read once, not a dozen times.  The
+; guards are noted by the spelling of the #include, which names one file
+; within a file's walk (%cc-local-lines puts nested ones from the file
+; being read).
+
+(def %cc-pp-guards ())   ; ((SPELLING . G-or-nil) ...), for the walk under way
+
+; the directive word of a line's tokens TS, or "" when it is no directive
+(def %cc-line-word
+  (fn (_ ts)
+    (def a (%cc-skip-sp ts))
+    (if (if (null? a) #f (%cc-op-is? (first a) "#"))
+      (%cc-line-name (rest a))
+      "")))
+(def %cc-line-name
+  (fn (_ ts)
+    (def b (%cc-skip-sp ts))
+    (if (if (null? b) #f (%cc-name? (first b))) (%cc-text (first b)) "")))
+
+; the macro guarding LINES whole: G when the first line not blank is
+; #ifndef G and the #endif closing it has only blank lines after; else nil
+(def %cc-guard
+  (fn (_ lines)
+    (def blank? (fn (_ l) (null? (%cc-skip-sp (rest l)))))
+    (def skip (fn (self ls) (if (null? ls) ls (if (blank? (first ls)) (self (rest ls)) ls))))
+    ; the lines after the #endif closing an #if open DEPTH deep, or (lit open)
+    (def close
+      (fn (self ls depth)
+        (if (null? ls) (lit open)
+          (let ((w (%cc-line-word (rest (first ls)))))
+            (match
+              ((if (string=? w "if") #t (if (string=? w "ifdef") #t (string=? w "ifndef")))
+                (self (rest ls) (+ depth 1)))
+              ((string=? w "endif") (if (= depth 1) (rest ls) (self (rest ls) (- depth 1))))
+              (#t (self (rest ls) depth)))))))
+    (def start (skip lines))
+    (if (null? start) ()
+      (let ((a (%cc-skip-sp (rest (first start)))))
+        (if (not (string=? (%cc-line-word (rest (first start))) "ifndef")) ()
+          (let ((g (%cc-line-name (rest (%cc-skip-sp (rest a))))))
+            (def after (close (rest start) 1))
+            (if (if (string=? g "") #t (eq? after (lit open))) ()
+              (if (null? (skip after)) g ()))))))))
+
+; the guard noted for the #include spelled S: (S . G-or-nil), or nil when
+; none is noted yet
+(def %cc-guard-noted
+  (fn (self s gs) (if (null? gs) () (if (string=? (first (first gs)) s) (first gs) (self s (rest gs))))))
+
 (def %cc-preprocess
   (fn (_ src)
     (set! %cc-pp-lines ())
+    (set! %cc-pp-guards ())
     (def file-macro
       (list "__FILE__" (lit obj) (%cc-stringize (list (list (lit id) %cc-pp-file)))))
     (set! %cc-pp-dir (if (string=? %cc-pp-file "<stdin>") "" (%cc-dir %cc-pp-file)))
@@ -763,11 +830,14 @@
             (def on (live? stack))
             (if (if (null? line) #t (not (%cc-op-is? (first line) "#")))
               ; a line break is a blank between the lines' tokens; a line
-              ; whose parentheses close expands now, under its own number
-              (let ((w (if on (append (reverse line) (pair (list (lit sp) " ") wait)) wait)))
-                (if (closed? w 0)
-                  (self (rest ls) n macros stack () (flush w n macros out))
-                  (self (rest ls) n macros stack w out)))
+              ; whose parentheses close expands now, under its own number.
+              ; A blank line with nothing waiting gives nothing.
+              (if (if (null? line) (null? wait) #f)
+                (self (rest ls) n macros stack wait out)
+                (let ((w (if on (append (reverse line) (pair (list (lit sp) " ") wait)) wait)))
+                  (if (closed? w 0)
+                    (self (rest ls) n macros stack () (flush w n macros out))
+                    (self (rest ls) n macros stack w out))))
               (let ((ts (%cc-skip-sp (rest line))))
                 (def out2 (flush wait n macros out))
                 (def word (if (if (null? ts) #f (%cc-name? (first ts))) (%cc-text (first ts)) ""))
@@ -800,8 +870,13 @@
                       (self (rest ls) n macros (rest stack) () out2)))
                   ((not on) (self (rest ls) n macros stack () out2))
                   ((string=? word "include")
-                    (self (append (%cc-header-lines (%cc-spell (%cc-no-sp args)) n) (rest ls))
-                      n macros stack () out2))
+                    (let ((s (%cc-spell (%cc-no-sp args))))
+                      (def noted (%cc-guard-noted s %cc-pp-guards))
+                      (if (if (null? noted) #f (if (null? (rest noted)) #f (not (null? (%cc-macro macros (rest noted))))))
+                        (self (rest ls) n macros stack () out2)
+                        (let ((hl (%cc-header-lines s n)))
+                          (if (null? noted) (set! %cc-pp-guards (pair (pair s (%cc-guard hl)) %cc-pp-guards)) ())
+                          (self (append hl (rest ls)) n macros stack () out2)))))
                   ((string=? word "define")
                     (self (rest ls) n (%cc-macro-define! macros (%cc-define args)) stack () out2))
                   ((string=? word "undef")
@@ -880,7 +955,17 @@
 (def %cc-rename-statics
   (fn (_ ts names n)
     (def suffix (string-append "." (convert n %string)))
-    (def static? (fn (_ s) (%cc-member-s? s names)))
+    ; the names in buckets, as the macros are: a walk of every static for
+    ; every identifier was a sixth of the lexing of Lua's 33 files
+    (def table (vec-make name-buckets ()))
+    (def fill
+      (fn (self ns)
+        (if (null? ns) ()
+          (do (vec-set! table (name-bucket (first ns))
+                (pair (first ns) (vec-ref table (name-bucket (first ns)))))
+              (self (rest ns))))))
+    (fill names)
+    (def static? (fn (_ s) (%cc-member-s? s (vec-ref table (name-bucket s)))))
     ; PREV the last token not a blank; TAG 1 just after a struct or union
     ; keyword and 2 just after its tag, where a { opens its body, else 0; B
     ; the braces of the struct's body open.  A tag is never renamed.

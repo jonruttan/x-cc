@@ -25,7 +25,8 @@
 ; (kw SYM) (op S), a number its value and C type, a literal its bytes.
 (module cc/tokens)
 
-(import cc/prims byte-at byte-len convert length map reverse set-first! string-append string=?
+(import cc/prims byte-at byte-len char->integer convert fx& fx* fx+ fx- fx< length map reverse
+  set-first! string-append string=? vec-make vec-ref vec-set!
   substring)
 (import x/reader/lexer)
 (import x/num/float Float)
@@ -46,13 +47,37 @@
         "struct" "switch" "typedef" "union" "unsigned" "void" "volatile"
         "while" "_Bool" "inline" "restrict" "_Static_assert"))
 
-; each keyword's symbol, made once: a conversion to a symbol costs more
-; than reading the token, and every keyword token asks for one
-(def %cc-keyword-symbols (map (fn (_ k) (pair k (convert k %symbol))) %cc-keywords))
+; A name's bucket among NAME-BUCKETS: of its length and its first and last
+; bytes, so a table of names is looked in at one short list.  cc/pp's
+; macros and statics use it, and the keywords here.
+(def name-buckets 128)
+(def name-bucket
+  (fn (_ name)
+    (def len (byte-len name))
+    (if (fx< len 1) 0
+      (fx& (fx+ (fx* len 31)
+             (fx+ (fx* (char->integer (byte-at name 0)) 7) (char->integer (byte-at name (fx- len 1)))))
+        (fx- name-buckets 1)))))
+
+; each keyword's symbol, made on first use into a table by bucket: a
+; conversion to a symbol costs more than reading the token, and every
+; keyword token asks for one
+(def %cc-keyword-table (pair () ()))
 (def %cc-keyword-symbol
   (fn (_ text)
+    (if (null? (first %cc-keyword-table))
+      (let ((t (vec-make name-buckets ())))
+        (def fill
+          (fn (self ks)
+            (if (null? ks) ()
+              (do (vec-set! t (name-bucket (first ks))
+                    (pair (pair (first ks) (convert (first ks) %symbol)) (vec-ref t (name-bucket (first ks)))))
+                  (self (rest ks))))))
+        (fill %cc-keywords)
+        (set-first! %cc-keyword-table t))
+      ())
     (def go (fn (self ks) (if (string=? (first (first ks)) text) (rest (first ks)) (self (rest ks)))))
-    (go %cc-keyword-symbols)))
+    (go (vec-ref (first %cc-keyword-table) (name-bucket text)))))
 
 ; C's punctuators, the longest that matches
 (def %cc-ops
@@ -154,9 +179,30 @@
       (decimal? (match (int? (lit int)) (long? (lit long)) (#t (lit ulong))))
       (#t (match (int? (lit int)) (uint? (lit uint)) (long? (lit long)) (#t (lit ulong)))))))
 
+; the value of TEXT's digits from I to END, a plain decimal, or -1 when a
+; byte that is no digit comes first
+(def %cc-dec-value
+  (fn (self text i end acc)
+    (if (fx< i end)
+      (%cc-dec-step self text i end acc (char->integer (byte-at text i)))
+      acc)))
+(def %cc-dec-step
+  (fn (_ go text i end acc b)
+    (if (if (fx< b 48) #t (fx< 57 b)) -1
+      (go text (fx+ i 1) end (fx+ (fx* acc 10) (fx- b 48))))))
+
+; an integer literal's token: a plain decimal of up to nine digits, no
+; suffix, is an int read at once; any other goes the whole way
+(def %cc-int-token
+  (fn (_ text)
+    (def end (byte-len text))
+    (def v (if (fx< 9 end) -1
+             (if (if (fx< 1 end) (= (byte-at text 0) #\0) #f) -1 (%cc-dec-value text 0 end 0))))
+    (if (fx< v 0) (%cc-int-token-whole text) (list (lit num) v))))
+
 ; an integer literal's token: decimal, 0x hex or 0 octal, then the
 ; suffixes u U l L, which with the base and the value give its C type
-(def %cc-int-token
+(def %cc-int-token-whole
   (fn (_ text)
     (def end (byte-len text))
     (def hex? (if (> end 1) (if (= (byte-at text 0) 48)
@@ -246,4 +292,4 @@
       ((eq? tag (lit chr)) (%cc-char-token text))
       (#t (Err raise (lit cc) (string-append "cc: a character no C token begins with: " text) ())))))
 
-(provide cc/tokens cc-raw-tokens cc-token)
+(provide cc/tokens cc-raw-tokens cc-token name-bucket name-buckets)

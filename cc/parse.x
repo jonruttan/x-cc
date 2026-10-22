@@ -948,76 +948,78 @@
     (if (> (length %cc-p-literals) n)
       (%cc-p-err (string-append "not built yet: a compound literal in " what)))))
 
-; one flat driver for the left-associative binary levels: OPS is the
-; level's operator list, SUB the tighter level, MK the node builder
-(def %cc-binlevel
-  (fn (_ toks ops sub mk)
-    (def hit
-      (fn (_ ts)
-        (let ((go (fn (self os)
-                    (if (null? os) ()
-                      (if (%cc-p-op? ts (first os)) (first os)
-                        (self (rest os)))))))
-          (go ops))))
-    (def r (sub toks))
-    (def go
-      (fn (self ast ts)
-        (let ((op (hit ts)))
-          (if (null? op)
-            (pair ast ts)
-            (let ((rr (sub (rest ts))))
-              (self (mk op ast (first rr)) (rest rr)))))))
-    (go (first r) (rest r))))
+; The binary operators, read by precedence climbing: a unary expression,
+; then each operator of at least the precedence asked, its right side read
+; one tighter, so all of them are left-associative.  || is 1, && 2, | 3,
+; ^ 4, & 5, == != 6, < > <= >= 7, << >> 8, + - 9, * / % 10; anything else
+; is no binary operator, 0.
+(def %cc-op-prec
+  (fn (_ s)
+    (def n (byte-len s))
+    (def c (byte-at s 0))
+    (match
+      ((= n 1)
+        (match
+          ((if (= c #\*) #t (if (= c #\/) #t (= c #\%))) 10)
+          ((if (= c #\+) #t (= c #\-)) 9)
+          ((if (= c #\<) #t (= c #\>)) 7)
+          ((= c #\&) 5)
+          ((= c #\^) 4)
+          ((= c #\|) 3)
+          (#t 0)))
+      ((= n 2) (%cc-op-prec2 c (byte-at s 1)))
+      (#t 0))))
+(def %cc-op-prec2
+  (fn (_ c c1)
+    (match
+      ((= c1 #\=)
+        (match ((if (= c #\<) #t (= c #\>)) 7) ((if (= c #\=) #t (= c #\!)) 6) (#t 0)))
+      ((= c c1)
+        (match ((if (= c #\<) #t (= c #\>)) 8) ((= c #\&) 2) ((= c #\|) 1) (#t 0)))
+      (#t 0))))
 
-(def %cc-mk-bin (fn (_ op a b) (list (lit bin) op a b)))
-(def %cc-mk-cmp (fn (_ op a b) (list (lit cmp) op a b)))
+; the precedence of the operator at the front of TS, 0 for none
+(def %cc-binop-prec
+  (fn (_ ts)
+    (set! %cc-p-at ts)
+    (if (null? ts) 0
+      (if (eq? (first (first ts)) (lit op)) (%cc-op-prec (first (rest (first ts)))) 0))))
 
-(def %cc-e-mul
-  (fn (_ toks)
-    (%cc-binlevel toks (list "*" "/" "%") %cc-e-unary %cc-mk-bin)))
-(def %cc-e-add
-  (fn (_ toks)
-    (%cc-binlevel toks (list "+" "-") %cc-e-mul %cc-mk-bin)))
-(def %cc-e-shift
-  (fn (_ toks)
-    (%cc-binlevel toks (list "<<" ">>") %cc-e-add %cc-mk-bin)))
-(def %cc-e-rel
-  (fn (_ toks)
-    (%cc-binlevel toks (list "<=" ">=" "<" ">") %cc-e-shift %cc-mk-cmp)))
-(def %cc-e-eq
-  (fn (_ toks)
-    (%cc-binlevel toks (list "==" "!=") %cc-e-rel %cc-mk-cmp)))
-(def %cc-e-band
-  (fn (_ toks)
-    (%cc-binlevel toks (list "&") %cc-e-eq %cc-mk-bin)))
-(def %cc-e-bxor
-  (fn (_ toks)
-    (%cc-binlevel toks (list "^") %cc-e-band %cc-mk-bin)))
-(def %cc-e-bor
-  (fn (_ toks)
-    (%cc-binlevel toks (list "|") %cc-e-bxor %cc-mk-bin)))
+; OP, of precedence P, on A and B: && and || their own nodes, the
+; comparisons cmp, the rest bin
+(def %cc-mk-op
+  (fn (_ op p a b)
+    (match
+      ((= p 2) (list (lit and) a b))
+      ((= p 1) (list (lit or) a b))
+      ((if (= p 7) #t (= p 6)) (list (lit cmp) op a b))
+      (#t (list (lit bin) op a b)))))
 
-(def %cc-e-land
-  (fn (_ toks)
-    (def r (%cc-e-bor toks))
-    (def go
-      (fn (self ast ts)
-        (if (%cc-p-op? ts "&&")
-          (let ((rr (%cc-e-bor (rest ts))))
-            (self (list (lit and) ast (first rr)) (rest rr)))
-          (pair ast ts))))
-    (go (first r) (rest r))))
+; the operators of precedence MIN and above after a unary expression:
+; (AST . rest)
+(def %cc-e-binary
+  (fn (_ toks min)
+    (def r (%cc-e-unary toks))
+    (%cc-e-climb (first r) (rest r) min)))
+(def %cc-e-climb
+  (fn (self ast ts min)
+    (def p (%cc-binop-prec ts))
+    (if (if (= p 0) #t (< p min)) (pair ast ts)
+      (%cc-e-climb-on self ast (first (rest (first ts))) p (%cc-e-binary (rest ts) (+ p 1)) min))))
+(def %cc-e-climb-on
+  (fn (_ climb ast op p rr min)
+    (climb (%cc-mk-op op p ast (first rr)) (rest rr) min)))
 
-(def %cc-e-lor
-  (fn (_ toks)
-    (def r (%cc-e-land toks))
-    (def go
-      (fn (self ast ts)
-        (if (%cc-p-op? ts "||")
-          (let ((rr (%cc-e-land (rest ts))))
-            (self (list (lit or) ast (first rr)) (rest rr)))
-          (pair ast ts))))
-    (go (first r) (rest r))))
+(def %cc-e-mul (fn (_ toks) (%cc-e-binary toks 10)))
+(def %cc-e-add (fn (_ toks) (%cc-e-binary toks 9)))
+(def %cc-e-shift (fn (_ toks) (%cc-e-binary toks 8)))
+(def %cc-e-rel (fn (_ toks) (%cc-e-binary toks 7)))
+(def %cc-e-eq (fn (_ toks) (%cc-e-binary toks 6)))
+(def %cc-e-band (fn (_ toks) (%cc-e-binary toks 5)))
+(def %cc-e-bxor (fn (_ toks) (%cc-e-binary toks 4)))
+(def %cc-e-bor (fn (_ toks) (%cc-e-binary toks 3)))
+(def %cc-e-land (fn (_ toks) (%cc-e-binary toks 2)))
+(def %cc-e-lor (fn (_ toks) (%cc-e-binary toks 1)))
 
 (def %cc-e-tern
   (fn (self toks)
@@ -1827,7 +1829,14 @@
                                      (first (rest (rest (rest d))))))
                               (first r)))
                           acc)))))))))))))
-    (go toks ())))
+    (def prog (go toks ()))
+    ; the tokens and their lines place the parse's own errors, and are let go
+    ; with it: a long program's are most of what the compiler holds after
+    (set! %cc-p-all ())
+    (set! %cc-p-at ())
+    (set! %cc-p-lexed ())
+    (set! %cc-p-lines ())
+    prog))
 
 ; the value of TOKS, the whole of them a constant expression, as #if
 ; takes one
