@@ -71,7 +71,6 @@
 ; double for a double, "dd->d" a double for two, "s0->d" a double for a
 ; string, "ii->d" a double for two integers or pointers, "di->d" a double
 ; for a double and an int, "dp->d" a double for a double and a pointer.
-; The last two are the compiler's only: the platform has no stub for them.
 ; Each is called in a way the others are not, so run and the compiler take
 ; these and no other.
 (def library-double-fns
@@ -870,15 +869,15 @@
     (if (not (= (length args) n))
       (%cc-oops (string-append "a call to " name " with the wrong number of arguments")))
     (match
-      ; the platform has no stub for a double and an integer together yet
-      ((if (string=? label "di->d") #t (string=? label "dp->d"))
-        (%cc-oops (string-append "not built yet under run: a call to " name)))
+      ((string=? label "di->d") ((real-stub label name) (first args) (first (rest args))))
       ((string=? label "d->d") (first ((real-stub label name) (list (first args)))))
       ((string=? label "dd->d")
         (first ((real-stub label name) (list (first args)) (list (first (rest args))))))
       ; difftime's two are times, no pointers
       ((string=? name "difftime") ((real-stub label name) (first args) (first (rest args))))
-      ((< (first args) 4096) (%cc-oops (string-append "a null pointer, handed to " name)))
+      ((< (first (if (string=? label "dp->d") (rest args) args)) 4096)
+        (%cc-oops (string-append "a null pointer, handed to " name)))
+      ((string=? label "dp->d") ((real-stub label name) (first args) (first (rest args))))
       ; strtod with its end pointer, which may be null
       ((string=? label "ii->d") ((real-stub label name) (first args) (first (rest args))))
       (#t ((real-stub label "strtod") (first args))))))
