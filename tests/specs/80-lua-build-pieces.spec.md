@@ -6,9 +6,9 @@ Two things a program the size of Lua asks for.  A header wrapped whole in
 keeps a header a dozen others include from being read a dozen times; a
 header with anything outside its guard, one with no guard, and a guarded
 one whose G was #undef'd are read every time.  And the C library's frexp,
-ldexp and modf take a double and an int or a pointer together: compiled,
-each goes in its own kind of register; under `run` they are refused by
-name.  Each case shows what /usr/bin/cc prints for the same source.
+ldexp and modf take a double and an int or a pointer together, and each
+goes in its own kind of register, compiled and under `run` alike.  Each
+case shows what /usr/bin/cc prints for the same source.
 
 ## Lua build pieces
 
@@ -33,7 +33,7 @@ name.  Each case shows what /usr/bin/cc prints for the same source.
 (222 222)
 ```
 
-### frexp, ldexp and modf, compiled; refused under run
+### frexp, ldexp and modf, compiled and under run
 
 ```cc
 (def src "#include <stdio.h>\n#include <math.h>\nint main(void) {\n  int e = 0;\n  double ip = 0;\n  double m = frexp(2.5, &e);\n  double f = modf(3.75, &ip);\n  printf(\"%g %d %g %g %g\\n\", m, e, ldexp(m, e), f, ip);\n  return e;\n}\n")
@@ -42,6 +42,6 @@ name.  Each case shows what /usr/bin/cc prints for the same source.
 ---
 ```output
 0.625 2 2.5 0.75 3
-cc: run failed: #<err:cc cc: run: not built yet under run: a call to frexp>
-(2 1)
+0.625 2 2.5 0.75 3
+(2 2)
 ```
