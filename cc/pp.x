@@ -188,29 +188,19 @@
                       (if (if (= c 34) #t (= c 92)) (pair "\\" acc) acc)))))))
     (list (lit str) (go 0 (list "\"")))))
 
-; The body with each parameter replaced by its argument's tokens: the
-; argument macro-expanded first, from EXPANDED, as C does before it
-; substitutes; the argument as written, from ARGS, beside # and ##.  #
-; PARAM is the argument spelled as a string literal, and A ## B pastes:
-; the last token before it and the first after it are one token, read
-; again from their joined text.  No parentheses are added: SQ(a+b) with
-; x*x is a+b*a+b, as in C.
+; The body, compiled (%cc-compile-body), with each parameter replaced by
+; its argument's tokens: the argument macro-expanded first, from EXPANDED,
+; as C does before it substitutes; the argument as written, from ARGS,
+; beside # and ##.  # PARAM is the argument spelled as a string literal,
+; and A ## B pastes: the last token before it and the first after it are
+; one token, read again from their joined text.  No parentheses are added:
+; SQ(a+b) with x*x is a+b*a+b, as in C.
 (def %cc-subst
-  (fn (_ body params args expanded)
-    ; (TOKENS) for a parameter T in AS, else nil
-    (def arg-in
-      (fn (_ t as)
-        (if (not (%cc-name? t)) ()
-          (let ((go (fn (self ps as)
-                      (if (null? ps) ()
-                        (if (string=? (first ps) (%cc-text t)) (list (first as))
-                          (self (rest ps) (rest as)))))))
-            (go params as)))))
-    (def arg-of (fn (_ t) (arg-in t args)))
-    ; the tokens T stands for: its argument's, as written or expanded, or
-    ; itself
-    (def tokens-in
-      (fn (_ t as) (let ((a (arg-in t as))) (if (null? a) (list t) (first a)))))
+  (fn (_ body args expanded)
+    (def nth (fn (self l i) (if (= i 0) (first l) (self (rest l) (- i 1)))))
+    ; the tokens T stands for: its argument's, as written, or itself
+    (def raw-tokens
+      (fn (_ t) (if (%cc-tag? t (lit par)) (nth args (first (rest t))) (list t))))
     ; ACC (reversed) with its last token pasted to the first of NEXT
     (def paste
       (fn (_ acc next)
@@ -230,17 +220,14 @@
               ((%cc-op-is? t "##")
                 (let ((after (%cc-skip-sp (rest ts))))
                   (if (null? after) (self after acc)
-                    (self (rest after) (paste acc (tokens-in (first after) args))))))
-              ((%cc-op-is? t "#")
-                (let ((after (%cc-skip-sp (rest ts))))
-                  (def a (if (null? after) () (arg-of (first after))))
-                  (if (null? a) (self (rest ts) (pair t acc))
-                    (self (rest after) (pair (%cc-stringize (first a)) acc)))))
-              ; a parameter before ## is pasted as written
-              (#t
-                (let ((after (%cc-skip-sp (rest ts))))
-                  (def raw? (if (null? after) #f (%cc-op-is? (first after) "##")))
-                  (self (rest ts) (append (reverse (tokens-in t (if raw? args expanded))) acc)))))))))
+                    (self (rest after) (paste acc (raw-tokens (first after)))))))
+              ((%cc-tag? t (lit par))
+                (let ((how (first (rest (rest t)))) (i (first (rest t))))
+                  (match
+                    ((eq? how (lit exp)) (self (rest ts) (append (reverse (nth expanded i)) acc)))
+                    ((eq? how (lit raw)) (self (rest ts) (append (reverse (nth args i)) acc)))
+                    (#t (self (rest ts) (pair (%cc-stringize (nth args i)) acc))))))
+              (#t (self (rest ts) (pair t acc))))))))
     (go body ())))
 
 ; A variadic macro's ARGS, as read with their blanks, each trimmed: its N
@@ -263,28 +250,36 @@
     (def r (go args 0 ()))
     (if (null? r) (map %cc-trim-sp args) r)))
 
-; E, an expansion of NAME, and MORE, the tokens after the call: when E ends
-; in the name of a function-like macro, neither NAME nor one OPEN, and MORE
-; goes on with a (, that name goes back in front of MORE, as C reads an
-; expansion again with what follows it -- `#define setobj2n setobj`, then
-; setobj2n(L, a, b).  (E2 . MORE2)
+; is the macro entry M among the entries L
+(def %cc-member-q?
+  (fn (self m l) (if (null? l) #f (if (eq? (first l) m) #t (self m (rest l))))))
+
+; E, an expansion of the macro entry ENTRY, and MORE, the tokens after the
+; call: when E ends in the name of a function-like macro, neither ENTRY nor
+; one OPEN, and MORE goes on with a (, that name goes back in front of MORE,
+; as C reads an expansion again with what follows it -- `#define setobj2n
+; setobj`, then setobj2n(L, a, b).  (E2 . MORE2)
 (def %cc-tail-call
-  (fn (_ e more name open macros)
+  (fn (_ e more entry open macros)
     (def back (%cc-skip-sp (reverse e)))
     (def after (%cc-skip-sp more))
     (def m
       (if (null? back) ()
         (if (not (%cc-name? (first back))) ()
-          (if (string=? (%cc-text (first back)) name) ()
-            (if (%cc-member-s? (%cc-text (first back)) open) ()
-              (%cc-macro macros (%cc-text (first back))))))))
-    (if (if (null? m) #f (if (eq? (first (rest m)) (lit fn)) (%cc-op-is? (if (null? after) (list (lit sp) " ") (first after)) "(") #f))
+          (%cc-macro macros (%cc-text (first back))))))
+    (if (if (null? m) #f
+          (if (eq? (first (rest m)) (lit fn))
+            (if (%cc-op-is? (if (null? after) (list (lit sp) " ") (first after)) "(")
+              (if (eq? m entry) #f (not (%cc-member-q? m open)))
+              #f)
+            #f))
       (pair (reverse (rest back)) (pair (first back) more))
       (pair e more))))
 
-; TS with the macros expanded.  OPEN holds the names whose expansion this
-; is, which do not expand again inside it, so a macro that names itself
-; ends.  An expansion is read again for macros with its own name open.
+; TS with the macros expanded.  OPEN holds the entries of the macros whose
+; expansion this is, which do not expand again inside it, so a macro that
+; names itself ends.  An expansion is read again for macros with its own
+; entry open.
 (def %cc-expand
   (fn (self ts macros open)
     (def go
@@ -293,18 +288,18 @@
         (match
           ((null? ts) (reverse acc))
           ((not (%cc-name? (first ts))) (go (rest ts) (pair (first ts) acc)))
-          (#t (step go ts acc (first ts)
-                (if (%cc-member-s? (%cc-text (first ts)) open) () (%cc-macro macros (%cc-text (first ts)))))))))
+          (#t (step go ts acc (first ts) (%cc-macro macros (%cc-text (first ts))))))))
     ; T, a name, at the front of TS, and M its macro or nil
     (def step
       (fn (_ go ts acc t m)
         (match
           ((null? m) (go (rest ts) (pair t acc)))
+          ((%cc-member-q? m open) (go (rest ts) (pair t acc)))
           ((eq? (first (rest m)) (lit line))
             (go (rest ts) (pair (list (lit num) (convert (first (rest (rest m))) %string) 1) acc)))
           ((eq? (first (rest m)) (lit obj))
-            (let ((tc (%cc-tail-call (self (rest (rest m)) macros (pair (first m) open))
-                        (rest ts) (first m) open macros)))
+            (let ((tc (%cc-tail-call (self (rest (rest m)) macros (pair m open))
+                        (rest ts) m open macros)))
               (go (rest tc) (append (reverse (first tc)) acc))))
           (#t
             (let ((ar (%cc-macro-args (rest ts))))
@@ -319,10 +314,15 @@
                   (if (not (= (length params) (length given)))
                     (Err raise (lit cc) (string-append "cc: wrong argument count for macro " (first m)) ()))
                   (let ((tc (%cc-tail-call
-                              (self (%cc-subst (rest (rest (rest m))) params given
-                                      (map (fn (_ a) (self a macros open)) given))
-                                macros (pair (first m) open))
-                              (rest ar) (first m) open macros)))
+                              (self (%cc-subst (rest (rest (rest (rest m)))) given
+                                      ; only the arguments the body takes expanded
+                                      ((fn (each as ns)
+                                         (if (null? as) ()
+                                           (pair (if (first ns) (self (first as) macros open) ())
+                                                 (each (rest as) (rest ns)))))
+                                       given (first (rest (rest (rest m))))))
+                                macros (pair m open))
+                              (rest ar) m open macros)))
                     (go (rest tc) (append (reverse (first tc)) acc))))))))))
     (go ts ())))
 
@@ -353,8 +353,60 @@
                     ((%cc-op-is? (first ts) "...") (self (rest ts) (pair "__VA_ARGS__" acc)))
                     (#t (self (rest ts) acc))))))
         (let ((pr (go (rest after) ())))
-          (pair name (pair (lit fn) (pair (first pr) (%cc-trim-sp (rest pr)))))))
+          (def body (%cc-compile-body (%cc-trim-sp (rest pr)) (first pr)))
+          (pair name (pair (lit fn) (pair (first pr) (pair (%cc-body-needs body (first pr)) body))))))
       (pair name (pair (lit obj) (%cc-trim-sp after))))))
+
+; A function-like macro's BODY with each of its PARAMS put as (par I HOW),
+; I the parameter's place: HOW `str` for # PARAM, its argument spelled as a
+; string literal; `raw` beside ##, its argument as written; `exp` anywhere
+; else, its argument macro-expanded.  The work of finding each parameter by
+; name is done once, at the #define, not at every call.
+(def %cc-compile-body
+  (fn (_ body params)
+    (def index
+      (fn (_ t)
+        (if (not (%cc-name? t)) ()
+          ((fn (self ps i)
+             (match
+               ((null? ps) ())
+               ((string=? (first ps) (%cc-text t)) i)
+               (#t (self (rest ps) (+ i 1)))))
+           params 0))))
+    ; GLUED: the last token out, but a blank, is ##
+    (def go
+      (fn (self ts glued acc)
+        (if (null? ts) (reverse acc)
+          (let ((t (first ts)))
+            (def after (%cc-skip-sp (rest ts)))
+            (match
+              ((%cc-tag? t (lit sp)) (self (rest ts) glued (pair t acc)))
+              ((%cc-op-is? t "#")
+                (let ((i (if (null? after) () (index (first after)))))
+                  (if (null? i) (self (rest ts) #f (pair t acc))
+                    (self (rest after) #f (pair (list (lit par) i (lit str)) acc)))))
+              ((%cc-op-is? t "##") (self (rest ts) #t (pair t acc)))
+              (#t
+                (let ((i (index t)))
+                  (if (null? i) (self (rest ts) #f (pair t acc))
+                    (self (rest ts) #f
+                      (pair (list (lit par) i
+                              (if (if glued #t (if (null? after) #f (%cc-op-is? (first after) "##")))
+                                (lit raw) (lit exp)))
+                        acc))))))))))
+    (go body #f ())))
+
+; for each of PARAMS, whether BODY, compiled, takes its argument expanded
+(def %cc-body-needs
+  (fn (_ body params)
+    (def needs?
+      (fn (self ts i)
+        (if (null? ts) #f
+          (if (if (%cc-tag? (first ts) (lit par))
+                (if (= (first (rest (first ts))) i) (eq? (first (rest (rest (first ts)))) (lit exp)) #f)
+                #f)
+            #t (self (rest ts) i)))))
+    ((fn (self ps i) (if (null? ps) () (pair (needs? body i) (self (rest ps) (+ i 1))))) params 0)))
 
 ; whether an #if's condition, TS, holds under MACROS
 (def %cc-if-true?
