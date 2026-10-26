@@ -3065,9 +3065,9 @@
   (fn (_ src target)
     (def toks (cc-lex src))
     (def ntoks (length toks))
-    (def prog (cc-parse toks))
-    ; the tokens are let go before the code is made
-    (set! toks ())
+    ; the tokens are let go here, so the parse holds only those it has yet
+    ; to read
+    (def prog (cc-parse ((fn (_ ts) (set! toks ()) ts) toks)))
     (def funs (filter (fn (_ it) (eq? (first it) (lit fun))) prog))
     (def mains (filter (fn (_ f) (string=? (first (rest f)) "main")) funs))
     (if (null? mains) (%cc-gen-no "a program without main"))
