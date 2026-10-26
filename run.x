@@ -14,5 +14,5 @@
 (set! %repl-prompt "cc> ")
 (set! %repl-print %cc-repl-print)
 
-(unless (null? (cc-argv args))
-  (cc-main args))
+(let ((ops (rest (Sys args (lit program)))))
+  (unless (null? ops) (cc-main ops)))

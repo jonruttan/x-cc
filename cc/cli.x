@@ -17,27 +17,12 @@
 ; is one stream of tokens (cc/pp).
 (module cc/cli)
 
-(import cc/prims byte-at byte-len file-exists? file-read-all file-write filter map
+(import cc/prims byte-at byte-len file-exists? file-read-all file-write map
   reverse string-append substring string=? sys-exit x-write)
 (import cc/eval cc-run-with)
 (import cc/gen cc-compile)
 (import cc/pp cc-source-name!)
 (import x/sys/opts Opts)
-
-(def %cc-cli-engine-flag?
-  (fn (_ s)
-    (if (string=? s "--quiet") #t
-      (if (string=? s "--batch") #t
-        (if (string=? s "--no-color") #t (string=? s "--verbose"))))))
-
-(def cc-argv
-  (fn (_ raw)
-    (def ops
-      (filter (fn (_ a) (not (%cc-cli-engine-flag? a)))
-        (if (pair? raw) (rest raw) ())))
-    (if (if (pair? ops) (string=? (first ops) "--") #f)
-      (rest ops)
-      ops)))
 
 ; The options, declared once: what --help prints, what a refusal prints, and
 ; what build's tail is parsed against.  busybox has no cc, so the text is this
@@ -117,12 +102,13 @@
       ((string=? tok "-o") "option requires an argument: o")
       (#t (string-append "unrecognized option: " (substring tok 1 2))))))
 
-; Run the command line and DO NOT RETURN.  --help prints the help text, and 0;
-; a refused line prints musl getopt's line, when an option is to blame, then
-; the usage text, on stderr, and 2.
+; Run the operands, (Sys args 'program) past the engine's path, and DO NOT
+; RETURN.  --help prints the help text, and 0; a refused line prints musl
+; getopt's line, when an option is to blame, then the usage text, on stderr,
+; and 2.
 (def cc-main
-  (fn (_ raw-args)
-    (def plan (cc-cli-plan (cc-argv raw-args)))
+  (fn (_ operands)
+    (def plan (cc-cli-plan operands))
     (def label (first plan))
     (match
       ((eq? label (lit help))
@@ -149,4 +135,4 @@
             (cc-run-with src (lit caller)
               (pair (first (first (rest plan))) (first (rest (rest plan)))))))))))
 
-(provide cc/cli cc-argv cc-main cc-cli-plan cc-refusal cc-usage)
+(provide cc/cli cc-main cc-cli-plan cc-refusal cc-usage)
