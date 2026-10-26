@@ -11,7 +11,7 @@
 ; have to be the root's.
 
 (provide cc/base cc-version cc-lex cc-source-name! cc-parse cc-run cc-run-with
-  cc-compile cc-compile-image cc-exe-run cc-exe-run-with cc-argv cc-main
+  cc-compile cc-compile-image cc-exe-run cc-exe-run-with cc-main
   cc-cli-plan cc-refusal cc-usage
   %cc-repl-print)
 
@@ -50,4 +50,4 @@
 (import cc/parse cc-parse)
 (import cc/eval cc-run cc-run-with)
 (import cc/gen cc-compile cc-compile-image cc-exe-run cc-exe-run-with)
-(import cc/cli cc-argv cc-main cc-cli-plan cc-refusal cc-usage)
+(import cc/cli cc-main cc-cli-plan cc-refusal cc-usage)
