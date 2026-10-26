@@ -40,30 +40,42 @@
 (def %string (Type named STRING))
 
 ; Where an error is.  cc-lex hands over its tokens' lines with the tokens
-; (cc-token-lines!); the parser keeps the tokens it was given and the rest
-; of them it last looked at, so an error is placed at the line of the token
-; it was looking at.  Tokens that did not come from cc-lex, or a constant
-; expression for #if, have no lines, and an error in them says none.
+; (cc-token-lines!); the parser keeps how many tokens it was given and the
+; rest of them it last looked at, so an error is placed at the line of the
+; token it was looking at.  It keeps no more of the tokens than that, so
+; what it has read goes with the next collect.  Tokens that did not come
+; from cc-lex, or a constant expression for #if, have no lines, and an
+; error in them says none.
 (def %cc-p-lexed ())    ; the tokens cc-lex last answered
-(def %cc-p-lines ())    ; their lines, in order
-(def %cc-p-all ())      ; the tokens being parsed, when they are cc-lex's
+(def %cc-p-lines ())    ; their lines in order, as runs: ((LINE . TOKENS) ...)
+(def %cc-p-count ())    ; how many tokens are being parsed, when they are cc-lex's
 (def %cc-p-at ())       ; the rest of them last looked at
 
 (def cc-token-lines!
   (fn (_ toks lines)
+    (def runs
+      (fn (self ls acc)
+        (match
+          ((null? ls) (reverse acc))
+          ((if (null? acc) #f (= (first (first acc)) (first ls)))
+            (self (rest ls) (pair (pair (first ls) (+ (rest (first acc)) 1)) (rest acc))))
+          (#t (self (rest ls) (pair (pair (first ls) 1) acc))))))
     (set! %cc-p-lexed toks)
-    (set! %cc-p-lines lines)))
+    (set! %cc-p-lines (runs lines ()))))
 
 ; the line of the token the parser was looking at, or of the BACK-th token
-; before it, or nil
+; before it, or nil; past the last token, the last token's line
 (def %cc-p-line
   (fn (_ back)
-    (if (null? %cc-p-all) ()
-      (let ((i (- (- (length %cc-p-all) (length %cc-p-at)) back)))
-        ; past the last token, the last token's line
-        (def j (if (< i (length %cc-p-lines)) i (- (length %cc-p-lines) 1)))
-        (def go (fn (self ls k) (if (null? ls) () (if (= k 0) (first ls) (self (rest ls) (- k 1))))))
-        (if (< j 0) () (go %cc-p-lines j))))))
+    (def go
+      (fn (self rs i)
+        (match
+          ((null? rs) ())
+          ((if (< i (rest (first rs))) #t (null? (rest rs))) (first (first rs)))
+          (#t (self (rest rs) (- i (rest (first rs))))))))
+    (if (null? %cc-p-count) ()
+      ((fn (_ i) (if (< i 0) () (go %cc-p-lines i)))
+       (- (- %cc-p-count (length %cc-p-at)) back)))))
 
 ; MSG raised at the line of the token the parser was looking at, or, BACK
 ; given, of the token before it: what a missing ; follows
@@ -1769,7 +1781,8 @@
 
 (def cc-parse
   (fn (_ toks)
-    (set! %cc-p-all (if (eq? toks %cc-p-lexed) toks ()))
+    (set! %cc-p-count (if (eq? toks %cc-p-lexed) (length toks) ()))
+    (set! %cc-p-lexed ())
     (set! %cc-p-structs ())
     ; <stdarg.h>'s va_list is this one
     (set! %cc-p-typedefs (list (pair "__builtin_va_list" %cc-p-va-list)))
@@ -1829,12 +1842,11 @@
                                      (first (rest (rest (rest d))))))
                               (first r)))
                           acc)))))))))))))
-    (def prog (go toks ()))
-    ; the tokens and their lines place the parse's own errors, and are let go
-    ; with it: a long program's are most of what the compiler holds after
-    (set! %cc-p-all ())
+    ; the walk is handed the tokens and this call lets go of them, so each
+    ; is garbage once it is read
+    (def prog (go ((fn (_ ts) (set! toks ()) ts) toks) ()))
+    (set! %cc-p-count ())
     (set! %cc-p-at ())
-    (set! %cc-p-lexed ())
     (set! %cc-p-lines ())
     prog))
 
@@ -1842,7 +1854,7 @@
 ; takes one
 (def cc-parse-const
   (fn (_ toks)
-    (set! %cc-p-all ())
+    (set! %cc-p-count ())
     (def r (%cc-e-tern toks))
     (if (not (null? (rest r))) (%cc-p-err "expected a constant expression"))
     (%cc-p-const (first r))))
