@@ -141,6 +141,13 @@
     (if (< fd 0)
       (Err raise (lit cc) (string-append "cc: cannot write " path) ())
       (do (File write fd buf n) (File close fd)))))
+; the text S to PATH, created or truncated, mode 0644
+(def file-write-text!
+  (fn (_ path s)
+    (def fd (File open path (list (lit wronly) (lit creat) (lit trunc)) 420))
+    (if (< fd 0)
+      (Err raise (lit cc) (string-append "cc: cannot write " path) ())
+      (do (File write fd s (string-length s)) (File close fd)))))
 (def sys-exit (fn (_ n) (Sys exit n)))
 (def sys-getenv (fn (_ n) (Sys getenv n)))
 
@@ -159,6 +166,6 @@
   fx& fx| fx^
   fx& fx| fx^
   file-close file-open-read file-read file-read-all file-seek file-exists? file-write
-  file-write-exec!
+  file-write-exec! file-write-text!
   sha256-hex-n sha256-jit! proc-capture
   sys-exit sys-getenv x-write)

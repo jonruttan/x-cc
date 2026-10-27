@@ -10,7 +10,8 @@
 ; a time, a line ending at a newline token.  A line whose first token is #
 ; is a directive:
 ;
-;   #include <H>    a standard header's lines of C (%cc-headers) take the
+;   #include <H>    the lines of H in a directory -I names, or else a
+;                   standard header's lines of C (%cc-headers), take the
 ;                   #include's place; any other header is dropped
 ;   #define         an object-like macro (NAME obj . TOKENS), or, when a (
 ;                   follows the name with no blank between, a function-like
@@ -111,6 +112,17 @@
 (def %cc-pp-file "<stdin>")
 (def cc-source-name!
   (fn (_ path) (set! %cc-pp-file path)))
+
+; The command line's -I and -D: the directories an #include looks in after
+; the includer's own, each ending in /, in order; and the macros defined
+; before a file's first line, each the text of a #define after the word,
+; NAME BODY or NAME(PARAMS) BODY.  They hold for every cc-lex until set again.
+(def %cc-pp-paths ())
+(def %cc-pp-defines ())
+(def cc-pp-options!
+  (fn (_ paths defines)
+    (set! %cc-pp-paths paths)
+    (set! %cc-pp-defines defines)))
 
 ; --- macros ------------------------------------------------------------------
 ; The macros, (EXTRA . BUCKETS): EXTRA a short list of entries looked at
@@ -711,25 +723,50 @@
 ; the directory of the file being read, where #include "..." looks
 (def %cc-pp-dir "")
 
-; The lines #include ARG puts in place of its own, numbered N: those of the
-; standard header it names in <...>, none for any other; those of the file
-; it names in "...", from the directory of the file being read
+; The lines #include ARG puts in place of its own, numbered N: for <...>,
+; those of the file it names in a directory -I names, else those of the
+; standard header, none for any other; for "...", those of the file it
+; names from the directory of the file being read, or else from one -I
+; names
 (def %cc-header-lines
   (fn (_ arg n)
     (def len (byte-len arg))
     (def quoted? (if (> len 1) (if (= (byte-at arg 0) #\") (= (byte-at arg (- len 1)) #\") #f) #f))
-    (if quoted? (%cc-local-lines (substring arg 1 (- len 1)) n)
-      (%cc-standard-lines arg n))))
+    (def angled? (if (> len 1) (if (= (byte-at arg 0) 60) (= (byte-at arg (- len 1)) 62) #f) #f))
+    (def found (if angled? (%cc-pp-find (substring arg 1 (- len 1)) %cc-pp-paths) ()))
+    (match
+      (quoted? (%cc-local-lines (substring arg 1 (- len 1)) n))
+      ((null? found) (%cc-standard-lines arg n))
+      (#t (%cc-file-lines found (substring arg 1 (- len 1)) n)))))
+
+; the first of the directories DIRS holding the file NAME, as a path, or nil
+(def %cc-pp-find
+  (fn (self name dirs)
+    (match
+      ((null? dirs) ())
+      ((file-exists? (string-append (first dirs) name)) (string-append (first dirs) name))
+      (#t (self name (rest dirs))))))
 
 ; the lines of the file NAME, numbered N: NAME is as an #include names it,
-; from the directory of the file being read unless it starts with /.  An
-; #include "..." among them names its file from NAME's own directory, so
-; it is put as from the file being read.
+; from the directory of the file being read, or else from a directory -I
+; names, unless it starts with /
 (def %cc-local-lines
   (fn (_ name n)
     (def absolute? (if (> (byte-len name) 0) (= (byte-at name 0) #\/) #f))
-    (def path (if absolute? name (string-append %cc-pp-dir name)))
-    (if (not (file-exists? path)) (%cc-oops (string-append "#include \"" path "\": no such file")))
+    (def path
+      (if absolute? (if (file-exists? name) name ())
+        (%cc-pp-find name (pair %cc-pp-dir %cc-pp-paths))))
+    (if (null? path)
+      (%cc-oops (string-append "#include \"" (if absolute? name (string-append %cc-pp-dir name))
+                  "\": no such file")))
+    (%cc-file-lines path name n)))
+
+; the lines of the file at PATH, which an #include names NAME, numbered N.
+; An #include "..." among them names its file from NAME's own directory, so
+; it is put as from the file being read, or from the -I directory NAME was
+; found in.
+(def %cc-file-lines
+  (fn (_ path name n)
     (def dir (%cc-dir name))
     ; a line's tokens, an #include "..." among them put from DIR
     (def from-dir
@@ -934,7 +971,18 @@
                   ((string=? word "undef")
                     (self (rest ls) n (%cc-macro-undef! macros (%cc-directive-name "#undef" args)) stack () out2))
                   (#t (%cc-oops (string-append "unsupported directive #" word))))))))))
-    (go (%cc-lines (cc-raw-tokens src)) 1 (%cc-macros-new) () () ())))
+    (go (%cc-lines (cc-raw-tokens src)) 1 (%cc-pp-defined) () () ())))
+
+; the macros the command line defines, as #define defines them
+(def %cc-pp-defined
+  (fn (_)
+    (def go
+      (fn (self ds macros)
+        (if (null? ds) macros
+          (self (rest ds)
+            (%cc-macro-define! macros
+              (%cc-define (%cc-skip-sp (rest (first (%cc-lines (cc-raw-tokens (string-append (first ds) "\n"))))))))))))
+    (go %cc-pp-defines (%cc-macros-new))))
 
 ; --- several files -------------------------------------------------------------
 ; A program of several files is one stream of tokens, each file preprocessed
@@ -1045,24 +1093,77 @@
               (#t (self (rest ts) t 0 b (pair t acc))))))))
     (if (null? names) ts (go ts () 0 0 ()))))
 
+; --- objects -------------------------------------------------------------------
+; What cc -c writes for a file: the file preprocessed under the command
+; line's -D and -I, spelled back as C a token at a time on the line it came
+; from, after a first comment naming the file.  It reads as C; cc-lex reads
+; one without -D or -I, which were applied when it was made, under the name
+; the comment gives.
+
+(def %cc-object-mark "/* x-cc object: ")
+
+; is TEXT an object's
+(def %cc-object?
+  (fn (_ text)
+    (def n (byte-len %cc-object-mark))
+    (if (>= (byte-len text) n) (string=? (substring text 0 n) %cc-object-mark) #f)))
+
+; the object for the file PATH, whose text is SRC
+(def cc-pp-object
+  (fn (_ path src)
+    (set! %cc-pp-file path)
+    (def ts (%cc-preprocess src))
+    (def ns (reverse %cc-pp-lines))
+    (set! %cc-pp-lines ())
+    ; AT the line being spelled; a token goes on its own line, a newline
+    ; first for each line it is past AT
+    (def go
+      (fn (self ts ns at acc)
+        (def n (if (null? ns) at (first ns)))
+        (match
+          ((null? ts) (string-concat (reverse (pair "\n" acc))))
+          ((if (%cc-tag? (first ts) (lit sp)) #t (%cc-tag? (first ts) (lit nl)))
+            (self (rest ts) (if (null? ns) ns (rest ns)) at acc))
+          ((< at n) (self ts ns (+ at 1) (pair "\n" acc)))
+          (#t (self (rest ts) (if (null? ns) ns (rest ns)) at
+                (pair " " (pair (%cc-text (first ts)) acc)))))))
+    (go ts ns 1 (list " */" path %cc-object-mark))))
+
+; the file an object's TEXT was made from, as its first comment names it,
+; or nil for text that is no object's
+(def cc-pp-object-path
+  (fn (_ text)
+    (def start (byte-len %cc-object-mark))
+    (def go
+      (fn (self i)
+        (match
+          ((> (+ i 3) (byte-len text)) ())
+          ((string=? (substring text i (+ i 3)) " */") (substring text start i))
+          (#t (self (+ i 1))))))
+    (if (%cc-object? text) (go start) ())))
+
 ; The parser's tokens for SRC: a program's text, or a list of its files,
 ; each (PATH . TEXT), in order.  Each is preprocessed, the blanks out, each
 ; token made the parser's, and a string literal right after another joined
-; to it.
+; to it.  An object's text is preprocessed without the -D and -I.
 (def cc-lex
   (fn (_ src)
     (def units (if (str? src) (list (pair %cc-pp-file src)) src))
     (def many? (not (null? (rest units))))
+    (def paths %cc-pp-paths)
+    (def defines %cc-pp-defines)
     ; the raw tokens and their lines of every file, each list reversed
     (def read
       (fn (self us n ts ns)
         (if (null? us) (pair ts ns)
           (do (set! %cc-pp-file (first (first us)))
+              (if (%cc-object? (rest (first us))) (cc-pp-options! () ()) (cc-pp-options! paths defines))
               (let ((raw (%cc-preprocess (rest (first us)))))
                 (def lines (reverse %cc-pp-lines))
                 (def raw2 (if many? (%cc-rename-statics raw (%cc-file-statics raw) n) raw))
                 (self (rest us) (+ n 1) (append (reverse raw2) ts) (append (reverse lines) ns)))))))
     (def all (read units 1 () ()))
+    (cc-pp-options! paths defines)
     ; TS and NS, each token's line, walked together: (TOKENS . LINES)
     (def go
       (fn (self ts ns acc lacc)
@@ -1087,4 +1188,4 @@
     (cc-token-lines! (first r) (rest r))
     (first r)))
 
-(provide cc/pp cc-lex cc-source-name!)
+(provide cc/pp cc-lex cc-source-name! cc-pp-options! cc-pp-object cc-pp-object-path)
