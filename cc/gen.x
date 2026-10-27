@@ -3144,6 +3144,15 @@
                             %cc-gen-params))
                         (self (rest fs))))))))
       (go funs))
+    ; the program is let go here, so a function's tree is garbage once its
+    ; code is made and a collect walks only the ones still to come
+    (def todo (pair main others))
+    (set! prog ())
+    (set! funs ())
+    (set! mains ())
+    (set! main ())
+    (set! others ())
+    (set! gdecls ())
     ; a refusal can raise partway through; the buffer is released first
     (guard (err (do (asm-free! a)
                     (set! %cc-gen-asm ())
@@ -3155,7 +3164,7 @@
                     (do (%cc-gen-fun! (first fs))
                         (if (< n 16) (self (rest fs) (+ n 1))
                           (do (heap-collect) (self (rest fs) 0))))))))
-        (do (go (pair main others) 0)
+        (do (go ((fn (_ fs) (set! todo ()) fs) todo) 0)
             (%cc-gen-jumps! target)
             (%cc-gen-thunks!))))
     (def n (asm-pos a))
