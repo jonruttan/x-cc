@@ -54,7 +54,10 @@
 (import cc/pp cc-lex)
 (import cc/parse cc-parse c-type-size c-type-align plain-char round-up struct-entry)
 (import cc/eval common-c-type c-type-elem library-c-type
-  library-double-label library-variadic promoted-c-type signed? unsigned-divide)
+  library-double-label library-variadic library-variadic-fixed library-area-doubles
+  library-area-record library-area-count library-area-stack library-trampoline-arm64 init-members
+  promoted-c-type signed?
+  unsigned-divide)
 (import cc/real convert-real real-arith real-negate real-zero?)
 (import cc/macho macho-write! macho-data-at)
 (import cc/elf elf-write! elf-data-at elf-machine-aarch64 elf-machine-x86-64)
@@ -141,33 +144,34 @@
   (fn (_ target dataat)
     (if (%cc-gen-arm64? target)
       ; for an ELF, ldr x0, [sp] (argc); add x1, sp, #8 (argv); then
-      ; seventeen words: adr x21, the trampoline; adr x22, the data;
-      ; mov x20, sp; sub sp, #4M; bl main (thirteen words on);
+      ; thirty-two words: adr x21, the trampoline; adr x22, the data;
+      ; mov x20, sp; sub sp, #4M; bl main (twenty-eight words on);
       ; ldr x16, [x22]; br x16 -- exit, with main's answer in x0; then the
-      ; trampoline: stp x29, x30, [sp, #-16]!; mov x9, x0; ldp x0, x1,
-      ; [x9]; ldp x2, x3, [x9, #16]; ldp x4, x5, [x9, #32]; ldp d0, d1,
-      ; [x9, #48]; ldp d2, d3, [x9, #64]; blr x8; ldp x29, x30, [sp], #16;
-      ; ret
+      ; trampoline, cc/eval's library-trampoline-arm64, which also copies
+      ; the area's stack words onto the stack and loads x6 and x7
       (let ((args (if (eq? target (lit elf-arm64)) (list 0xF94003E0 0x910023E1) ())))
         (%cc-gen-cat
           (map %cc-gen-le32
             (append args
-              (list (%cc-gen-adr 21 28)
-                    (%cc-gen-adr 22 (- dataat (+ (* 4 (length args)) 4)))
-                    0x910003F4
-                    (| 0xD14003FF (<< (/ %cc-gen-region 4096) 10))
-                    0x9400000D
-                    0xF94002D0 0xD61F0200
-                    0xA9BF7BFD 0xAA0003E9 0xA9400520 0xA9410D22 0xA9421524
-                    0x6D430520 0x6D440D22 0xD63F0100 0xA8C17BFD 0xD65F03C0)))))
-      ; a hundred and nineteen bytes: mov rax, [rsp] (argc); lea rsi,
+              (append
+                (list (%cc-gen-adr 21 28)
+                      (%cc-gen-adr 22 (- dataat (+ (* 4 (length args)) 4)))
+                      0x910003F4
+                      (| 0xD14003FF (<< (/ %cc-gen-region 4096) 10))
+                      0x9400001C
+                      0xF94002D0 0xD61F0200)
+                library-trampoline-arm64)))))
+      ; a hundred and fifty-four bytes: mov rax, [rsp] (argc); lea rsi,
       ; [rsp+8] (argv); lea r13, [rip+35] (the trampoline); lea r14,
       ; [rip+...] (the data); mov r12, rsp; sub rsp, 4M; call main
-      ; (eighty-one bytes on); mov rdi, rax; mov r11, [r14]; and rsp, -16;
-      ; call r11 -- exit; then the trampoline: push rbp; mov rbp, rsp;
-      ; and rsp, -16; mov r11, rdi; mov rdi, [r11]; mov rsi, [r11+8];
+      ; (a hundred and sixteen bytes on); mov rdi, rax; mov r11, [r14];
+      ; and rsp, -16; call r11 -- exit; then the trampoline: push rbp;
+      ; mov rbp, rsp; and rsp, -16; mov r11, rdi; mov rcx, [r11+128];
+      ; lea rax, [rcx*8+15]; and rax, -16; sub rsp, rax -- room for the
+      ; stack words; lea rsi, [r11+136]; mov rdi, rsp; rep movsq -- the
+      ; words copied up; mov rdi, [r11]; mov rsi, [r11+8];
       ; mov rdx, [r11+16]; mov rcx, [r11+24]; mov r8, [r11+32];
-      ; mov r9, [r11+40]; movsd xmm0..xmm3, [r11+48..72]; xor eax, eax;
+      ; mov r9, [r11+40]; movsd xmm0..xmm3, [r11+64..88]; xor eax, eax;
       ; call r10; mov rsp, rbp; pop rbp; ret
       (%cc-gen-cat
         (list (list 0x48 0x8B 0x04 0x24)
@@ -176,22 +180,26 @@
               (list 0x4C 0x8D 0x35) (%cc-gen-le32 (- dataat 23))
               (list 0x49 0x89 0xE4)
               (list 0x48 0x81 0xEC) (%cc-gen-le32 %cc-gen-region)
-              (list 0xE8) (%cc-gen-le32 81)
+              (list 0xE8) (%cc-gen-le32 116)
               (list 0x48 0x89 0xC7 0x4D 0x8B 0x1E 0x48 0x83 0xE4 0xF0 0x41 0xFF 0xD3)
               (list 0x55 0x48 0x89 0xE5 0x48 0x83 0xE4 0xF0 0x49 0x89 0xFB
+                    0x49 0x8B 0x8B 0x80 0x00 0x00 0x00
+                    0x48 0x8D 0x04 0xCD 0x0F 0x00 0x00 0x00 0x48 0x83 0xE0 0xF0
+                    0x48 0x29 0xC4
+                    0x49 0x8D 0xB3 0x88 0x00 0x00 0x00 0x48 0x89 0xE7 0xF3 0x48 0xA5
                     0x49 0x8B 0x3B 0x49 0x8B 0x73 0x08 0x49 0x8B 0x53 0x10
                     0x49 0x8B 0x4B 0x18 0x4D 0x8B 0x43 0x20 0x4D 0x8B 0x4B 0x28
-                    0xF2 0x41 0x0F 0x10 0x43 0x30 0xF2 0x41 0x0F 0x10 0x4B 0x38
-                    0xF2 0x41 0x0F 0x10 0x53 0x40 0xF2 0x41 0x0F 0x10 0x5B 0x48
+                    0xF2 0x41 0x0F 0x10 0x43 0x40 0xF2 0x41 0x0F 0x10 0x4B 0x48
+                    0xF2 0x41 0x0F 0x10 0x53 0x50 0xF2 0x41 0x0F 0x10 0x5B 0x58
                     0x31 0xC0 0x41 0xFF 0xD2 0x48 0x89 0xEC 0x5D 0xC3))))))
 
 ; how long the entry is; the container lays the code out from here
 (def %cc-gen-entry-len
   (fn (_ target)
     (match
-      ((eq? target (lit macho-arm64)) 68)
-      ((eq? target (lit elf-arm64)) 76)
-      (#t 119))))
+      ((eq? target (lit macho-arm64)) 128)
+      ((eq? target (lit elf-arm64)) 136)
+      (#t 154))))
 
 ; where the trampoline is, as a distance from the entry's start
 (def %cc-gen-tramp-at
@@ -754,19 +762,21 @@
 (def %cc-gen-epilogue ())   ; where `return` goes in the function being compiled
 
 ; A function that calls into the C library has an area in its frame for the
-; calls: six eight-byte integer arguments and four doubles, which the
-; trampoline loads where the C calling convention takes them; then a
-; Linux va_list record, whose offsets say the argument registers are used
-; up; then a slot for each argument a variadic call passes past its fixed
-; ones, which the va_list points at -- directly on arm64 macOS, through
-; the record on Linux: x86-64's two offsets and then the slots, arm64's
-; slots, the two register areas' ends, and then two offsets.  The
-; arguments are all evaluated before any goes into the area, so a call
-; among another's arguments does not disturb it.
+; calls (cc/eval's library-area-*): eight eight-byte integer arguments and
+; four doubles, which the trampoline loads where the C calling convention
+; takes them; then a Linux va_list record, whose offsets say the argument
+; registers are used up; then how many words the trampoline copies onto the
+; stack, and those words.  They are also the slots for the arguments a
+; variadic call passes past its fixed ones, which the va_list points at --
+; directly on arm64 macOS, through the record on Linux: x86-64's two
+; offsets and then the slots, arm64's slots, the two register areas' ends,
+; and then two offsets.  The arguments are all evaluated before any goes
+; into the area, so a call among another's arguments does not disturb it.
 (def %cc-gen-ca 0)          ; where the area starts
-(def %cc-gen-ca-doubles 48) ; the four doubles
-(def %cc-gen-ca-record 80)  ; a Linux va_list record, 32 bytes at most
-(def %cc-gen-ca-vars 112)   ; the variable arguments
+(def %cc-gen-ca-doubles library-area-doubles) ; the four doubles
+(def %cc-gen-ca-record library-area-record)   ; a Linux va_list record, 32 bytes at most
+(def %cc-gen-ca-count library-area-count)     ; how many words go on the stack
+(def %cc-gen-ca-vars library-area-stack)      ; the variable arguments, or those words
 (def %cc-gen-va-record ())  ; the target's record: (lit sysv), (lit aapcs) or nil
 
 ; The data a program carries, in the segment the container maps readable and
@@ -986,11 +996,12 @@
     (go (reverse %cc-gen-fixups))
     (set! %cc-gen-static-scope ())))
 
-; the name NODE gives when it is NAME or &NAME, or ()
+; the name NODE gives when it is NAME or &NAME, under any casts, or ()
 (def %cc-gen-function-form
-  (fn (_ node)
+  (fn (self node)
     (match
       ((eq? (first node) (lit var)) (first (rest node)))
+      ((eq? (first node) (lit cast)) (self (first (rest (rest node)))))
       ((if (eq? (first node) (lit un))
          (if (string=? (first (rest node)) "&") (eq? (first (first (rest (rest node)))) (lit var)) #f)
          #f)
@@ -1132,8 +1143,9 @@
       ((%cc-gen-struct? c-type)
         (do (if (not (eq? (first init) (lit initlist)))
               (%cc-gen-no "a global struct initialized by something other than a list"))
-            (let ((items (first (rest init)))
-                  (fields (rest (rest (struct-entry (first (rest c-type)))))))
+            (let ((m (init-members c-type (first (rest init)))))
+              (def fields (first m))
+              (def items (rest m))
               (if (> (length items) (length fields))
                 (%cc-gen-no "more initializers than a struct has fields"))
               (def go ())
@@ -1199,6 +1211,8 @@
     (let ((t (first node)))
       (match
         ((eq? t (lit num)) (%cc-gen-form (first (rest node)) (%cc-gen-num-c-type node)))
+        ((if (eq? t (lit un)) (string=? (first (rest node)) "&") #f)
+          (%cc-gen-form (%cc-gen-fold-place (first (rest (rest node)))) (%cc-gen-c-type-of node)))
         ((if (eq? t (lit un)) (%cc-gen-real? (%cc-gen-c-type-of node)) #f)
           (if (string=? (first (rest node)) "-")
             (real-negate (self (first (rest (rest node)))) (%cc-gen-c-type-of node))
@@ -1229,6 +1243,22 @@
               (%cc-gen-no (%cc-gen-not-constant)))
             (%cc-gen-form (convert-real (self e) (%cc-gen-c-type-of e) k) k)))
         (#t (%cc-gen-no (%cc-gen-not-constant)))))))
+
+; The address of NODE, a field reached from a constant pointer -- what
+; offsetof spells, &((T *)0)->m -- as a constant: the pointer plus the
+; fields' offsets
+(def %cc-gen-fold-place
+  (fn (self node)
+    (def t (first node))
+    (def base (first (rest node)))
+    (def fname (first (rest (rest node))))
+    (match
+      ((eq? t (lit arrow))
+        (+ (%cc-gen-fold base)
+          (first (%cc-gen-field (c-type-elem (%cc-gen-c-type-of base)) fname))))
+      ((eq? t (lit dot))
+        (+ (self base) (first (%cc-gen-field (%cc-gen-c-type-of base) fname))))
+      (#t (%cc-gen-no (%cc-gen-not-constant))))))
 
 ; OP on the constants A and B, in C-TYPE: each operand converted to it first,
 ; but a shift's count, which keeps its own
@@ -1602,9 +1632,9 @@
         ((%cc-gen-step? t) (self (first (rest node))))
         ((eq? t (lit ternary))
           (let ((ka (self (first (rest (rest node))))))
-            (if (%cc-gen-addr-c-type? ka) (%cc-gen-decay ka)
+            (if (if (%cc-gen-addr-c-type? ka) #t (%cc-gen-fnptr? ka)) (%cc-gen-decay ka)
               (let ((kb (self (first (rest (rest (rest node)))))))
-                (if (%cc-gen-addr-c-type? kb) (%cc-gen-decay kb)
+                (if (if (%cc-gen-addr-c-type? kb) #t (%cc-gen-fnptr? kb)) (%cc-gen-decay kb)
                   (common-c-type ka kb))))))
         ((eq? t (lit comma)) (self (first (rest (rest node)))))
         ((eq? t (lit dot))
@@ -2116,10 +2146,24 @@
           (#t ()))
         (%cc-gen-va-address!))))
 
+; How many of N arguments to NAME, a function of the C library called
+; directly, go in registers: eight on arm64 and six on x86-64, but on arm64
+; macOS only a variadic function's fixed ones (library-variadic-fixed).
+; The rest go on the stack.
+(def %cc-gen-libc-regs
+  (fn (_ name n)
+    (def fixed (if os-darwin? (library-variadic-fixed name) ()))
+    (def room (if arch-arm64? 8 6))
+    (match
+      ((not (null? fixed)) (if (< n fixed) n fixed))
+      ((< n room) n)
+      (#t room))))
+
 ; A call into the C library, to a function the program does not define.
 ; The arguments are evaluated in order and pushed, then popped into the
-; frame's call area, six at most; a variadic function is called through
-; its v- form, with the arguments past its fixed ones in their slots and a
+; frame's call area, those past what go in registers (%cc-gen-libc-regs)
+; among its stack words; a variadic function with a v- form is called
+; through that, with the arguments past its fixed ones in their slots and a
 ; va_list after the fixed ones.  x8 takes the function's address from its
 ; slot in the data, x0 the area's address, and the trampoline makes the
 ; call.  The answer is put in the form of the C type the function's header
@@ -2145,10 +2189,13 @@
     (if (if (if doubles? #t mixed?)
           (not (= (length args) (if (if (string=? label "dd->d") #t mixed?) 2 1))) #f)
       (%cc-gen-no (string-append "a call to " name " with the wrong number of arguments")))
-    (def fixed (if (null? v) (length args) (first (rest v))))
+    ; called directly, the arguments past those that go in registers go on
+    ; the stack, from the area's stack words; through a v- form, those
+    ; past its fixed ones are the va_list's
+    (def fixed (if (null? v) (%cc-gen-libc-regs name (length args)) (first (rest v))))
     (def nvar (- (length args) fixed))
     (if (< nvar 0) (%cc-gen-no (string-append name " with too few arguments")))
-    (if (> (if (null? v) fixed (+ fixed 1)) 6)
+    (if (if (null? v) #f (> (+ fixed 1) 6))
       (%cc-gen-no (string-append "a call to " name " with more than six arguments")))
     (def at (fn (_ off) (mem x19 (+ %cc-gen-ca off))))
     (def push-all
@@ -2175,6 +2222,9 @@
           (do (pop-into 0 0) (pop-into 0 %cc-gen-ca-doubles))
           (do (pop-into (- nvar 1) %cc-gen-ca-vars)
               (pop-into (- fixed 1) (if doubles? %cc-gen-ca-doubles 0))))
+        ; how many of the stack words the trampoline copies up
+        (%cc-gen! (lit mov) x0 (imm (if (null? v) nvar 0)))
+        (%cc-gen! (lit str) x0 (at %cc-gen-ca-count))
         (if (null? v) ()
           (do (%cc-gen-va-record!)
               (%cc-gen! (lit str) x0 (at (* 8 fixed)))))
@@ -2502,8 +2552,8 @@
 ; most arguments one of its variadic calls passes past its fixed ones
 (def %cc-gen-call-area
   (fn (_ node)
-    ; -1 when NODE calls nothing in the library, else the most variable
-    ; arguments one of its calls passes
+    ; -1 when NODE calls nothing in the library, else the most variable or
+    ; stack arguments one of its calls passes
     (def most
       (fn (self node)
         (if (not (pair? node)) -1
@@ -2517,7 +2567,7 @@
                                 (if (null? fixed) -1 (- n fixed))))
                             (#t
                               (let ((v (%cc-gen-variadic name)))
-                                (if (null? v) 0 (- n (first (rest v))))))))
+                                (if (null? v) (- n (%cc-gen-libc-regs name n)) (- n (first (rest v))))))))
                         -1)))
             (def go
               (fn (self2 xs best)
@@ -2588,10 +2638,11 @@
     (def base (first at))
     (def off (first (rest at)))
     (def k (%cc-gen-place-c-type at))
-    (def fields (rest (rest (struct-entry (first (rest k))))))
     (if (not (eq? (first init) (lit initlist)))
       (%cc-gen-copy-into! at init)
-      (let ((items (first (rest init))))
+      (let ((m (init-members k (first (rest init)))))
+        (def fields (first m))
+        (def items (rest m))
         (if (> (length items) (length fields))
           (%cc-gen-no "more initializers than a struct has fields"))
         (%cc-gen-zero! at)

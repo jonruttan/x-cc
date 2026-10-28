@@ -1098,7 +1098,10 @@
     (def sr (%cc-p-stars base toks))
     (def ts (%cc-p-unparen (rest sr)))
     (if (%cc-p-fnptr-start? ts)
-      (let ((ts2 (rest (rest ts))))
+      ; a qualifier after the * -- (*volatile f)(void) -- qualifies the
+      ; pointer, which changes nothing x-cc makes
+      (let ((ts2 (let ((go (fn (self ts) (if (%cc-p-c-type-kw? ts) (self (rest ts)) ts))))
+                   (go (rest (rest ts))))))
         (if (not (%cc-p-id? ts2))
           (%cc-p-err "expected a name in a function-pointer declarator"))
         (let ((kr (%cc-p-array-suffix (list (lit fnptr) (first sr)) (rest ts2))))
@@ -1245,21 +1248,35 @@
                                 (list (list (lit desig) more v)))))))
                 (fill (rest is) (+ j 1) (put ss j v2) (if (> (+ j 1) most) (+ j 1) most)))
               (fill (rest is) (+ i 1) (put ss i it) (if (> (+ i 1) most) (+ i 1) most)))))))
-    (if (not (%cc-p-designated? init)) init
-      (let ((r (fill (first (rest init)) 0 () 0)))
-        (def n (match
-                 (struct? (length fields))
-                 ((if array? (not (null? (first (rest k)))) #f) (first (rest k)))
-                 (#t (rest r))))
-        (def out
-          (fn (out i acc)
-            (if (>= i n) (reverse acc)
-              (let ((v (get (first r) i)) (t (place-type i)))
-                (out (+ i 1)
-                  (pair (if (null? v) (zero t)
-                          (if (eq? (first v) (lit initlist)) (self t v) v))
-                    acc))))))
-        (list (lit initlist) (out 0 ()))))))
+    ; a union takes one member: the last one named, as (member J VALUE)
+    ; past its first, since the list's items go to the fields in order
+    (def union?
+      (if (if struct? (not (null? (rest fields))) #f)
+        ((fn (self fs) (if (null? fs) #t (if (= (first (rest (first fs))) 0) (self (rest fs)) #f))) fields)
+        #f))
+    (match
+      ((not (%cc-p-designated? init)) init)
+      (union?
+        (let ((r (fill (first (rest init)) 0 () 0)))
+          (def j (first (first (first r))))
+          (def v (rest (first (first r))))
+          (def v2 (if (eq? (first v) (lit initlist)) (self (place-type j) v) v))
+          (list (lit initlist) (list (if (= j 0) v2 (list (lit member) j v2))))))
+      (#t
+        (let ((r (fill (first (rest init)) 0 () 0)))
+          (def n (match
+                   (struct? (length fields))
+                   ((if array? (not (null? (first (rest k)))) #f) (first (rest k)))
+                   (#t (rest r))))
+          (def out
+            (fn (out i acc)
+              (if (>= i n) (reverse acc)
+                (let ((v (get (first r) i)) (t (place-type i)))
+                  (out (+ i 1)
+                    (pair (if (null? v) (zero t)
+                            (if (eq? (first v) (lit initlist)) (self t v) v))
+                      acc))))))
+          (list (lit initlist) (out 0 ())))))))
 
 ; an unsized array takes its size from the initializer: the list's
 ; length, or a string's bytes plus its NUL

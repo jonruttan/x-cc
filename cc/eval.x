@@ -32,6 +32,7 @@
 (import cc/real convert-real real-arith real-compare real-negate real-step real-stub
   real-zero? real?)
 (import x/sys/callback)
+(import x/tool/asm)
 
 ; The collector is non-moving (the reflection layer rides raw object
 ; pointers); the base is refreshed every run.
@@ -152,6 +153,48 @@
         (list "sprintf" "vsprintf" 2) (list "snprintf" "vsnprintf" 3)
         (list "dprintf" "vdprintf" 2) (list "scanf" "vscanf" 1)
         (list "fscanf" "vfscanf" 2) (list "sscanf" "vsscanf" 2)))
+
+; The C library's variadic functions with no v- form: (NAME FIXED).  On
+; arm64 macOS the arguments past the fixed ones go on the stack, as a
+; variadic function's do there; elsewhere each goes where any argument in
+; its place would.
+(def library-stack-variadic
+  (list (list "open" 2) (list "openat" 3) (list "fcntl" 2) (list "ioctl" 2)
+        (list "syscall" 1)))
+
+; the fixed arguments NAME takes, one of library-stack-variadic, or nil
+(def library-variadic-fixed
+  (fn (_ name)
+    (def go (fn (self es)
+              (match
+                ((null? es) ())
+                ((string=? (first (first es)) name) (first (rest (first es))))
+                (#t (self (rest es))))))
+    (go library-stack-variadic)))
+
+; The call area the trampoline takes (cc/gen): eight integer arguments, four
+; doubles, a Linux va_list record, how many words go on the stack, and then
+; those words, which are also the slots a va_list points at.
+(def library-area-doubles 64)
+(def library-area-record 96)
+(def library-area-count 128)
+(def library-area-stack 136)
+
+; The trampoline into the C library on arm64, which compiled code calls with
+; x0 the call area and x8 the function: stp x29, x30, [sp, #-16]!;
+; mov x29, sp; mov x9, x0; ldr x10, [x9, #128]; add x11, x9, #136; the
+; stack's room for x10 words, rounded to sixteen bytes (lsl, add #15, and
+; #-16, sub sp); mov x13, sp; the words copied up (cbz x10; ldr x14,
+; [x11], #8; str x14, [x13], #8; sub x10, #1; b); ldp x0..x7 from [x9];
+; ldp d0..d3 from [x9, #64]; blr x8; mov sp, x29; ldp x29, x30, [sp], #16;
+; ret.  run calls it on arm64 macOS for a variadic function's stack
+; arguments (%cc-stack-call).
+(def library-trampoline-arm64
+  (list 0xA9BF7BFD 0x910003FD 0xAA0003E9 0xF940412A 0x9102212B 0xD37DF14C
+        0x91003D8C 0x927CED8C 0xCB2C63FF 0x910003ED 0xB40000AA 0xF840856E
+        0xF80085AE 0xD100054A 0x17FFFFFC 0xA9400520 0xA9410D22 0xA9421524
+        0xA9431D26 0x6D440520 0x6D450D22 0xD63F0100 0x910003BF 0xA8C17BFD
+        0xD65F03C0))
 
 ; is the string S one of the strings in L
 (def %cc-member-str?
@@ -637,6 +680,33 @@
     (if (if (null? as) #t (null? bs)) ()
       (pair (pair (first as) (first bs)) (self (rest as) (rest bs))))))
 
+; The trampoline compiled code calls (library-trampoline-arm64), mapped into
+; this process the first time run needs it, behind a mov x8, x1: called
+; with x0 the call area and x1 the function.
+(def %cc-stack-trampoline ())
+
+; F, from the C library, called with ALL: its FIXED first in the registers
+; and the rest on the stack, through the trampoline and a call area on the
+; program's stack
+(def %cc-stack-call
+  (fn (_ f fixed all)
+    (if (null? %cc-stack-trampoline)
+      (let ((a (asm-new 4096)))
+        (do (map (fn (_ w) (%emit-u32-le! a w)) (pair 0xAA0103E8 library-trampoline-arm64))
+            (set! %cc-stack-trampoline (asm-finalize! a))))
+      ())
+    (def k (- (length all) fixed))
+    (def area (%cc-alloca (+ library-area-stack (* 8 k))))
+    (def go
+      (fn (self xs i)
+        (if (null? xs) ()
+          (do (%cc-raw-set! (+ area (if (< i fixed) (* 8 i) (+ library-area-stack (* 8 (- i fixed)))))
+                (first xs) 8)
+              (self (rest xs) (+ i 1))))))
+    (go all 0)
+    (%cc-raw-set! (+ area library-area-count) k 8)
+    (%cc-ptr-call %cc-stack-trampoline area f)))
+
 ; NAME called with ARGS in the C library
 (def %cc-libc-call
   (fn (_ name args)
@@ -647,6 +717,10 @@
                     ((string=? (first (first es)) name) (rest (first es)))
                     (#t (self (rest es)))))))
         (go library-variadic)))
+    ; on arm64 macOS a variadic function's arguments past its fixed ones go
+    ; on the stack, which only the trampoline puts them on
+    (def fixed (if os-darwin? (library-variadic-fixed name) ()))
+    (def stack? (if (null? fixed) #f (> (length args) fixed)))
     (def saved %cc-sp)
     (def given
       (if (null? v) args
@@ -658,7 +732,7 @@
     (if (null? f)
       (%cc-oops (string-append "a call to " name
                   ", which neither the program nor the C library defines")))
-    (if (> (length given) 7)
+    (if (if stack? #f (> (length given) 7))
       (%cc-oops (string-append "a call to " name " with more than seven arguments")))
     ; a function value is an id, which the library is handed as a callback's
     ; address instead (%cc-callback-address)
@@ -678,6 +752,7 @@
     (def a (fn (_ k) (%cc-drop k all)))
     (def r
       (match
+        (stack? (%cc-stack-call f fixed all))
         ((= (length all) 0) (%cc-ptr-call f))
         ((= (length all) 1) (%cc-ptr-call f (first all)))
         ((= (length all) 2) (%cc-ptr-call f (first all) (first (a 1))))
@@ -1809,6 +1884,18 @@
 ; a char array with its bytes and a NUL; a struct value copies; a scalar
 ; stores
 
+; (FIELDS . ITEMS) for the struct C type K's initializer ITEMS, which go to
+; the fields in order: a union's (member J VALUE), a designator past its
+; first member, is VALUE for the fields from the J-th on
+(def init-members
+  (fn (_ k items)
+    (def fields (rest (rest (struct-entry (first (rest k))))))
+    (if (if (null? items) #f (if (pair? (first items)) (eq? (first (first items)) (lit member)) #f))
+      (pair ((fn (self fs j) (if (= j 0) fs (self (rest fs) (- j 1))))
+             fields (first (rest (first items))))
+        (list (first (rest (rest (first items))))))
+      (pair fields items))))
+
 (def %cc-k-init
   (fn (self k init)
     (match
@@ -1823,7 +1910,7 @@
                             (pair (pair (* i es) (self ek (first is))) (self2 (rest is) (+ i 1))))))
                 (%cc-k-init-each (go items 0))))
             ((%cc-struct-c-type? k)
-              (let ((e (struct-entry (first (rest k)))))
+              (let ((m (init-members k items)))
                 (def go (fn (self2 is fs)
                           (match
                             ((null? is) ())
@@ -1831,7 +1918,7 @@
                             (#t (pair (pair (first (rest (first fs)))
                                         (self (first (rest (rest (first fs)))) (first is)))
                                   (self2 (rest is) (rest fs)))))))
-                (%cc-k-init-each (go items (rest (rest e))))))
+                (%cc-k-init-each (go (rest m) (first m)))))
             ((null? items) (fn (_ fp a) ()))
             (#t (self k (first items))))))
       ((if (eq? (first init) (lit str)) (if (pair? k) (eq? (first k) (lit array)) #f) #f)
@@ -1876,7 +1963,7 @@
                               (pair (pair (* i es) (self ek (first is))) (self2 (rest is) (+ i 1))))))
                   (%cc-k-cinit-each (go items 0))))
               ((%cc-struct-c-type? k)
-                (let ((e (struct-entry (first (rest k)))))
+                (let ((m (init-members k items)))
                   (def go (fn (self2 is fs)
                             (match
                               ((null? is) ())
@@ -1884,7 +1971,7 @@
                               (#t (pair (pair (first (rest (first fs)))
                                           (self (first (rest (rest (first fs)))) (first is)))
                                     (self2 (rest is) (rest fs)))))))
-                  (%cc-k-cinit-each (go items (rest (rest e))))))
+                  (%cc-k-cinit-each (go (rest m) (first m)))))
               (#t (self k (first items))))))
         ((%cc-struct-c-type? k)
           (let ((f (rest (%cc-k-cexpr init))) (n (c-type-size k)))
@@ -2470,4 +2557,6 @@
 
 (provide cc/eval cc-run cc-run-with common-c-type c-type-elem
   library-c-type library-double-fns library-double-label library-variadic
+  library-variadic-fixed library-area-doubles library-area-record library-area-count
+  library-area-stack library-trampoline-arm64 init-members
   promoted-c-type signed? unsigned-divide)
