@@ -17,6 +17,8 @@
 ;                   follows the name with no blank between, a function-like
 ;                   one (NAME fn PARAMS . TOKENS)
 ;   #undef #ifdef #ifndef #if #elif #else #endif
+;   #pragma         ignored, as C says a pragma it does not know is
+;   #warning TEXT   TEXT on stderr; #error TEXT refuses with it
 ;
 ; and any other refuses by name.  Another line expands under the macros
 ; defined so far once its parentheses close -- a call to a function-like
@@ -27,7 +29,7 @@
 ; literals joined, as C's translation joins them.
 (module cc/pp)
 
-(import cc/prims append byte-at byte-len char->integer convert file-exists? file-read-all filter
+(import cc/prims append byte-at byte-len char->integer convert file-exists? file-read-all file-write filter
   fx& fx* fx+ fx- fx< heap-collect length map
   reverse string-append string-concat string=? substring vec-make vec-ref vec-set!)
 (import cc/tokens cc-raw-tokens cc-token name-bucket name-buckets)
@@ -296,6 +298,7 @@
   (fn (self ts macros open)
     (def go
       (fn (go ts acc)
+        (%cc-pp-work! 16)
         ; a token no macro can name goes straight across
         (match
           ((null? ts) (reverse acc))
@@ -627,6 +630,54 @@
             "struct dirent { unsigned long d_ino; unsigned long d_seekoff; unsigned short d_reclen; unsigned short d_namlen; unsigned char d_type; char d_name[1024]; };"
             "struct dirent { unsigned long d_ino; long d_off; unsigned short d_reclen; unsigned char d_type; char d_name[256]; };")
           "#endif")
+        ; open's flags, as each platform's C library spells them; Linux's
+        ; O_DIRECTORY and O_NOFOLLOW differ between its two machines
+        (list "fcntl.h" "#include <sys/types.h>"
+          "#define O_RDONLY 0" "#define O_WRONLY 1" "#define O_RDWR 2"
+          "#define F_DUPFD 0" "#define F_GETFD 1" "#define F_SETFD 2"
+          "#define F_GETFL 3" "#define F_SETFL 4" "#define FD_CLOEXEC 1"
+          (if os-darwin? "#define O_NONBLOCK 0x4" "#define O_NONBLOCK 04000")
+          (if os-darwin? "#define O_APPEND 0x8" "#define O_APPEND 02000")
+          (if os-darwin? "#define O_CREAT 0x200" "#define O_CREAT 0100")
+          (if os-darwin? "#define O_TRUNC 0x400" "#define O_TRUNC 01000")
+          (if os-darwin? "#define O_EXCL 0x800" "#define O_EXCL 0200")
+          (if os-darwin? "#define O_NOCTTY 0x20000" "#define O_NOCTTY 0400")
+          (if os-darwin? "#define O_CLOEXEC 0x1000000" "#define O_CLOEXEC 02000000")
+          (match
+            (os-darwin? "#define O_DIRECTORY 0x100000")
+            (arch-arm64? "#define O_DIRECTORY 040000")
+            (#t "#define O_DIRECTORY 0200000"))
+          (match
+            (os-darwin? "#define O_NOFOLLOW 0x100")
+            (arch-arm64? "#define O_NOFOLLOW 0100000")
+            (#t "#define O_NOFOLLOW 0400000")))
+        ; dlopen's modes, as each platform's C library numbers them
+        (list "dlfcn.h"
+          "#define RTLD_LAZY 1" "#define RTLD_NOW 2"
+          (if os-darwin? "#define RTLD_LOCAL 4" "#define RTLD_LOCAL 0")
+          (if os-darwin? "#define RTLD_GLOBAL 8" "#define RTLD_GLOBAL 0x100")
+          (if os-darwin? "#define RTLD_DEFAULT ((void *)-2)" "#define RTLD_DEFAULT ((void *)0)"))
+        ; a few system calls' numbers, which differ by kernel and machine
+        (pair "sys/syscall.h"
+          (match
+            (os-darwin?
+              (list "#define SYS_exit 1" "#define SYS_read 3" "#define SYS_write 4"
+                "#define SYS_getpid 20"))
+            (arch-arm64?
+              (list "#define SYS_read 63" "#define SYS_write 64" "#define SYS_exit 93"
+                "#define SYS_getpid 172"))
+            (#t
+              (list "#define SYS_read 0" "#define SYS_write 1" "#define SYS_getpid 39"
+                "#define SYS_exit 60"))))
+        ; a status as wait answers it, the same on both platforms
+        (list "sys/wait.h" "#include <sys/types.h>"
+          "#define WNOHANG 1" "#define WUNTRACED 2"
+          "#define WTERMSIG(s) ((s) & 0x7f)"
+          "#define WIFEXITED(s) (WTERMSIG(s) == 0)"
+          "#define WEXITSTATUS(s) (((s) >> 8) & 0xff)"
+          "#define WIFSIGNALED(s) (WTERMSIG(s) != 0 && WTERMSIG(s) != 0x7f)"
+          "#define WIFSTOPPED(s) (WTERMSIG(s) == 0x7f)"
+          "#define WSTOPSIG(s) WEXITSTATUS(s)")
         (list "unistd.h" %cc-null "#include <sys/types.h>"
           "#define STDIN_FILENO 0" "#define STDOUT_FILENO 1" "#define STDERR_FILENO 2"
           "#define F_OK 0" "#define X_OK 1" "#define W_OK 2" "#define R_OK 4"
@@ -646,7 +697,18 @@
           (if os-darwin? "#define SIGCHLD 20" "#define SIGCHLD 17")
           (if os-darwin? "#define SIGCONT 19" "#define SIGCONT 18")
           (if os-darwin? "#define SIGSTOP 17" "#define SIGSTOP 19")
-          (if os-darwin? "#define SIGTSTP 18" "#define SIGTSTP 20"))
+          (if os-darwin? "#define SIGTSTP 18" "#define SIGTSTP 20")
+          (if os-darwin? "#define NSIG 32" "#define NSIG 65")
+          ; sigaction's record, laid out as the platform's: Darwin's mask a
+          ; word, Linux's (glibc's and musl's) 1024 bits and a restorer after
+          ; the flags
+          (if os-darwin? "typedef unsigned int sigset_t;"
+            "typedef struct { unsigned long __val[16]; } sigset_t;")
+          (if os-darwin?
+            "struct sigaction { void (*sa_handler)(int); sigset_t sa_mask; int sa_flags; };"
+            "struct sigaction { void (*sa_handler)(int); sigset_t sa_mask; int sa_flags; void (*sa_restorer)(void); };")
+          (if os-darwin? "#define SA_RESTART 0x0002" "#define SA_RESTART 0x10000000")
+          (if os-darwin? "#define SA_SIGINFO 0x0040" "#define SA_SIGINFO 4"))
         ; errno is the C library's, through the function that answers its
         ; address; the numbers through ERANGE are the same on both platforms
         (list "errno.h"
@@ -723,21 +785,24 @@
 ; the directory of the file being read, where #include "..." looks
 (def %cc-pp-dir "")
 
-; The lines #include ARG puts in place of its own, numbered N: for <...>,
-; those of the file it names in a directory -I names, else those of the
-; standard header, none for any other; for "...", those of the file it
-; names from the directory of the file being read, or else from one -I
-; names
-(def %cc-header-lines
-  (fn (_ arg n)
+; The file #include ARG names, as a path, or nil for a standard header or
+; none: for "...", from the directory of the file being read, or else from
+; one -I names, unless it starts with /; for <...>, from one -I names
+(def %cc-header-path
+  (fn (_ arg)
     (def len (byte-len arg))
     (def quoted? (if (> len 1) (if (= (byte-at arg 0) #\") (= (byte-at arg (- len 1)) #\") #f) #f))
     (def angled? (if (> len 1) (if (= (byte-at arg 0) 60) (= (byte-at arg (- len 1)) 62) #f) #f))
-    (def found (if angled? (%cc-pp-find (substring arg 1 (- len 1)) %cc-pp-paths) ()))
+    (def name (if (if quoted? #t angled?) (substring arg 1 (- len 1)) ""))
+    (def absolute? (if (> (byte-len name) 0) (= (byte-at name 0) #\/) #f))
     (match
-      (quoted? (%cc-local-lines (substring arg 1 (- len 1)) n))
-      ((null? found) (%cc-standard-lines arg n))
-      (#t (%cc-file-lines found (substring arg 1 (- len 1)) n)))))
+      ((not quoted?) (if angled? (%cc-pp-find name %cc-pp-paths) ()))
+      (absolute? (if (file-exists? name) name (%cc-oops (string-append "#include \"" name "\": no such file"))))
+      (#t
+        (let ((path (%cc-pp-find name (pair %cc-pp-dir %cc-pp-paths))))
+          (if (null? path)
+            (%cc-oops (string-append "#include \"" %cc-pp-dir name "\": no such file"))
+            path))))))
 
 ; the first of the directories DIRS holding the file NAME, as a path, or nil
 (def %cc-pp-find
@@ -747,42 +812,24 @@
       ((file-exists? (string-append (first dirs) name)) (string-append (first dirs) name))
       (#t (self name (rest dirs))))))
 
-; the lines of the file NAME, numbered N: NAME is as an #include names it,
-; from the directory of the file being read, or else from a directory -I
-; names, unless it starts with /
-(def %cc-local-lines
-  (fn (_ name n)
-    (def absolute? (if (> (byte-len name) 0) (= (byte-at name 0) #\/) #f))
-    (def path
-      (if absolute? (if (file-exists? name) name ())
-        (%cc-pp-find name (pair %cc-pp-dir %cc-pp-paths))))
-    (if (null? path)
-      (%cc-oops (string-append "#include \"" (if absolute? name (string-append %cc-pp-dir name))
-                  "\": no such file")))
-    (%cc-file-lines path name n)))
+; The lines #include ARG puts in place of its own, numbered N: those of the
+; file at PATH (%cc-header-path), between two lines that make PATH's
+; directory the one an #include "..." among them looks in, and then the
+; including file's again; or, with PATH nil, the standard header's.
+(def %cc-header-lines
+  (fn (_ arg path n)
+    (def dir-line
+      (fn (_ dir)
+        (pair n (list (list (lit op) "#") (list (lit id) %cc-dir-word) (list (lit str) dir)))))
+    (if (null? path) (%cc-standard-lines arg n)
+      (pair (dir-line (%cc-dir path))
+        (append
+          (map (fn (_ l) (pair n (rest l))) (%cc-lines (cc-raw-tokens (file-read-all path))))
+          (list (dir-line %cc-pp-dir)))))))
 
-; the lines of the file at PATH, which an #include names NAME, numbered N.
-; An #include "..." among them names its file from NAME's own directory, so
-; it is put as from the file being read, or from the -I directory NAME was
-; found in.
-(def %cc-file-lines
-  (fn (_ path name n)
-    (def dir (%cc-dir name))
-    ; a line's tokens, an #include "..." among them put from DIR
-    (def from-dir
-      (fn (_ ts)
-        (def a (%cc-skip-sp ts))
-        (def b (if (if (null? a) #f (%cc-op-is? (first a) "#")) (%cc-skip-sp (rest a)) ()))
-        (def c (if (if (null? b) #f (if (%cc-name? (first b)) (string=? (%cc-text (first b)) "include") #f))
-                 (%cc-skip-sp (rest b)) ()))
-        (def s (if (if (null? c) #f (%cc-tag? (first c) (lit str))) (%cc-text (first c)) ""))
-        (if (if (> (byte-len s) 2) (not (= (byte-at s 1) #\/)) #f)
-          (append (list (first a) (first b) (list (lit sp) " ")
-                    (list (lit str) (string-append "\"" dir (substring s 1 (byte-len s)))))
-            (rest c))
-          ts)))
-    (map (fn (_ l) (pair n (if (string=? dir "") (rest l) (from-dir (rest l)))))
-      (%cc-lines (cc-raw-tokens (file-read-all path))))))
+; the directive word of those two lines: no name in C has a blank in it, so
+; no source spells it
+(def %cc-dir-word " dir")
 
 (def %cc-standard-lines
   (fn (_ arg n)
@@ -813,24 +860,27 @@
 ; directive expands them under the macros as they stand.
 ; Collecting: nothing collects on its own, and what a line makes is far
 ; more than it leaves, so the walk collects every few thousand tokens out
-; (a line counts as eight).
+; (a line counts as eight).  A line's expansion counts too, a quarter of a
+; token out for each token it walks, some hundred objects made: a call
+; nested a dozen deep, as x-expr's accessors are, walks its argument again
+; at every level and would make gigabytes between one line and the next.
 (def %cc-pp-walked 0)
-(def %cc-pp-collect!
+(def %cc-pp-work!
   (fn (_ n)
     (set! %cc-pp-walked (fx+ %cc-pp-walked n))
-    (if (fx< %cc-pp-walked 4096) ()
+    (if (fx< %cc-pp-walked 262144) ()
       (do (set! %cc-pp-walked 0)
           (heap-collect)))))
+(def %cc-pp-collect! (fn (_ n) (%cc-pp-work! (fx* n 64))))
 
 ; --- include guards ----------------------------------------------------------
 ; A header wrapped whole in #ifndef G ... #endif gives nothing a second time
 ; once G is defined, so an #include of it is skipped without its text read
 ; again: a header a dozen others include is read once, not a dozen times.  The
-; guards are noted by the spelling of the #include, which names one file
-; within a file's walk (%cc-local-lines puts nested ones from the file
-; being read).
+; guards are noted by the header's path, or by the #include's spelling for a
+; standard header.
 
-(def %cc-pp-guards ())   ; ((SPELLING . G-or-nil) ...), for the walk under way
+(def %cc-pp-guards ())   ; ((PATH-or-SPELLING . G-or-nil) ...), for the walk under way
 
 ; the directive word of a line's tokens TS, or "" when it is no directive
 (def %cc-line-word
@@ -848,7 +898,10 @@
 ; #ifndef G and the #endif closing it has only blank lines after; else nil
 (def %cc-guard
   (fn (_ lines)
-    (def blank? (fn (_ l) (null? (%cc-skip-sp (rest l)))))
+    ; a directory line counts as blank (%cc-header-lines)
+    (def blank?
+      (fn (_ l)
+        (if (null? (%cc-skip-sp (rest l))) #t (string=? (%cc-line-word (rest l)) %cc-dir-word))))
     (def skip (fn (self ls) (if (null? ls) ls (if (blank? (first ls)) (self (rest ls)) ls))))
     ; the lines after the #endif closing an #if open DEPTH deep, or (lit open)
     (def close
@@ -881,6 +934,7 @@
     (def file-macro
       (list "__FILE__" (lit obj) (%cc-stringize (list (list (lit id) %cc-pp-file)))))
     (set! %cc-pp-dir (if (string=? %cc-pp-file "<stdin>") "" (%cc-dir %cc-pp-file)))
+    (def file %cc-pp-file)
     (set! %cc-pp-file "<stdin>")
     (def live?
       (fn (self st) (if (null? st) #t (if (first (first st)) (self (rest st)) #f))))
@@ -932,6 +986,11 @@
                 (def word (if (if (null? ts) #f (%cc-name? (first ts))) (%cc-text (first ts)) ""))
                 (def args (%cc-skip-sp (if (null? ts) ts (rest ts))))
                 (match
+                  ; a header's lines start and end with the directory an
+                  ; #include "..." looks in (%cc-header-lines)
+                  ((string=? word %cc-dir-word)
+                    (do (set! %cc-pp-dir (%cc-text (first args)))
+                        (self (rest ls) n macros stack () out2)))
                   ((string=? word "ifdef")
                     (self (rest ls) n macros
                       (pair (open on (if on (not (null? (%cc-macro macros (%cc-directive-name "#ifdef" args)))) #f))
@@ -960,20 +1019,37 @@
                   ((not on) (self (rest ls) n macros stack () out2))
                   ((string=? word "include")
                     (let ((s (%cc-spell (%cc-no-sp args))))
-                      (def noted (%cc-guard-noted s %cc-pp-guards))
+                      (def path (%cc-header-path s))
+                      (def key (if (null? path) s path))
+                      (def noted (%cc-guard-noted key %cc-pp-guards))
                       (if (if (null? noted) #f (if (null? (rest noted)) #f (not (null? (%cc-macro macros (rest noted))))))
                         (self (rest ls) n macros stack () out2)
-                        (let ((hl (%cc-header-lines s n)))
-                          (if (null? noted) (set! %cc-pp-guards (pair (pair s (%cc-guard hl)) %cc-pp-guards)) ())
+                        (let ((hl (%cc-header-lines s path n)))
+                          (if (null? noted) (set! %cc-pp-guards (pair (pair key (%cc-guard hl)) %cc-pp-guards)) ())
                           (self (append hl (rest ls)) n macros stack () out2)))))
                   ((string=? word "define")
                     (self (rest ls) n (%cc-macro-define! macros (%cc-define args)) stack () out2))
                   ((string=? word "undef")
                     (self (rest ls) n (%cc-macro-undef! macros (%cc-directive-name "#undef" args)) stack () out2))
+                  ; a pragma x-cc does not know, which is every one, is
+                  ; ignored, as C says
+                  ((string=? word "pragma") (self (rest ls) n macros stack () out2))
+                  ; #warning says its text on stderr and goes on; #error
+                  ; says it and stops
+                  ((string=? word "warning")
+                    (do (file-write 2 (string-append file ":" (convert n %string) ": warning: "
+                                        (%cc-spell args) "\n"))
+                        (self (rest ls) n macros stack () out2)))
+                  ((string=? word "error") (%cc-oops (string-append "#error " (%cc-spell args))))
                   (#t (%cc-oops (string-append "unsupported directive #" word))))))))))
     (go (%cc-lines (cc-raw-tokens src)) 1 (%cc-pp-defined) () () ())))
 
-; the macros the command line defines, as #define defines them
+; The macros x-cc defines before the command line's: __attribute__((...))
+; reads as nothing, since nothing it asks for -- unused, a sanitizer left
+; off -- changes what x-cc makes.
+(def %cc-pp-builtins (list "__attribute__(x)"))
+
+; the macros x-cc and then the command line define, as #define defines them
 (def %cc-pp-defined
   (fn (_)
     (def go
@@ -982,7 +1058,7 @@
           (self (rest ds)
             (%cc-macro-define! macros
               (%cc-define (%cc-skip-sp (rest (first (%cc-lines (cc-raw-tokens (string-append (first ds) "\n"))))))))))))
-    (go %cc-pp-defines (%cc-macros-new))))
+    (go (append %cc-pp-builtins %cc-pp-defines) (%cc-macros-new))))
 
 ; --- several files -------------------------------------------------------------
 ; A program of several files is one stream of tokens, each file preprocessed
