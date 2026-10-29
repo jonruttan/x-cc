@@ -52,7 +52,7 @@
   proc-capture reverse sha256-hex-n string-append string-concat string=?
   substring heap-collect)
 (import cc/pp cc-lex)
-(import cc/parse cc-parse c-type-size c-type-align plain-char round-up struct-entry)
+(import cc/parse cc-parse cc-lexed-count c-type-size c-type-align plain-char round-up struct-entry)
 (import cc/eval common-c-type c-type-elem library-c-type
   library-double-label library-variadic library-variadic-fixed library-area-doubles
   library-area-record library-area-count library-area-stack library-trampoline-arm64 init-members
@@ -977,23 +977,28 @@
   (fn (_ init) (first (%cc-gen-address-target init))))
 
 ; The addresses the pointers in the data start at, written by main before
-; its body runs: x22 is the data's address only at run time
+; its body runs: x22 is the data's address only at run time.  Each looks
+; its name up among the program's, and nothing collects on its own: every
+; 64 of them, the heap is collected
 (def %cc-gen-fixups!
   (fn (_)
     (def go
-      (fn (self fs)
-        (if (null? fs) ()
-          (let ((f (first fs)))
-            (set! %cc-gen-static-scope (rest (rest f)))
-            (%cc-gen-address! x22 (first f))
-            (%cc-gen! (lit mov) x1 x0)
-            (def fname (%cc-gen-function-named (first (rest f))))
-            (if (null? fname)
-              (%cc-gen-address! x22 (%cc-gen-address-constant (first (rest f))))
-              (%cc-gen-function-address! fname))
-            (%cc-gen! (lit str) x0 (mem x1 0))
-            (self (rest fs))))))
-    (go (reverse %cc-gen-fixups))
+      (fn (self fs k)
+        (match
+          ((null? fs) ())
+          ((>= k 64) (do (heap-collect) (self fs 0)))
+          (#t
+            (let ((f (first fs)))
+              (set! %cc-gen-static-scope (rest (rest f)))
+              (%cc-gen-address! x22 (first f))
+              (%cc-gen! (lit mov) x1 x0)
+              (def fname (%cc-gen-function-named (first (rest f))))
+              (if (null? fname)
+                (%cc-gen-address! x22 (%cc-gen-address-constant (first (rest f))))
+                (%cc-gen-function-address! fname))
+              (%cc-gen! (lit str) x0 (mem x1 0))
+              (self (rest fs) (+ k 1)))))))
+    (go (reverse %cc-gen-fixups) 0)
     (set! %cc-gen-static-scope ())))
 
 ; the name NODE gives when it is NAME or &NAME, under any casts, or ()
@@ -1043,11 +1048,16 @@
     (set! %cc-gen-statics (pair (pair node (pair off c-type)) %cc-gen-statics))))
 
 ; every static declaration in NODE, laid out; the ones a block or a
-; function declares go out of scope at its end
+; function declares go out of scope at its end.  The walk visits every
+; node of every function, and nothing collects on its own: every 4096
+; nodes, the heap is collected
+(def %cc-gen-scanned 0)
 (def %cc-gen-scan-statics!
   (fn (self node)
     (if (pair? node)
       (let ((scope %cc-gen-static-scope))
+        (set! %cc-gen-scanned (+ %cc-gen-scanned 1))
+        (if (< %cc-gen-scanned 4096) () (do (set! %cc-gen-scanned 0) (heap-collect)))
         (if (if (eq? (first node) (lit decl)) (%cc-gen-static-decl? node) #f)
           (%cc-gen-static! node)
           ())
@@ -3115,7 +3125,7 @@
 (def cc-compile-image
   (fn (_ src target)
     (def toks (cc-lex src))
-    (def ntoks (length toks))
+    (def ntoks (cc-lexed-count))
     ; the tokens are let go here, so the parse holds only those it has yet
     ; to read
     (def prog (cc-parse ((fn (_ ts) (set! toks ()) ts) toks)))
