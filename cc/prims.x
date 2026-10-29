@@ -58,6 +58,8 @@
 
 (def length (fn (_ l) (List length l)))
 (def reverse (fn (_ l) (%cc-rev l ())))
+; L reversed onto the front of ACC, in one pass: (append (reverse l) acc)
+(def reverse-onto (fn (_ l acc) (%cc-rev l acc)))
 (def %cc-rev
   (fn (self l acc)
     (if (null? l) acc (self (rest l) (pair (first l) acc)))))
@@ -172,7 +174,7 @@
 (provide cc/prims
   char->integer integer->char byte-at byte-len
   string-length substring string-append string-concat string=?
-  list->string convert length reverse append map filter set-first!
+  list->string convert length reverse reverse-onto append map filter set-first!
   vec-make vec-ref vec-set!
   mem-make mem-ptr ptr-int word-ref word-set! mem-set-byte! mem-ref-byte mem-copy!
   mem-ref-at mem-set-at! mem-fill! int-ptr heap-count heap-collect evals fx+ fx- fx* fx< fx<< fx>>

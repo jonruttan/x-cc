@@ -31,7 +31,7 @@
 
 (import cc/prims append byte-at byte-len char->integer convert file-exists? file-read-all file-write filter
   fx& fx* fx+ fx- fx< heap-collect length map
-  reverse string-append string-concat string=? substring vec-make vec-ref vec-set!)
+  reverse reverse-onto string-append string-concat string=? substring vec-make vec-ref vec-set!)
 (import cc/tokens cc-raw-tokens cc-token name-bucket name-buckets)
 (import cc/parse cc-parse-const cc-token-lines! plain-char)
 
@@ -927,8 +927,9 @@
 (def %cc-guard-noted
   (fn (self s gs) (if (null? gs) () (if (string=? (first (first gs)) s) (first gs) (self s (rest gs))))))
 
+; RAW, a file's raw tokens, preprocessed
 (def %cc-preprocess
-  (fn (_ src)
+  (fn (_ raw)
     (set! %cc-pp-lines ())
     (set! %cc-pp-guards ())
     (def file-macro
@@ -1042,7 +1043,7 @@
                         (self (rest ls) n macros stack () out2)))
                   ((string=? word "error") (%cc-oops (string-append "#error " (%cc-spell args))))
                   (#t (%cc-oops (string-append "unsupported directive #" word))))))))))
-    (go (%cc-lines (cc-raw-tokens src)) 1 (%cc-pp-defined) () () ())))
+    (go (%cc-lines raw) 1 (%cc-pp-defined) () () ())))
 
 ; The macros x-cc defines before the command line's: __attribute__((...))
 ; reads as nothing, since nothing it asks for -- unused, a sanitizer left
@@ -1184,11 +1185,39 @@
     (def n (byte-len %cc-object-mark))
     (if (>= (byte-len text) n) (string=? (substring text 0 n) %cc-object-mark) #f)))
 
+; the raw tokens of a unit's TEXT.  An object's are read a piece of some
+; 8 KB at a time, each ending at a newline, with a collect after each: the
+; Lexer makes some 10 KB of garbage a byte, and an object is preprocessed
+; text, where no token runs past its line.  A file's are read whole, since
+; a comment can.
+(def %cc-unit-tokens
+  (fn (_ text)
+    (def len (byte-len text))
+    ; the end of the piece from I: the first newline at or past I + 8192
+    (def end
+      (fn (self j) (if (>= j len) len (if (= (byte-at text j) 10) (+ j 1) (self (+ j 1))))))
+    (def go
+      (fn (self i acc)
+        (if (>= i len) acc
+          (let ((j (end (if (< (+ i 8192) len) (+ i 8192) len))))
+            (def acc2 (reverse-onto (cc-raw-tokens (substring text i j)) acc))
+            (heap-collect)
+            (self j acc2)))))
+    ; the pieces' tokens come out last first, and are turned a run at a
+    ; time, since nothing collects on its own
+    (def back
+      (fn (self ts acc k)
+        (match
+          ((null? ts) acc)
+          ((< k 4096) (self (rest ts) (pair (first ts) acc) (+ k 1)))
+          (#t (do (heap-collect) (self (rest ts) (pair (first ts) acc) 0))))))
+    (if (%cc-object? text) (back (go 0 ()) () 0) (cc-raw-tokens text))))
+
 ; the object for the file PATH, whose text is SRC
 (def cc-pp-object
   (fn (_ path src)
     (set! %cc-pp-file path)
-    (def ts (%cc-preprocess src))
+    (def ts (%cc-preprocess (cc-raw-tokens src)))
     (def ns (reverse %cc-pp-lines))
     (set! %cc-pp-lines ())
     ; AT the line being spelled; a token goes on its own line, a newline
@@ -1228,38 +1257,51 @@
     (def many? (not (null? (rest units))))
     (def paths %cc-pp-paths)
     (def defines %cc-pp-defines)
-    ; the raw tokens and their lines of every file, each list reversed
+    ; the raw tokens and their lines of every file, each list reversed: a
+    ; file's go onto the front of the ones before it, one pass a list, and
+    ; a collect follows each file, since a pass makes some seventy objects
+    ; a token
     (def read
       (fn (self us n ts ns)
         (if (null? us) (pair ts ns)
           (do (set! %cc-pp-file (first (first us)))
               (if (%cc-object? (rest (first us))) (cc-pp-options! () ()) (cc-pp-options! paths defines))
-              (let ((raw (%cc-preprocess (rest (first us)))))
+              (let ((raw (%cc-preprocess (%cc-unit-tokens (rest (first us))))))
                 (def lines (reverse %cc-pp-lines))
+                (set! %cc-pp-lines ())
                 (def raw2 (if many? (%cc-rename-statics raw (%cc-file-statics raw) n) raw))
-                (self (rest us) (+ n 1) (append (reverse raw2) ts) (append (reverse lines) ns)))))))
+                (def ts2 (reverse-onto raw2 ts))
+                (def ns2 (reverse-onto lines ns))
+                (set! raw ())
+                (set! raw2 ())
+                (set! lines ())
+                (heap-collect)
+                (self (rest us) (+ n 1) ts2 ns2))))))
     (def all (read units 1 () ()))
     (cc-pp-options! paths defines)
-    ; TS and NS, each token's line, walked together: (TOKENS . LINES)
+    ; TS and NS, each token's line, walked together from the last token back,
+    ; so a token paired onto the front leaves both in source order with no
+    ; pass to reverse them: (TOKENS . LINES)
     (def go
       (fn (self ts ns acc lacc)
         (def n (if (null? ns) 0 (first ns)))
         (def ns2 (if (null? ns) ns (rest ns)))
         (%cc-pp-collect! 1)
         (match
-          ((null? ts) (pair (reverse acc) (reverse lacc)))
+          ((null? ts) (pair acc lacc))
           ((%cc-tag? (first ts) (lit sp)) (self (rest ts) ns2 acc lacc))
           (#t
             (let ((t (cc-token (first ts))))
               (if (if (eq? (first t) (lit str))
                     (if (null? acc) #f (eq? (first (first acc)) (lit str)))
                     #f)
+                ; adjacent strings join, at the earlier one's line
                 (self (rest ts) ns2
-                  (pair (list (lit str) (string-append (first (rest (first acc))) (first (rest t))))
+                  (pair (list (lit str) (string-append (first (rest t)) (first (rest (first acc)))))
                     (rest acc))
-                  lacc)
+                  (pair n (rest lacc)))
                 (self (rest ts) ns2 (pair t acc) (pair n lacc))))))))
-    (def r (go (reverse (first all)) (reverse (rest all)) () ()))
+    (def r (go (first all) (rest all) () ()))
     ; the parser reports an error at its token's line
     (cc-token-lines! (first r) (rest r))
     (first r)))

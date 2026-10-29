@@ -47,21 +47,35 @@
 ; from cc-lex, or a constant expression for #if, have no lines, and an
 ; error in them says none.
 (def %cc-p-lexed ())    ; the tokens cc-lex last answered
+(def %cc-p-ntoks 0)     ; how many there are
 (def %cc-p-lines ())    ; their lines in order, as runs: ((LINE . TOKENS) ...)
 (def %cc-p-count ())    ; how many tokens are being parsed, when they are cc-lex's
 (def %cc-p-at ())       ; the rest of them last looked at
 
+; the walks below go over every token's line, and nothing collects on its
+; own: every 4096 steps, the heap is collected
 (def cc-token-lines!
   (fn (_ toks lines)
+    (def tick
+      (fn (_ k) (if (< k 4096) (+ k 1) (do (heap-collect) 0))))
+    ; the runs, last first, and how many lines they cover
     (def runs
-      (fn (self ls acc)
+      (fn (self ls acc n k)
         (match
-          ((null? ls) (reverse acc))
+          ((null? ls) (pair acc n))
           ((if (null? acc) #f (= (first (first acc)) (first ls)))
-            (self (rest ls) (pair (pair (first ls) (+ (rest (first acc)) 1)) (rest acc))))
-          (#t (self (rest ls) (pair (pair (first ls) 1) acc))))))
+            (self (rest ls) (pair (pair (first ls) (+ (rest (first acc)) 1)) (rest acc)) (+ n 1) (tick k)))
+          (#t (self (rest ls) (pair (pair (first ls) 1) acc) (+ n 1) (tick k))))))
+    (def back
+      (fn (self rs acc k)
+        (if (null? rs) acc (self (rest rs) (pair (first rs) acc) (tick k)))))
     (set! %cc-p-lexed toks)
-    (set! %cc-p-lines (runs lines ()))))
+    (def r (runs lines () 0 0))
+    (set! %cc-p-ntoks (rest r))
+    (set! %cc-p-lines (back (first r) () 0))))
+
+; how many tokens cc-lex last answered
+(def cc-lexed-count (fn (_) %cc-p-ntoks))
 
 ; the line of the token the parser was looking at, or of the BACK-th token
 ; before it, or nil; past the last token, the last token's line
@@ -1784,21 +1798,24 @@
               (self (rest its) n (first its))
               (%cc-p-err (string-append "a second definition of " n))))
           (#t (self (rest its) n found)))))
+    ; each global walks the program twice, and nothing collects on its own:
+    ; every 16 of them, the heap is collected
     (def go
-      (fn (self its acc)
+      (fn (self its acc k)
         (match
           ((null? its) (reverse acc))
-          ((not (gdecl? (first its))) (self (rest its) (pair (first its) acc)))
-          ((later? (rest its) (name (first its))) (self (rest its) acc))
+          ((not (gdecl? (first its))) (self (rest its) (pair (first its) acc) k))
+          ((>= k 16) (do (heap-collect) (self its acc 0)))
+          ((later? (rest its) (name (first its))) (self (rest its) acc (+ k 1)))
           (#t (let ((it (let ((d (chosen prog (name (first its)) ()))) (if (null? d) (first its) d))))
                 (if (%cc-p-unsized? (c-type it))
-                  (self (rest its) acc)
-                  (self (rest its) (pair it acc))))))))
-    (go prog ())))
+                  (self (rest its) acc (+ k 1))
+                  (self (rest its) (pair it acc) (+ k 1))))))))
+    (go prog () 0)))
 
 (def cc-parse
   (fn (_ toks)
-    (set! %cc-p-count (if (eq? toks %cc-p-lexed) (length toks) ()))
+    (set! %cc-p-count (if (eq? toks %cc-p-lexed) %cc-p-ntoks ()))
     (set! %cc-p-lexed ())
     (set! %cc-p-structs ())
     ; <stdarg.h>'s va_list is this one
@@ -1876,5 +1893,5 @@
     (if (not (null? (rest r))) (%cc-p-err "expected a constant expression"))
     (%cc-p-const (first r))))
 
-(provide cc/parse cc-parse cc-parse-const cc-token-lines! c-type-size c-type-align plain-char round-up
+(provide cc/parse cc-parse cc-parse-const cc-token-lines! cc-lexed-count c-type-size c-type-align plain-char round-up
   struct-entry struct-table)
