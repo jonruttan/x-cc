@@ -15,16 +15,16 @@
 ; what the loader reads: the dynamic section, which names libc.so.6 and
 ; libm.so.6, where glibc keeps the maths functions (musl answers to both
 ; names itself), and where the rest is; a symbol table, the program's
-; imports each an undefined function; their names; a hash table with every
-; bucket empty, since the program defines nothing for anyone to find; and a
-; relocation for each import's slot, which the loader fills with the
+; imports each an undefined function, then what it exports, for dlsym to
+; find; their names; a hash table of one bucket, which chains the exports;
+; and a relocation for each import's slot, which the loader fills with the
 ; function's address before it jumps to the entry.
 ;
 ; The loader is the one that started x itself (elf-interpreter): the
 ; compiler writes for the system it runs on, glibc's or musl's.
 (module cc/elf)
 
-(import cc/prims append byte-at byte-len file-close file-open-read file-read file-seek
+(import cc/prims append byte-at byte-len file-close file-open-read file-read file-seek map
   length mem-make reverse substring)
 (import cc/image img-new img-u8! img-u16! img-u32! img-u64! img-bytes! img-code! img-pieces! img-write!)
 
@@ -115,10 +115,13 @@
 ; CODE is the code, entry first; DATA the data segment, (LENGTH . PIECES),
 ; each piece (OFFSET . BYTES) and what none covers zero; MACHINE
 ; the e_machine value; IMPORTS the slots in the data the loader fills with
-; the C library's functions, each (OFFSET . NAME).
+; the C library's functions, each (OFFSET . NAME); EXPORTS, when given,
+; what the executable exports, each (NAME text . OFFSET) in the code or
+; (NAME data . OFFSET) in the data.
 ; Writes the executable to PATH and answers its size in bytes.
 (def elf-write!
-  (fn (_ path code data machine imports)
+  (fn (_ path code data machine imports . more)
+    (def exports (if (null? more) () (first more)))
     (def interp (elf-interpreter))
     (def codeoff (%cc-elf-codeoff))
     (def gap (%cc-elf-gap machine))
@@ -127,15 +130,17 @@
     (def datalen (first data))
     (def dataoff (- (+ codeoff (elf-data-at codelen machine)) gap))
     (def n (length imports))
-    ; the names: a NUL, libc.so.6, libm.so.6, then each import's
+    (def m (length exports))
+    ; the names: a NUL, libc.so.6, libm.so.6, then each import's, then each
+    ; export's
     (def names
       (let ((go (fn (self is at acc offs)
                   (if (null? is) (pair acc (reverse offs))
-                    (let ((s (rest (first is))))
+                    (let ((s (first (first is))))
                       (self (rest is) (+ at (+ (byte-len s) 1))
                         (append acc (append (%cc-elf-ascii s) (list 0)))
                         (pair at offs)))))))
-        (go imports 21
+        (go (append (map (fn (_ i) (list (rest i))) imports) exports) 21
           (append (list 0)
             (append (%cc-elf-ascii "libc.so.6")
               (append (list 0) (append (%cc-elf-ascii "libm.so.6") (list 0)))))
@@ -144,10 +149,11 @@
     ; the loader's tables, after the data at eight-byte boundaries
     (def dyn (* 8 (/ (+ dataoff datalen 7) 8)))
     (def ndyn 12)
+    (def nsym (+ 1 (+ n m)))
     (def symtab (+ dyn (* 16 ndyn)))
-    (def strtab (+ symtab (* 24 (+ n 1))))
+    (def strtab (+ symtab (* 24 nsym)))
     (def hash (* 8 (/ (+ strtab strsz 7) 8)))
-    (def rela (+ hash (* 4 (+ 3 (+ n 1)))))
+    (def rela (+ hash (* 4 (+ 3 nsym))))
     (def relasz (* 24 n))
     (def total (* 8 (/ (+ rela relasz 7) 8)))
     (def img (img-new total))
@@ -211,10 +217,31 @@
                         (img-u64! img (+ r 8) (+ (* k 4294967296) (%cc-elf-glob-dat machine)))
                         (self (rest is) (+ k 1) (rest offs))))))))
       (go imports 1 (rest names)))
+    ; then each export, a global function or object, absolute, since the
+    ; executable has no sections
+    (let ((go (fn (self es k offs)
+                (if (null? es) ()
+                  (let ((sym (+ symtab (* 24 k))) (e (first es)))
+                    (def text? (eq? (first (rest e)) (lit text)))
+                    (do (img-u32! img sym (first offs))
+                        (img-u8! img (+ sym 4) (if text? 0x12 0x11))
+                        (img-u16! img (+ sym 6) 0xFFF1)
+                        (img-u64! img (+ sym 8)
+                          (if text? (+ entry (rest (rest e))) (addr (+ dataoff (rest (rest e))))))
+                        (self (rest es) (+ k 1) (rest offs))))))))
+      (go exports (+ n 1) (let ((drop (fn (self os k) (if (= k 0) os (self (rest os) (- k 1))))))
+                            (drop (rest names) n))))
     (img-bytes! img strtab (first names))
-    ; the hash table: one bucket, empty, and a chain entry per symbol
+    ; the hash table: one bucket, which holds the exports in one chain, and
+    ; a chain entry per symbol -- a lookup reads the bucket, then the chain
     (img-u32! img hash 1)
-    (img-u32! img (+ hash 4) (+ n 1))
+    (img-u32! img (+ hash 4) nsym)
+    (img-u32! img (+ hash 8) (if (= m 0) 0 (+ n 1)))
+    (let ((go (fn (self k)
+                (if (>= k (- nsym 1)) ()
+                  (do (img-u32! img (+ hash (* 4 (+ 3 k))) (+ k 1))
+                      (self (+ k 1)))))))
+      (go (+ n 1)))
 
     (img-write! img path total)
     total))

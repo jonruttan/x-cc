@@ -23,8 +23,8 @@
 ; short.  Every byte in that range is final before the pages are hashed.
 (module cc/macho)
 
-(import cc/prims append byte-at byte-len length reverse sha256-hex-n sha256-jit!
-  string-append word-ref word-set! fx+ fx<)
+(import cc/prims append byte-at byte-len length map reverse set-first! sha256-hex-n sha256-jit!
+  string-append string=? substring word-ref word-set! fx+ fx<)
 (import cc/image img-new img-u8! img-u16! img-u32! img-u64! img-be32! img-be64!
   img-bytes! img-code! img-pieces! img-ascii! img-write!)
 
@@ -146,6 +146,115 @@
               (first names))))
     (pair (append bytes (%cc-macho-zeros (- total (length bytes)))) slots)))
 
+; V as ULEB128
+(def %cc-macho-uleb
+  (fn (self v) (if (< v 128) (list v) (pair (| 128 (& v 127)) (self (>> v 7))))))
+
+; does name A sort before name B, byte by byte
+(def %cc-macho-less?
+  (fn (_ a b)
+    (def go
+      (fn (self i)
+        (match
+          ((>= i (byte-len b)) #f)
+          ((>= i (byte-len a)) #t)
+          ((= (byte-at a i) (byte-at b i)) (self (+ i 1)))
+          (#t (< (byte-at a i) (byte-at b i))))))
+    (go 0)))
+
+; SYMS, each (NAME . ADDRESS), in the order of their names
+(def %cc-macho-sort
+  (fn (self syms)
+    (def halves
+      (fn (h xs l r) (if (null? xs) (pair l r) (h (rest xs) r (pair (first xs) l)))))
+    (def merge
+      (fn (m a b)
+        (match
+          ((null? a) b)
+          ((null? b) a)
+          ((%cc-macho-less? (first (first b)) (first (first a))) (pair (first b) (m a (rest b))))
+          (#t (pair (first a) (m (rest a) b))))))
+    (if (if (null? syms) #t (null? (rest syms))) syms
+      (let ((h (halves syms () ())))
+        (merge (self (first h)) (self (rest h)))))))
+
+; how far A and B, from FROM on, read the same
+(def %cc-macho-common
+  (fn (_ a b from)
+    (def go (fn (self i)
+              (if (if (< i (byte-len a)) (if (< i (byte-len b)) (= (byte-at a i) (byte-at b i)) #f) #f)
+                (self (+ i 1)) i)))
+    (go from)))
+
+; The exports trie's node for SYMS, sorted, each (NAME . ADDRESS), whose
+; names read the same up to DEPTH: (OFFSET ADDRESS . CHILDREN), OFFSET a
+; cell the layout fills, ADDRESS the one whose name ends at DEPTH or nil,
+; CHILDREN each (EDGE . NODE), EDGE what follows DEPTH in a run of names
+; that start alike there.
+(def %cc-macho-trie-node
+  (fn (self syms depth)
+    (def term? (= (byte-len (first (first syms))) depth))
+    (def others (if term? (rest syms) syms))
+    ; the run of SS that has the first's byte at DEPTH, and what follows it
+    (def run
+      (fn (r ss acc)
+        (if (if (null? ss) #f
+              (if (null? acc) #t (= (byte-at (first (first ss)) depth) (byte-at (first (first acc)) depth))))
+          (r (rest ss) (pair (first ss) acc))
+          (pair (reverse acc) ss))))
+    (def children
+      (fn (c ss)
+        (if (null? ss) ()
+          (let ((g (run ss ())))
+            (def lo (first (first (first g))))
+            (def hi (first (first (reverse (first g)))))
+            (def k (%cc-macho-common lo hi depth))
+            (pair (pair (substring lo depth k) (self (first g) k)) (c (rest g)))))))
+    (pair (pair 0 ()) (pair (if term? (rest (first syms)) ()) (children others)))))
+
+; the nodes under NODE and NODE, in the order they are written
+(def %cc-macho-trie-nodes
+  (fn (self node)
+    (pair node
+      (let ((go (fn (g cs) (if (null? cs) () (append (self (rest (first cs))) (g (rest cs)))))))
+        (go (rest (rest node)))))))
+
+; NODE's bytes, at the children's offsets as they stand
+(def %cc-macho-trie-bytes
+  (fn (_ node)
+    (def addr (first (rest node)))
+    (def cs (rest (rest node)))
+    (append
+      (if (null? addr) (list 0)
+        (let ((info (append (list 0) (%cc-macho-uleb addr))))
+          (append (%cc-macho-uleb (length info)) info)))
+      (pair (length cs)
+        (let ((go (fn (g cs)
+                    (if (null? cs) ()
+                      (append (%cc-macho-ascii (first (first cs)))
+                        (pair 0 (append (%cc-macho-uleb (first (first (rest (first cs)))))
+                                  (g (rest cs)))))))))
+          (go cs))))))
+
+; The exports trie for SYMS, each (NAME . ADDRESS), ADDRESS from the
+; header, as its bytes.  A node's place is a ULEB128 in its parent, so the
+; places are laid out again until none moves, as ld does.
+(def %cc-macho-trie
+  (fn (_ syms)
+    (def nodes (%cc-macho-trie-nodes (%cc-macho-trie-node (%cc-macho-sort syms) 0)))
+    (def lay
+      (fn (self)
+        (def place
+          (fn (p ns at moved)
+            (if (null? ns) moved
+              (let ((was (first (first (first ns)))))
+                (set-first! (first (first ns)) at)
+                (p (rest ns) (+ at (length (%cc-macho-trie-bytes (first ns))))
+                  (if moved #t (not (= was at))))))))
+        (if (place nodes 0 #f) (self) ())))
+    (lay)
+    (%cc-macho-cat (map (fn (_ n) (%cc-macho-trie-bytes n)) nodes))))
+
 ; the bytes of ASCII text S
 (def %cc-macho-ascii
   (fn (_ s)
@@ -203,10 +312,13 @@
 ; CODE is the code, entry first; DATA the data segment, (LENGTH . PIECES),
 ; each piece (OFFSET . BYTES) and what none covers zero;
 ; IMPORTS the slots in the data dyld fills with libSystem's functions, each
-; (OFFSET . NAME), in the order of their offsets.
+; (OFFSET . NAME), in the order of their offsets; EXPORTS, when given, what
+; the executable exports beside __mh_execute_header and _start, each (NAME
+; text . OFFSET) in the code or (NAME data . OFFSET) in the data.
 ; Writes the executable to PATH and answers its size in bytes.
 (def macho-write!
-  (fn (_ path code data imports)
+  (fn (_ path code data imports . more)
+    (def exports (if (null? more) () (first more)))
     (def vmbase %cc-macho-vmbase)
     (def codeoff %cc-macho-codeoff)
     (def codelen (first code))
@@ -221,13 +333,46 @@
     (def linkedit (+ dataoff datasize))
     (def fx (%cc-macho-fixups imports dataoff (/ datavm %cc-macho-segalign)))
     (def fxlen (length (first fx)))
+    ; the symbols, each (NAME ADDRESS . TYPE), ADDRESS from the header, in
+    ; the order of their names, one of a name: a symbol in the code is in
+    ; __text, one in the data absolute, since __DATA has no sections
+    (def syms
+      (let ((dedup (fn (self ss)
+                     (match
+                       ((null? ss) ())
+                       ((null? (rest ss)) ss)
+                       ((string=? (first (first ss)) (first (first (rest ss)))) (self (rest ss)))
+                       (#t (pair (first ss) (self (rest ss))))))))
+        (dedup
+          (%cc-macho-sort
+            (append
+              (list (pair "__mh_execute_header" (pair 0 (lit text)))
+                    (pair "_start" (pair codeoff (lit text))))
+              (map (fn (_ e)
+                     (def at (rest (rest e)))
+                     (if (eq? (first (rest e)) (lit text))
+                       (pair (string-append "_" (first e)) (pair (+ codeoff at) (lit text)))
+                       (pair (string-append "_" (first e)) (pair (+ dataoff at) (lit data)))))
+                exports))))))
+    (def nsyms (length syms))
+    (def trie-bytes
+      (%cc-macho-trie (map (fn (_ s) (pair (first s) (first (rest s)))) syms)))
+    ; the string table: a space and a NUL, then each name; where each starts
+    (def strs
+      (let ((go (fn (self ss at acc offs)
+                  (if (null? ss) (pair acc (reverse offs))
+                    (self (rest ss) (+ at (+ (byte-len (first (first ss))) 1))
+                      (append acc (append (%cc-macho-ascii (first (first ss))) (list 0)))
+                      (pair at offs))))))
+        (go syms 2 (list 0x20 0) ())))
     ; the link-edit data, in the order ld writes it
     (def fixups linkedit)
     (def trie (+ linkedit fxlen))
-    (def starts (+ trie 48))
-    (def symoff (+ trie 56))
-    (def stroff (+ trie 88))
-    (def sigoff (+ trie 120))
+    (def starts (+ trie (%cc-macho-round-up (length trie-bytes) 8)))
+    (def symoff (+ starts 8))
+    (def stroff (+ symoff (* 16 nsyms)))
+    (def strsize (%cc-macho-round-up (length (first strs)) 8))
+    (def sigoff (+ stroff strsize))
     (def idlen (+ (byte-len %cc-macho-ident) 1))
     (def nslots (/ (+ sigoff 4095) 4096))
     (def hashoff (+ 88 idlen))
@@ -260,17 +405,17 @@
       (%cc-macho-round-up (- total linkedit) %cc-macho-segalign)
       linkedit (- total linkedit) 1 0)
     (%cc-macho-data-cmd! img 400 0x80000034 fixups fxlen) ; LC_DYLD_CHAINED_FIXUPS
-    (%cc-macho-data-cmd! img 416 0x80000033 trie 48)     ; LC_DYLD_EXPORTS_TRIE
+    (%cc-macho-data-cmd! img 416 0x80000033 trie (- starts trie)) ; LC_DYLD_EXPORTS_TRIE
     (img-u32! img 432 0x02)            ; LC_SYMTAB
     (img-u32! img 436 24)
     (img-u32! img 440 symoff)
-    (img-u32! img 444 2)
+    (img-u32! img 444 nsyms)
     (img-u32! img 448 stroff)
-    (img-u32! img 452 32)
+    (img-u32! img 452 strsize)
     (img-u32! img 456 0x0B)            ; LC_DYSYMTAB
     (img-u32! img 460 80)
-    (img-u32! img 476 2)               ; two defined external symbols
-    (img-u32! img 480 2)               ; no undefined ones after them
+    (img-u32! img 476 nsyms)           ; every symbol defined and external
+    (img-u32! img 480 nsyms)           ; no undefined ones after them
     (img-u32! img 536 0x0E)            ; LC_LOAD_DYLINKER
     (img-u32! img 540 32)
     (img-u32! img 544 12)
@@ -312,31 +457,28 @@
                         (self (rest ss))))))))
       (go (rest fx)))
 
-    ; the exports trie: __mh_execute_header at 0, _start at the entry
-    (img-bytes! img trie (list 0 1 0x5F 0 18 0 0 0 0 2 0 0 0 3 0))
-    (img-bytes! img (+ trie 15) (%cc-macho-uleb2 codeoff))
-    (img-bytes! img (+ trie 17) (list 0 0 2))
-    (img-ascii! img (+ trie 20) "_mh_execute_header")
-    (img-u8! img (+ trie 39) 9)
-    (img-ascii! img (+ trie 40) "start")
-    (img-u8! img (+ trie 46) 13)
+    ; the exports trie: __mh_execute_header at 0, _start at the entry, and
+    ; the EXPORTS
+    (img-bytes! img trie trie-bytes)
 
     ; function starts: the entry
     (img-bytes! img starts (%cc-macho-uleb2 codeoff))
 
-    ; the symbol table and its strings
-    (img-u32! img symoff 2)            ; __mh_execute_header
-    (img-u8! img (+ symoff 4) 0x0F)    ; N_SECT N_EXT
-    (img-u8! img (+ symoff 5) 1)
-    (img-u16! img (+ symoff 6) 0x10)   ; REFERENCED_DYNAMICALLY
-    (img-u64! img (+ symoff 8) vmbase)
-    (img-u32! img (+ symoff 16) 22)    ; _start
-    (img-u8! img (+ symoff 20) 0x0F)
-    (img-u8! img (+ symoff 21) 1)
-    (img-u64! img (+ symoff 24) (+ vmbase codeoff))
-    (img-u8! img stroff 0x20)
-    (img-ascii! img (+ stroff 2) "__mh_execute_header")
-    (img-ascii! img (+ stroff 22) "_start")
+    ; the symbol table and its strings: in the code, N_SECT N_EXT in
+    ; section 1; in the data, N_ABS N_EXT; __mh_execute_header
+    ; REFERENCED_DYNAMICALLY
+    (let ((go (fn (self ss offs at)
+                (if (null? ss) ()
+                  (let ((s (first ss)))
+                    (def text? (eq? (rest (rest s)) (lit text)))
+                    (do (img-u32! img at (first offs))
+                        (img-u8! img (+ at 4) (if text? 0x0F 0x03))
+                        (img-u8! img (+ at 5) (if text? 1 0))
+                        (img-u16! img (+ at 6) (if (string=? (first s) "__mh_execute_header") 0x10 0))
+                        (img-u64! img (+ at 8) (+ vmbase (first (rest s))))
+                        (self (rest ss) (rest offs) (+ at 16))))))))
+      (go syms (rest strs) symoff))
+    (img-bytes! img stroff (first strs))
 
     ; Signing digests every page of the file.  Pure x digests 2.4KB a second
     ; and the compiled engine costs about 4.5s to build, so it repays itself

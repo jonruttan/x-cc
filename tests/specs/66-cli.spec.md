@@ -39,7 +39,7 @@ Build a C program into an executable, or run it
 (write (list (cc-cli-plan (list "--help")) (cc-cli-plan (list "run" "a.c" "-x" "--help")) (cc-cli-plan (list "build" "a.c" "-o" "out")) (cc-cli-plan (list "build" "-oout" "a.c")) (cc-cli-plan (list "build" "a.c"))))
 ```
 ---
-    ((help) (run ("a.c") ("-x" "--help")) (build ("a.c") "out" () ()) (build ("a.c") "out" () ()) (build ("a.c") "a.out" () ()))
+    ((help) (run ("a.c") ("-x" "--help")) (build ("a.c") "out" () () ()) (build ("a.c") "out" () () ()) (build ("a.c") "a.out" () () ()))
 
 ### several files: run's up to the first word not ending in .c, and build's
 
@@ -47,7 +47,7 @@ Build a C program into an executable, or run it
 (write (list (cc-cli-plan (list "run" "a.c" "b.c" "x.c.txt" "y.c")) (cc-cli-plan (list "run" "prog" "a.c")) (cc-cli-plan (list "build" "a.c" "-o" "p" "b.c"))))
 ```
 ---
-    ((run ("a.c" "b.c") ("x.c.txt" "y.c")) (run ("prog") ("a.c")) (build ("a.c" "b.c") "p" () ()))
+    ((run ("a.c" "b.c") ("x.c.txt" "y.c")) (run ("prog") ("a.c")) (build ("a.c" "b.c") "p" () () ()))
 
 ### refused: nothing, no file, an option cc does not take, -o with nothing after it
 
