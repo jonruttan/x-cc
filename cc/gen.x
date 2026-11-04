@@ -993,9 +993,12 @@
               (%cc-gen-address! x22 (first f))
               (%cc-gen! (lit mov) x1 x0)
               (def fname (%cc-gen-function-named (first (rest f))))
-              (if (null? fname)
-                (%cc-gen-address! x22 (%cc-gen-address-constant (first (rest f))))
-                (%cc-gen-function-address! fname))
+              (def lname
+                (if (null? fname) (%cc-gen-library-function-node (%cc-gen-uncast (first (rest f)))) ()))
+              (match
+                ((not (null? fname)) (%cc-gen-function-address! fname))
+                ((not (null? lname)) (%cc-gen-library-address! lname))
+                (#t (%cc-gen-address! x22 (%cc-gen-address-constant (first (rest f))))))
               (%cc-gen! (lit str) x0 (mem x1 0))
               (self (rest fs) (+ k 1)))))))
     (go (reverse %cc-gen-fixups) 0)
@@ -1611,6 +1614,8 @@
         ; a function's name is a pointer to it
         ((if (eq? t (lit var)) (%cc-gen-function-name? (first (rest node))) #f)
           (list (lit fnptr) (%cc-gen-ret-find (first (rest node)))))
+        ((if (eq? t (lit var)) (not (null? (%cc-gen-library-function-node node))) #f)
+          (list (lit fnptr) (library-c-type (first (rest node)))))
         ((if (eq? t (lit var)) (%cc-gen-stream? (first (rest node))) #f)
           (list (lit ptr) (lit void)))
         ((eq? t (lit va-here)) (list (lit ptr) (lit char)))
@@ -1792,6 +1797,10 @@
              #f)
            #f)
           (%cc-gen-function-address! (first (rest (first (rest (rest node)))))))
+        ; the C library's function's name, or & of it, is the address the
+        ; loader put in its slot
+        ((not (null? (%cc-gen-library-function-node node)))
+          (%cc-gen-library-address! (%cc-gen-library-function-node node)))
         ((if (eq? t (lit un)) (string=? (first (rest node)) "&") #f)
           (%cc-gen-addr! (first (rest (rest node)))))
         ((if (eq? t (lit un)) (string=? (first (rest node)) "*") #f)
@@ -2374,6 +2383,47 @@
       ((not (null? (%cc-gen-find name))) #f)
       ((not (null? (%cc-gen-global-find name))) #f)
       (#t (not (null? (%cc-gen-fun-find name)))))))
+
+; NODE under any casts
+(def %cc-gen-uncast
+  (fn (self node) (if (eq? (first node) (lit cast)) (self (first (rest (rest node)))) node)))
+
+; the C library's function NODE names as NAME or &NAME, or nil
+(def %cc-gen-library-function-node
+  (fn (_ node)
+    (def name
+      (match
+        ((eq? (first node) (lit var)) (first (rest node)))
+        ((if (if (eq? (first node) (lit un)) (string=? (first (rest node)) "&") #f)
+           (eq? (first (first (rest (rest node)))) (lit var))
+           #f)
+          (first (rest (first (rest (rest node))))))
+        (#t ())))
+    (if (null? name) ()
+      (if (%cc-gen-library-function? name) name ()))))
+
+; Is NAME the C library's function: no local, global or function of the
+; program's, nor a stream (%cc-gen-stream?), and the library has it.  As
+; with a call, a name the library has is its function: the headers here
+; declare none, and a variable of the library's is declared extern, which
+; makes it a global.
+(def %cc-gen-library-function?
+  (fn (_ name)
+    (match
+      ((not (null? (%cc-gen-find name))) #f)
+      ((not (null? (%cc-gen-constant-find name))) #f)
+      ((not (null? (%cc-gen-fun-find name))) #f)
+      ((%cc-gen-stream? name) #f)
+      (#t (%cc-gen-libc-has? name)))))
+
+; The C library's function NAME's address, into x0: what its import slot
+; holds, which the loader fills.  A call through it is the library's
+; (%cc-gen-call-through!).
+(def %cc-gen-library-address!
+  (fn (_ name)
+    (do (asm-load-imm64! %cc-gen-asm x0 (%cc-gen-import-slot name))
+        (%cc-gen! (lit add) x0 x0 x22)
+        (%cc-gen! (lit ldr) x0 (mem x0 0)))))
 
 ; The function NAME's address, into x0, taken from where the instruction
 ; is: its thunk's.  The program's own calls through it take any arguments
