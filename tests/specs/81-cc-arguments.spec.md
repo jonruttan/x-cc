@@ -19,7 +19,7 @@ prints for the same files.
 (write (cc-cli-plan (list "-c" "-O2" "-Wall" "-Wextra" "-Wno-unused-parameter" "-DX_HEAP" "-ffunction-sections" "-fdiagnostics-color=always" "-ansi" "-Iext/x-expr/include" "-I./include" "-DX_MACHINE=\"arm64\"" "-MMD" "-MP" "-o" "src/x-alist.o" "src/x-alist.c")))
 ```
 ---
-    (compile ("src/x-alist.c") "src/x-alist.o" ("ext/x-expr/include/" "./include/") ("X_HEAP 1" "X_MACHINE \"arm64\""))
+    (compile ("src/x-alist.c") "src/x-alist.o" ("ext/x-expr/include/" "./include/") ("X_HEAP 1" "X_MACHINE \"arm64\"") ())
 
 ### a link line, bare files, build before them, -c with no -o, -fsyntax-only, -dumpmachine
 
@@ -27,7 +27,7 @@ prints for the same files.
 (write (list (cc-cli-plan (list "-O2" "-Wall" "a.o" "b.o" "-ldl" "-lm" "-L" "/usr/lib" "-Wl,-dead_strip" "-o" "x-bin")) (cc-cli-plan (list "hello.c" "-o" "hello")) (cc-cli-plan (list "build" "a.c")) (cc-cli-plan (list "-c" "x/a.c" "b.c")) (cc-cli-plan (list "-fsyntax-only" "-I" "inc" "a.c")) (cc-cli-plan (list "-dumpmachine"))))
 ```
 ---
-    ((build ("a.o" "b.o") "x-bin" () ()) (build ("hello.c") "hello" () ()) (build ("a.c") "a.out" () ()) (compile ("x/a.c" "b.c") () () ()) (check ("a.c") () ("inc/") ()) (machine))
+    ((build ("a.o" "b.o") "x-bin" () () ()) (build ("hello.c") "hello" () () ()) (build ("a.c") "a.out" () () ()) (compile ("x/a.c" "b.c") () () () ()) (check ("a.c") () ("inc/") () ()) (machine))
 
 ### -D with a value, without one, function-like and empty; -U drops the ones before it
 
@@ -35,7 +35,7 @@ prints for the same files.
 (write (cc-cli-plan (list "-D" "A" "-DB=2" "-DF(x)=((x)+1)" "-DA=3" "-UA" "-D" "C=" "-DA=4" "a.c")))
 ```
 ---
-    (build ("a.c") "a.out" () ("B 2" "F(x) ((x)+1)" "C " "A 4"))
+    (build ("a.c") "a.out" () ("B 2" "F(x) ((x)+1)" "C " "A 4") ())
 
 ### refused: an option x-cc does not take, one with no value, a -D with no name, one -o for several objects, no files
 

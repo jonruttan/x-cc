@@ -2274,15 +2274,20 @@
       (let ((l (%cc-gen-label)))
         (do (set! %cc-gen-thunks (pair (pair name l) %cc-gen-thunks)) l)))))
 
+(def %cc-gen-thunk-at ())   ; ((name . position) ...), each thunk's place in the code
+
 ; each thunk, then the gate's label, after the program's last function;
 ; a pointer between the first thunk and the gate is the program's own
 (def %cc-gen-thunks!
   (fn (_)
     (asm-label! %cc-gen-asm %cc-gen-thunks-from)
+    (set! %cc-gen-thunk-at ())
     (def go
       (fn (self ts)
         (if (null? ts) ()
-          (do (asm-label! %cc-gen-asm (rest (first ts)))
+          (do (set! %cc-gen-thunk-at
+                (pair (pair (first (first ts)) (asm-pos %cc-gen-asm)) %cc-gen-thunk-at))
+              (asm-label! %cc-gen-asm (rest (first ts)))
               (%cc-gen! (lit adr) x8 (label (%cc-gen-fun-label (first (first ts)))))
               (%cc-gen! (lit b) (label %cc-gen-gate))
               (%cc-gen! (lit b) (label (%cc-gen-fun-label (first (first ts)))))
@@ -3184,11 +3189,47 @@
 
 ; --- the program -------------------------------------------------------------
 
+; is NAME one the program wrote: a file's static is renamed NAME.N (cc/pp)
+(def %cc-gen-c-name?
+  (fn (_ name)
+    (def go (fn (self i) (match ((>= i (byte-len name)) #t) ((= (byte-at name i) #\.) #f)
+                           (#t (self (+ i 1))))))
+    (go 0)))
+
+; What ASK exports -- nil, `all`, or names -- each (NAME . text) for a
+; function, whose thunk is made here so it is written, or (NAME data .
+; OFFSET) for a global.  A thunk is the C library's way into the function
+; (%cc-gen-thunk-label), the way dlsym's caller comes in.
+(def %cc-gen-exports-of
+  (fn (_ ask)
+    (def names
+      (if (eq? ask (lit all))
+        (filter %cc-gen-c-name?
+          (append (reverse (map (fn (_ f) (first f)) %cc-gen-funs))
+                  (reverse (map (fn (_ g) (first g)) %cc-gen-globals))))
+        ask))
+    (map (fn (_ name)
+           (match
+             ((not (null? (%cc-gen-fun-find name)))
+               (do (%cc-gen-thunk-label name) (pair name (lit text))))
+             ((not (null? (%cc-gen-global-find name)))
+               (pair name (pair (lit data) (first (%cc-gen-global-find name)))))
+             (#t (Err raise (lit cc)
+                   (string-append "cc: compile: exported symbol not defined: " name) ()))))
+      names)))
+
+; the exports cc-compile-image laid out, each (NAME text . OFFSET), OFFSET
+; in the text, or (NAME data . OFFSET), OFFSET in the data
+(def %cc-gen-export-table ())
+
 ; the image for SRC on TARGET, as (CODE . DATA): the entry, then main, then
 ; the rest.  main comes first because the entry branches to a fixed offset.
+; EXPORTS, when given, is what the executable exports (%cc-gen-exports-of),
+; laid out in %cc-gen-export-table.
 
 (def cc-compile-image
-  (fn (_ src target)
+  (fn (_ src target . more)
+    (def ask (if (null? more) () (first more)))
     (def toks (cc-lex src))
     (def ntoks (cc-lexed-count))
     ; the tokens are let go here, so the parse holds only those it has yet
@@ -3272,6 +3313,7 @@
                             %cc-gen-params))
                         (self (rest fs))))))))
       (go funs))
+    (def exported ())
     ; the program is let go here, so a function's tree is garbage once its
     ; code is made and a collect walks only the ones still to come
     (def todo (pair main others))
@@ -3292,7 +3334,8 @@
                     (do (%cc-gen-fun! (first fs))
                         (if (< n 16) (self (rest fs) (+ n 1))
                           (do (heap-collect) (self (rest fs) 0))))))))
-        (do (go ((fn (_ fs) (set! todo ()) fs) todo) 0)
+        (do (set! exported (%cc-gen-exports-of ask))
+            (go ((fn (_ fs) (set! todo ()) fs) todo) 0)
             (%cc-gen-jumps! target)
             (%cc-gen-thunks!))))
     (def n (asm-pos a))
@@ -3308,33 +3351,46 @@
     ; the text, entry, code and gate, one block: a program's code is
     ; megabytes, too many for a list of its bytes
     (def text (%cc-gen-text target entry p n (%cc-gen-gate-bytes target gatepos dataat)))
+    ; a function's export is its thunk, after the entry in the text
+    (set! %cc-gen-export-table
+      (map (fn (_ e)
+             (if (eq? (rest e) (lit text))
+               (pair (first e)
+                 (pair (lit text)
+                   (+ (%cc-gen-entry-len target)
+                      (rest (first (filter (fn (_ t) (string=? (first t) (first e))) %cc-gen-thunk-at))))))
+               e))
+        exported))
     (asm-free! a)
     (set! %cc-gen-asm ())
     (pair text
       (%cc-gen-data-bytes))))
 
-; compile SRC to an executable at PATH
+; compile SRC to an executable at PATH, exporting EXPORTS when given: nil,
+; `all` or names (%cc-gen-exports-of)
 (def cc-compile
-  (fn (_ src path)
+  (fn (_ src path . more)
     (def target (%cc-gen-target))
-    (def image (cc-compile-image src target))
+    (def image (cc-compile-image src target (if (null? more) () (first more))))
     ; the imports, (OFFSET . NAME) in the order of their slots
     (def imports (map (fn (_ i) (pair (rest i) (first i))) (reverse %cc-gen-imports)))
     (if (eq? target (lit macho-arm64))
-      (macho-write! path (first image) (rest image) imports)
-      (elf-write! path (first image) (rest image) (%cc-gen-elf-machine target) imports))))
+      (macho-write! path (first image) (rest image) imports %cc-gen-export-table)
+      (elf-write! path (first image) (rest image) (%cc-gen-elf-machine target) imports
+        %cc-gen-export-table))))
 
 ; compile SRC and run the executable with INPUT as its standard input and
 ; the rest of ARGV after its name, which is its path; print what it wrote,
 ; answer its status.  With INPUT nil, it reads the caller's standard input.
+; EXPORTS, when given, is what the executable exports (cc-compile).
 (def cc-exe-run-with
-  (fn (_ src input argv)
+  (fn (_ src input argv . more)
     ; a program of several files is named for their texts together
     (def text (if (str? src) src (string-concat (map (fn (_ u) (rest u)) src))))
     (def path
       (string-append "/tmp/x-cc-exe-"
         (substring (sha256-hex-n text (byte-len text)) 0 16)))
-    (cc-compile src path)
+    (cc-compile src path (if (null? more) () (first more)))
     (let ((r (proc-capture
                (if (null? input)
                  (pair path (rest argv))
