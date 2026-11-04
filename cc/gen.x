@@ -2256,6 +2256,7 @@
 
 (def %cc-gen-thunks ())     ; ((name . label) ...), the functions whose address is taken
 (def %cc-gen-gate ())       ; the label the gate follows the code at
+(def %cc-gen-thunks-from ()) ; the label of the first thunk
 
 ; the label of NAME's thunk, which the function's address is: it takes
 ; the function's address into x8 and branches to the gate, which is the
@@ -2273,10 +2274,11 @@
       (let ((l (%cc-gen-label)))
         (do (set! %cc-gen-thunks (pair (pair name l) %cc-gen-thunks)) l)))))
 
-; each thunk, then the gate's label, after the program's last function
+; each thunk, then the gate's label, after the program's last function;
+; a pointer between the first thunk and the gate is the program's own
 (def %cc-gen-thunks!
   (fn (_)
-    (set! %cc-gen-gate (%cc-gen-label))
+    (asm-label! %cc-gen-asm %cc-gen-thunks-from)
     (def go
       (fn (self ts)
         (if (null? ts) ()
@@ -2388,7 +2390,10 @@
 ; register being spoken for; x19, the frame's base, waits under it and is
 ; put back once the callee returns, x20 being lower when a variable-length
 ; array has taken room.  It answers what the pointer's RET says, a struct
-; into the call's own slot.
+; into the call's own slot.  A pointer outside the thunks is the C
+; library's -- dlsym's, signal's -- and is called the way the library's
+; own functions are (%cc-gen-call-foreign!), when its arguments and answer
+; are integers or pointers.
 (def %cc-gen-call-through!
   (fn (_ node target0 args)
     ; * of a pointer to a function is the function, which is the pointer
@@ -2413,16 +2418,71 @@
              (let ((ak (%cc-gen-c-type-of a)))
                (if (%cc-gen-array? ak) (list (lit ptr) (c-type-elem ak)) ak)))
         args))
+    (def ret (first (rest k)))
+    (def word? (fn (_ c) (not (if (%cc-gen-real? c) #t (%cc-gen-struct? c)))))
+    (def foreign? (if (word? ret) (null? (filter (fn (_ c) (not (word? c))) c-types)) #f))
+    (def foreign (%cc-gen-label))
+    (def done (%cc-gen-label))
     (do (asm-push! %cc-gen-asm x19)
         (%cc-gen-expr! target)
         (asm-push! %cc-gen-asm x0)
-        (%cc-gen-call-laid! node args c-types (%cc-gen-struct? (first (rest k)))
+        (if foreign?
+          (do (%cc-gen! (lit adr) x1 (label %cc-gen-thunks-from))
+              (%cc-gen! (lit cmp) x0 x1)
+              (%cc-gen! (lit b/lt) (label foreign))
+              (%cc-gen! (lit adr) x1 (label %cc-gen-gate))
+              (%cc-gen! (lit cmp) x0 x1)
+              (%cc-gen! (lit b/ge) (label foreign)))
+          ())
+        (%cc-gen-call-laid! node args c-types (%cc-gen-struct? ret)
           (fn (_) ())
           (fn (_)
             (do (asm-pop! %cc-gen-asm x19)
                 (%cc-gen! (lit add) x19 x19 (imm %cc-gen-thunk-direct))
                 (%cc-gen! (lit blr) x19)
-                (asm-pop! %cc-gen-asm x19)))))))
+                (asm-pop! %cc-gen-asm x19))))
+        (if foreign?
+          (do (%cc-gen! (lit b) (label done))
+              (asm-label! %cc-gen-asm foreign)
+              (%cc-gen-call-foreign! ret args)
+              (asm-label! %cc-gen-asm done))
+          ()))))
+
+; A call to the C library's function whose address waits on the stack,
+; x19 under it, with ARGS, each an integer or a pointer, by the C calling
+; convention: as %cc-gen-libc-call! makes a direct one, the arguments in
+; the frame's call area, those past the registers in its stack words, the
+; function in x8 and the trampoline making the call.  The answer is put in
+; the form of RET.
+(def %cc-gen-call-foreign!
+  (fn (_ ret args)
+    (def fixed (%cc-gen-libc-regs "" (length args)))
+    (def nvar (- (length args) fixed))
+    (def at (fn (_ off) (mem x19 (+ %cc-gen-ca off))))
+    (def push-all
+      (fn (self as)
+        (if (null? as) ()
+          (do (%cc-gen-expr! (first as))
+              (asm-push! %cc-gen-asm x0)
+              (self (rest as))))))
+    ; the last pushed is on top: slots K down to 0 from BASE
+    (def pop-into
+      (fn (self k base)
+        (if (< k 0) ()
+          (do (asm-pop! %cc-gen-asm x0)
+              (%cc-gen! (lit str) x0 (at (+ base (* 8 k))))
+              (self (- k 1) base)))))
+    (do (push-all args)
+        (pop-into (- nvar 1) %cc-gen-ca-vars)
+        (pop-into (- fixed 1) 0)
+        (%cc-gen! (lit mov) x0 (imm nvar))
+        (%cc-gen! (lit str) x0 (at %cc-gen-ca-count))
+        (asm-pop! %cc-gen-asm x8)
+        (%cc-gen-address! x19 %cc-gen-ca)
+        (%cc-gen-frame-top!)
+        (%cc-gen! (lit blr) x21)
+        (asm-pop! %cc-gen-asm x19)
+        (%cc-gen-normalize! ret))))
 
 (def %cc-gen-call-fun!
   (fn (_ node)
@@ -2567,18 +2627,23 @@
     (def most
       (fn (self node)
         (if (not (pair? node)) -1
-          (let ((here (if (eq? (first node) (lit call))
-                        (let ((name (first (rest node)))
-                              (n (length (first (rest (rest node))))))
-                          (match
-                            ; the program's own variadic function's extras
-                            ((not (null? (%cc-gen-fun-find name)))
-                              (let ((fixed (%cc-gen-fixed-find name)))
-                                (if (null? fixed) -1 (- n fixed))))
-                            (#t
-                              (let ((v (%cc-gen-variadic name)))
-                                (if (null? v) (- n (%cc-gen-libc-regs name n)) (- n (first (rest v))))))))
-                        -1)))
+          (let ((here (match
+                        ((eq? (first node) (lit call))
+                          (let ((name (first (rest node)))
+                                (n (length (first (rest (rest node))))))
+                            (match
+                              ; the program's own variadic function's extras
+                              ((not (null? (%cc-gen-fun-find name)))
+                                (let ((fixed (%cc-gen-fixed-find name)))
+                                  (if (null? fixed) -1 (- n fixed))))
+                              (#t
+                                (let ((v (%cc-gen-variadic name)))
+                                  (if (null? v) (- n (%cc-gen-libc-regs name n)) (- n (first (rest v)))))))))
+                        ; through a pointer, which may be the library's
+                        ((eq? (first node) (lit callx))
+                          (let ((n (length (first (rest (rest node))))))
+                            (- n (%cc-gen-libc-regs "" n))))
+                        (#t -1))))
             (def go
               (fn (self2 xs best)
                 (if (null? xs) best
@@ -3173,6 +3238,8 @@
     (def a (asm-new (+ 262144 (* 32 ntoks))))
     (set! %cc-gen-asm a)
     (set! %cc-gen-nlabels 0)
+    (set! %cc-gen-thunks-from (%cc-gen-label))
+    (set! %cc-gen-gate (%cc-gen-label))
     (set! %cc-gen-link (if (%cc-gen-arm64? target) %cc-gen-lr ()))
     (set! %cc-gen-callop (if (%cc-gen-arm64? target) (lit bl) (lit call)))
     (set! %cc-gen-thunk-direct (if (%cc-gen-arm64? target) 8 12))

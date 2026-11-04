@@ -112,14 +112,15 @@
         (each (list (lit ptr) (lit void))
           (list "malloc" "calloc" "realloc" "memcpy" "memmove" "memset" "memchr"
                 "bsearch" "fopen" "fdopen" "freopen" "tmpfile" "popen" "gmtime"
-                "gmtime_r" "localtime" "localtime_r" "opendir" "readdir"))
+                "gmtime_r" "localtime" "localtime_r" "opendir" "readdir" "dlopen" "dlsym"
+                "mmap"))
         (each (list (lit ptr) plain-char)
           (list "strcpy" "strncpy" "strcat" "strncat" "strchr" "strrchr" "strstr"
                 "strpbrk" "strtok" "strtok_r" "strsep" "strdup" "strndup" "strerror"
                 "strsignal" "strcasestr" "getenv" "fgets" "gets" "setlocale" "ctime"
                 "ctime_r" "asctime" "asctime_r" "realpath" "basename" "dirname"
                 "stpcpy" "stpncpy" "getcwd" "mkdtemp" "mktemp" "ttyname" "index"
-                "rindex"))
+                "rindex" "dlerror"))
         ; errno's address, through the function each platform's errno.h names
         (each (list (lit ptr) (lit int)) (list "__error" "__errno_location"))
         (each (list (lit ptr) (list (lit struct) "lconv")) (list "localeconv"))
