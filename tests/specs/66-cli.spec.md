@@ -23,7 +23,7 @@ or: cc run FILE.c... [ARG]...
 
 Build a C program into an executable, or run it
 
-	-c		Preprocess each FILE.c into FILE.o, to build from
+	-c		Compile each FILE.c into an object, FILE.o, to build from
 	-o OUT		Write the executable, or the one -c makes, to OUT
 	-D NAME[=VALUE]	Define NAME as VALUE, or as 1
 	-U NAME		Undefine NAME

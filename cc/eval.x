@@ -2441,9 +2441,18 @@
       (fn (self items)
         (if (null? items) ()
           (let ((item (first items)))
-            (do (if (eq? (first item) (lit fun))
-                  ; (fun NAME PARAMS BODY C-TYPES) -> (NAME PARAMS BODY C-TYPES)
-                  (set! %cc-funs (pair (rest item) %cc-funs))
+            (do (match
+                  ((eq? (first item) (lit fun))
+                    ; (fun NAME PARAMS BODY C-TYPES) -> (NAME PARAMS BODY C-TYPES)
+                    (set! %cc-funs (pair (rest item) %cc-funs)))
+                  ; a prototype declares what another unit defines, which
+                  ; run, with the whole program before it, has or has not
+                  ((eq? (first item) (lit proto)) ())
+                  ; an extern global no file defines is another unit's,
+                  ; which run has no way to reach: a use fails as an
+                  ; unknown name
+                  ((eq? (first (rest (rest (rest (rest item))))) (lit extern)) ())
+                  (#t
                   (let ((name (first (rest item))))
                     (def c-type (first (rest (rest item))))
                     (def init (first (rest (rest (rest item)))))
@@ -2452,7 +2461,7 @@
                     ; in scope in its own initializer, as a local is
                     (do (set! %cc-genv (pair (pair name (pair a c-type)) %cc-genv))
                         (if (null? init) ()
-                          ((%cc-k-init c-type init) 0 a)))))
+                          ((%cc-k-init c-type init) 0 a))))))
                 (self (rest items)))))))
     (load! prog)
     (%cc-scan-program! prog)

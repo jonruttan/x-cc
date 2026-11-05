@@ -11,11 +11,11 @@
 ;   x -l cc -- --help
 ;
 ; The first line is cc's own: the FILEs, C files and objects, are built into
-; an executable at OUT, a.out when no -o is given.  A program of several
-; files is one stream of tokens (cc/pp), so -c makes no machine code: FILE.o
-; is FILE.c preprocessed under the -D, -U and -I before it, which a later
-; line builds from as it builds from C (cc/pp's objects).  -fsyntax-only
-; reads the files and stops; -dumpmachine names the target.  cc's options
+; an executable at OUT, a.out when no -o is given: each C file is compiled
+; to an object (cc/gen) and the objects linked (cc/link).  -c writes each
+; FILE.c's object to FILE.o instead, under the -D, -U and -I before it,
+; which a later line links as it links what it compiles itself.
+; -fsyntax-only reads the files and stops; -dumpmachine names the target.  cc's options
 ; that ask for nothing x-cc does differently are taken and ignored: -O, -g,
 ; -W, -f, -m and -l with whatever follows, -std=, -ansi, -pedantic, -w,
 ; -MD, -MMD, -MP, -MF FILE, -MT and -MQ TARGET, -L DIR, -static, -s,
@@ -30,12 +30,14 @@
 ; up to the first that does not end in .c.
 (module cc/cli)
 
-(import cc/prims append byte-at byte-len file-exists? file-read-all file-write file-write-text! filter
+(import cc/prims append byte-at byte-len file-exists? file-read-all file-write filter
   map reverse string-append substring string=? sys-exit x-write)
 (import cc/eval cc-run-with)
-(import cc/gen cc-compile)
+(import cc/gen cc-compile-unit cc-target)
+(import cc/link cc-link)
 (import cc/parse cc-parse)
-(import cc/pp cc-lex cc-source-name! cc-pp-options! cc-pp-object cc-pp-object-path)
+(import cc/pp cc-lex cc-source-name! cc-pp-options!)
+(import x/tool/link link-write! link-read)
 (import x/sys/opts Opts)
 
 ; The options, declared once: what --help prints and what a refusal prints.
@@ -46,7 +48,7 @@
   (Opts declare "cc" "[-c] [-o OUT] [-D NAME[=VALUE]] [-I DIR] FILE...\nor: cc run FILE.c... [ARG]..."
     "Build a C program into an executable, or run it"
     (list
-      (Opts flag "-c" "Preprocess each FILE.c into FILE.o, to build from")
+      (Opts flag "-c" "Compile each FILE.c into an object, FILE.o, to build from")
       (Opts arg "-o" "OUT" "Write the executable, or the one -c makes, to OUT")
       (Opts arg "-D" "NAME[=VALUE]" "Define NAME as VALUE, or as 1")
       (Opts arg "-U" "NAME" "Undefine NAME")
@@ -239,13 +241,14 @@
       (do (cc-source-name! (first paths)) (file-read-all (first paths)))
       (map (fn (_ p) (pair p (file-read-all p))) paths))))
 
-; the files PATHS give, each (NAME . TEXT): a C file's NAME its path, an
-; object's the file it was made from
-(def %cc-cli-units
-  (fn (_ paths)
+; the object of each of PATHS for TARGET: a C file's compiled, an object
+; file's read
+(def %cc-cli-objects
+  (fn (_ paths target)
     (map (fn (_ p)
-           (let ((text (file-read-all p)))
-             (if (%cc-c-file? p) (pair p text) (pair (cc-pp-object-path text) text))))
+           (if (%cc-c-file? p)
+             (cc-compile-unit (pair p (file-read-all p)) target)
+             (link-read p)))
       paths)))
 
 ; the first of PATHS that is not a file, or nil
@@ -256,14 +259,20 @@
       ((file-exists? (first paths)) (self (rest paths)))
       (#t (first paths)))))
 
+; is the file at PATH an object file: its first line names the format
+(def %cc-cli-object-file?
+  (fn (_ path)
+    (def text (file-read-all path))
+    (if (>= (byte-len text) 9) (string=? (substring text 0 9) "x-object ") #f)))
+
 ; the first of PATHS that is neither a C file nor an object, or nil
 (def %cc-cli-foreign
   (fn (self paths)
     (match
       ((null? paths) ())
       ((%cc-c-file? (first paths)) (self (rest paths)))
-      ((null? (cc-pp-object-path (file-read-all (first paths)))) (first paths))
-      (#t (self (rest paths))))))
+      ((%cc-cli-object-file? (first paths)) (self (rest paths)))
+      (#t (first paths)))))
 
 ; the object -c writes for PATH when no -o is given: its name, in the
 ; working directory, with .o for .c
@@ -379,16 +388,21 @@
               ((eq? label (lit compile))
                 (%cc-cli-try "cc: compile failed: "
                   (fn (_)
-                    (map (fn (_ p)
-                           (file-write-text! (if (null? out) (%cc-cli-object-name p) out)
-                             (cc-pp-object p (file-read-all p))))
-                      paths))))
+                    (let ((target (cc-target)))
+                      (map (fn (_ p)
+                             (link-write! (if (null? out) (%cc-cli-object-name p) out)
+                               (cc-compile-unit (pair p (file-read-all p)) target)))
+                        paths)))))
               ((eq? label (lit check))
-                (%cc-cli-try "cc: check failed: " (fn (_) (cc-parse (cc-lex (%cc-cli-units paths))))))
+                (%cc-cli-try "cc: check failed: "
+                  (fn (_)
+                    (map (fn (_ p) (cc-parse (cc-lex (list (pair p (file-read-all p))))))
+                      (filter %cc-c-file? paths)))))
               (#t
                 (%cc-cli-try "cc: build failed: "
                   (fn (_)
-                    (cc-compile (%cc-cli-units paths) out
-                      (%cc-cli-export-names (first (rest (rest (rest (rest (rest plan))))))))))))))))))
+                    (let ((target (cc-target)))
+                      (cc-link (%cc-cli-objects paths target) target out
+                        (%cc-cli-export-names (first (rest (rest (rest (rest (rest plan)))))))))))))))))))
 
 (provide cc/cli cc-main cc-cli-plan cc-refusal cc-usage)

@@ -6,10 +6,11 @@ bare files build, -o names the output, -c makes an object, -D and -U
 define and undefine before a file's first line, -I adds a directory an
 #include looks in, and the options that ask for nothing x-cc does
 differently are taken and ignored.  The lines are the ones x-engine-c's
-Makefile writes.  An object is its file preprocessed under the -D and -I
-before it, spelled back as C on the lines it came from, and a later line
-builds from it without them.  The program's output is what /usr/bin/cc
-prints for the same files.
+Makefile writes.  An object is its file compiled under the -D and -I
+before it, an object file of x/tool/link's -- its code and data, its
+functions and globals as symbols, and the names it takes of other units
+as relocations -- and a later line links it without them.  The program's
+output is what /usr/bin/cc prints for the same files.
 
 ## the plan
 
@@ -55,18 +56,42 @@ prints for the same files.
 
 ## objects
 
-### the file preprocessed, each token on the line it came from
+### a unit's object: its sections, its symbols, the names it takes
+
+A global is a symbol in the data, a function one in the text; a static is
+the unit's own, and a static function has a second name, with the unit's
+appended, that the linker's thunk for it can take; a function another
+unit defines, called through its prototype, and the C library's function
+a call names are relocations.
 
 ```cc
 (cc-pp-options! () (list "N 7"))
-(def o (cc-pp-object "t.c" "int a;\n\n/* two */\nint b = N + __LINE__;\n"))
+(def o (cc-compile-unit "#include <stdio.h>\nint a = N;\nstatic int b;\nint twice(int);\nstatic int helper(void) { return b; }\nint main(void) { puts(\"hi\"); return twice(a) + helper(); }\n" (cc-target)))
 (cc-pp-options! () ())
-(write (list o (cc-pp-object-path o) (cc-pp-object-path "int a;\n")))
+(write (list (List map (fn (_ s) (list (first s) (first (rest s)))) (first o))
+             (List map (fn (_ s) (list (first s) (first (rest s)) (first (rest (rest (rest s))))))
+                  (List filter (fn (_ s) (not (Str8 %find-bytes "@" 0 (first s)))) (first (rest o))))
+             (List uniq (List sort (fn (_ a b) (Str8 <? a b))
+                          (List map (fn (_ r) (first (rest (rest (rest r))))) (first (rest (rest o))))))))
 ```
 ---
-    ("/* x-cc object: t.c */int a ; \n\n\nint b = 7 + 4 ; \n" "t.c" ())
+    (((text 16) (data 16)) ((".data" data local) ("a" data global) ("b" data local) ("helper" text local) ("main" text global)) (".data" "a" "b" "puts@slot" "twice"))
 
-### two files and a header under -I, -D before each, built from the objects with other -D at the link
+### an object file written and read back
+
+```cc
+(def o (cc-compile-unit "int n = 3;\nint main(void) { return n; }\n" (cc-target)))
+(import x/tool/link link-write! link-read)
+(link-write! "/tmp/xcc-spec81.o" o)
+(def back (link-read "/tmp/xcc-spec81.o"))
+(write (list (List map first (first back))
+             (first (rest back))
+             (Str8 sub 0 9 (File read-all "/tmp/xcc-spec81.o"))))
+```
+---
+    ((text data) ((".data" data 0 local) ("n" data 0 global) ("main" text 0 global)) "x-object ")
+
+### two files and a header under -I, -D before each, linked from the objects with other -D at the link
 
 ```cc
 (def put
@@ -79,35 +104,38 @@ prints for the same files.
 (put "/tmp/xcc-spec81/src/main.c" "#include <stdio.h>\n#include \"greet.h\"\nint main(void) {\n#ifdef LOUD\n  printf(\"%s!\\n\", WHO);\n#else\n  printf(\"quiet\\n\");\n#endif\n  return greet(WHO) * TIMES;\n}\n")
 (put "/tmp/xcc-spec81/src/greet.c" "#include <stdio.h>\n#include <greet.h>\nstatic int count = 1;\nint greet(const char *who) { printf(\"hello, %s\\n\", who); return count + SCALE(2); }\n")
 (cc-pp-options! (list "/tmp/xcc-spec81/inc/") (list "LOUD 1" "WHO \"world\""))
-(def om (cc-pp-object "/tmp/xcc-spec81/src/main.c" (File read-all "/tmp/xcc-spec81/src/main.c")))
+(def om (cc-compile-unit (list (pair "/tmp/xcc-spec81/src/main.c" (File read-all "/tmp/xcc-spec81/src/main.c"))) (cc-target)))
 (cc-pp-options! (list "/tmp/xcc-spec81/inc/") (list "SCALE(x) ((x)*3)"))
-(def og (cc-pp-object "/tmp/xcc-spec81/src/greet.c" (File read-all "/tmp/xcc-spec81/src/greet.c")))
+(def og (cc-compile-unit (list (pair "/tmp/xcc-spec81/src/greet.c" (File read-all "/tmp/xcc-spec81/src/greet.c"))) (cc-target)))
 ; the link's own -D does not reach into the objects
 (cc-pp-options! () (list "TIMES 5" "LOUD 0"))
-(def units (list (pair (cc-pp-object-path om) om) (pair (cc-pp-object-path og) og)))
-(def r (list (cc-run units) (cc-exe-run units)))
+(cc-link (list om og) (cc-target) "/tmp/xcc-spec81/a.out" ())
 (cc-pp-options! () ())
-(display r)
+(def r (Proc capture (list "/tmp/xcc-spec81/a.out")))
+(display (rest r))
+(write (first r))
 ```
 ---
 ```output
 world!
 hello, world
-world!
-hello, world
-(14 14)
+14
 ```
 
 ### without the -D, the #else; without the -I, the quoted header is not found
 
 ```cc
 (cc-pp-options! (list "/tmp/xcc-spec81/inc/") (list "WHO \"x\""))
-(def om (cc-pp-object "/tmp/xcc-spec81/src/main.c" (File read-all "/tmp/xcc-spec81/src/main.c")))
+(def om (cc-compile-unit (list (pair "/tmp/xcc-spec81/src/main.c" (File read-all "/tmp/xcc-spec81/src/main.c"))) (cc-target)))
+(cc-pp-options! (list "/tmp/xcc-spec81/inc/") (list "SCALE(x) ((x)*3)"))
+(def og (cc-compile-unit (list (pair "/tmp/xcc-spec81/src/greet.c" (File read-all "/tmp/xcc-spec81/src/greet.c"))) (cc-target)))
 (cc-pp-options! () ())
+(cc-link (list om og) (cc-target) "/tmp/xcc-spec81/quiet" ())
 (def missing
   (guard (e (if (Err err? e) (e msg) e))
-    (cc-pp-object "/tmp/xcc-spec81/src/main.c" (File read-all "/tmp/xcc-spec81/src/main.c"))))
-(write (list (if (Str8 %find-bytes "quiet" 0 om) #t #f) (if (Str8 %find-bytes "x!" 0 om) #t #f) missing))
+    (cc-compile-unit (list (pair "/tmp/xcc-spec81/src/main.c" (File read-all "/tmp/xcc-spec81/src/main.c"))) (cc-target))))
+(def r (Proc capture (list "/tmp/xcc-spec81/quiet")))
+(write (list (rest r) (first r) missing))
 ```
 ---
-    (#t #f "cc: #include \"/tmp/xcc-spec81/src/greet.h\": no such file")
+    ("quiet\nhello, x\n" 14 "cc: #include \"/tmp/xcc-spec81/src/greet.h\": no such file")
