@@ -18,15 +18,18 @@
 (import x/type/vector)
 (import x/codec/sha256)
 (import x/tool/profile eval-count)
+(import x/core/doors char->int int->char str-byte-ref str-byte-len str-make str->ptr
+  ptr->int ptr-ref-word ptr-set-word! int->ptr ptr-set! ptr-ref
+  int+ int- int* int< int<< int>> int& int|)
 
 ; The type handle this file asks convert for, fetched by name through the
 ; platform's public door and private to this module.
 (def %string (Type named STRING))
 
-(def char->integer (prim-ref (lit char) (lit ->int)))
-(def integer->char (prim-ref (lit int) (lit ->char)))
-(def byte-at (prim-ref (lit str) (lit byte-ref)))
-(def byte-len (prim-ref (lit str) (lit byte-len)))
+(def char->integer char->int)
+(def integer->char int->char)
+(def byte-at str-byte-ref)
+(def byte-len str-byte-len)
 
 (def string-length (fn (_ s) (Str8 length s)))
 (def substring (fn (_ s a b) (Str8 sub a (- b a) s)))
@@ -75,16 +78,14 @@
 ; raw memory: a string is the buffer, its data pointer the base that
 ; the interpreter (ptr ref-word/set-word!, one prim per access) and
 ; compile-asm's %mem-ref-at/%mem-set-at! (the base as an int) share
-(def mem-make (prim-ref (lit str) (lit make)))
-(def mem-ptr (prim-ref (lit str) (lit ->ptr)))
-(def ptr-int (prim-ref (lit ptr) (lit ->int)))
-(def word-ref (prim-ref (lit ptr) (lit ref-word)))
-(def word-set! (prim-ref (lit ptr) (lit set-word!)))
+(def mem-make str-make)
+(def mem-ptr str->ptr)
+(def ptr-int ptr->int)
+(def word-ref ptr-ref-word)
+(def word-set! ptr-set-word!)
 ; one byte at an offset; the str namespace has a byte reader and no writer
-(def %cc-ptr-set (prim-ref (lit ptr) (lit set!)))
-(def mem-set-byte! (fn (_ p i b) (%cc-ptr-set p i (& b 255) 1)))
-(def %cc-ptr-ref (prim-ref (lit ptr) (lit ref)))
-(def mem-ref-byte (fn (_ p i) (%cc-ptr-ref p i 1)))
+(def mem-set-byte! (fn (_ p i b) (ptr-set! p i (& b 255) 1)))
+(def mem-ref-byte (fn (_ p i) (ptr-ref p i 1)))
 ; N bytes from the pointer SRC to the pointer DST at AT: a word at a time,
 ; then the bytes past the last whole word
 (def mem-copy!
@@ -98,12 +99,12 @@
   (fn (_ dst at src i) (mem-set-byte! dst (fx+ at i) (mem-ref-byte src i)) (fx+ i 1)))
 ; W bytes at an offset, W one of 1 2 4 8; a read is zero-extended, so a
 ; signed type sign-extends it itself
-(def mem-ref-at %cc-ptr-ref)
-(def mem-set-at! %cc-ptr-set)
+(def mem-ref-at ptr-ref)
+(def mem-set-at! ptr-set!)
 ; N bytes from a pointer, each set to B: one C memset
 (def mem-fill! (prim-ref (lit mem) (lit set)))
 ; an address as a pointer
-(def int-ptr (prim-ref (lit int) (lit ->ptr)))
+(def int-ptr int->ptr)
 
 ; the heap's live objects -- a walk of the whole heap -- and a collection
 ; of what is not live; there is no automatic one
@@ -120,14 +121,14 @@
 ; operand crashes the engine and a result past a word wraps, as a C long
 ; does -- so they take only what is an integer by construction.  There is
 ; no > or >=: a > b is (fx< b a), and a >= b is (not (fx< a b)).
-(def fx+ (prim-ref (lit int) (lit +)))
-(def fx- (prim-ref (lit int) (lit -)))
-(def fx* (prim-ref (lit int) (lit *)))
-(def fx< (prim-ref (lit int) (lit <)))
-(def fx<< (prim-ref (lit int) (lit <<)))
-(def fx>> (prim-ref (lit int) (lit >>)))
-(def fx& (prim-ref (lit int) (lit &)))
-(def fx| (prim-ref (lit int) (lit |)))
+(def fx+ int+)
+(def fx- int-)
+(def fx* int*)
+(def fx< int<)
+(def fx<< int<<)
+(def fx>> int>>)
+(def fx& int&)
+(def fx| int|)
 ; there is no exclusive or among them: the bits in either but not both
 (def fx^ (fn (_ x y) (fx- (fx| x y) (fx& x y))))
 

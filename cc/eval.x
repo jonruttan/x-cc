@@ -576,7 +576,7 @@
 ; areas' ends, and then two offsets.  The answer is converted to the C type
 ; the function's header declares (library-c-type).
 
-(def %cc-ptr-call (prim-ref (lit ptr) (lit call)))
+(import x/core/doors ptr-call)
 (def %cc-libc ())       ; the library's handle
 (def %cc-libc-syms ())  ; ((name . function) ...), looked up once each
 
@@ -706,7 +706,7 @@
               (self (rest xs) (+ i 1))))))
     (go all 0)
     (%cc-raw-set! (+ area library-area-count) k 8)
-    (%cc-ptr-call %cc-stack-trampoline area f)))
+    (ptr-call %cc-stack-trampoline area f)))
 
 ; NAME called with ARGS in the C library
 (def %cc-libc-call
@@ -754,20 +754,20 @@
     (def r
       (match
         (stack? (%cc-stack-call f fixed all))
-        ((= (length all) 0) (%cc-ptr-call f))
-        ((= (length all) 1) (%cc-ptr-call f (first all)))
-        ((= (length all) 2) (%cc-ptr-call f (first all) (first (a 1))))
-        ((= (length all) 3) (%cc-ptr-call f (first all) (first (a 1)) (first (a 2))))
+        ((= (length all) 0) (ptr-call f))
+        ((= (length all) 1) (ptr-call f (first all)))
+        ((= (length all) 2) (ptr-call f (first all) (first (a 1))))
+        ((= (length all) 3) (ptr-call f (first all) (first (a 1)) (first (a 2))))
         ((= (length all) 4)
-          (%cc-ptr-call f (first all) (first (a 1)) (first (a 2)) (first (a 3))))
+          (ptr-call f (first all) (first (a 1)) (first (a 2)) (first (a 3))))
         ((= (length all) 5)
-          (%cc-ptr-call f (first all) (first (a 1)) (first (a 2)) (first (a 3))
+          (ptr-call f (first all) (first (a 1)) (first (a 2)) (first (a 3))
             (first (a 4))))
         ((= (length all) 6)
-          (%cc-ptr-call f (first all) (first (a 1)) (first (a 2)) (first (a 3))
+          (ptr-call f (first all) (first (a 1)) (first (a 2)) (first (a 3))
             (first (a 4)) (first (a 5))))
         (#t
-          (%cc-ptr-call f (first all) (first (a 1)) (first (a 2)) (first (a 3))
+          (ptr-call f (first all) (first (a 1)) (first (a 2)) (first (a 3))
             (first (a 4)) (first (a 5)) (first (a 6))))))
     (set! %cc-sp saved)
     (def k (library-c-type name))
@@ -800,7 +800,7 @@
 ; the C library writes out what its streams hold, so what the program
 ; printed comes before anything x prints after it
 (def %cc-libc-flush!
-  (fn (_) (%cc-ptr-call (%cc-libc-fn "fflush") 0)))
+  (fn (_) (ptr-call (%cc-libc-fn "fflush") 0)))
 
 ; stdin, stdout and stderr: the C library's own variables, each holding its
 ; FILE pointer -- __stdinp and the like on macOS
@@ -2482,10 +2482,10 @@
   (fn (_ name . args)
     (def f (%cc-libc-fn name))
     (match
-      ((null? args) (%cc-ptr-call f))
-      ((null? (rest args)) (%cc-ptr-call f (first args)))
-      ((null? (rest (rest args))) (%cc-ptr-call f (first args) (first (rest args))))
-      (#t (%cc-ptr-call f (first args) (first (rest args)) (first (rest (rest args))))))))
+      ((null? args) (ptr-call f))
+      ((null? (rest args)) (ptr-call f (first args)))
+      ((null? (rest (rest args))) (ptr-call f (first args) (first (rest args))))
+      (#t (ptr-call f (first args) (first (rest args)) (first (rest (rest args))))))))
 
 ; the C library's standard input, cleared of what it held and of its end:
 ; fpurge on macOS, __fpurge on glibc
