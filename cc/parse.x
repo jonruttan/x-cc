@@ -1439,6 +1439,36 @@
 
 ; --- statements --------------------------------------------------------------
 
+; does the declaration TOKS declare a function, `extern char *f(int);`:
+; specifiers and stars, then a name and its (.  A tag is not the name, and
+; `(*` begins a pointer's declarator, as in `struct P (*f)(void)`.
+(def %cc-p-local-prototype?
+  (fn (self ts)
+    (match
+      ((null? ts) #f)
+      ((if (%cc-p-kw? ts (lit struct)) #t (if (%cc-p-kw? ts (lit union)) #t (%cc-p-kw? ts (lit enum))))
+        (self (if (%cc-p-id? (rest ts)) (rest (rest ts)) (rest ts))))
+      ((%cc-p-id? ts)
+        (if (%cc-p-op? (rest ts) "(") (not (%cc-p-op? (rest (rest ts)) "*")) (self (rest ts))))
+      ((eq? (first (first ts)) (lit kw)) (self (rest ts)))
+      ((%cc-p-op? ts "*") (self (rest ts)))
+      (#t #f))))
+
+; the tokens past a block's function declaration TOKS and its ;.  It
+; declares nothing, as one at file scope: a call is made as for any name.
+(def %cc-p-skip-prototype
+  (fn (_ toks)
+    (def past
+      (fn (self ts depth)
+        (match
+          ((null? ts) (%cc-p-err "expected )"))
+          ((%cc-p-op? ts "(") (self (rest ts) (+ depth 1)))
+          ((%cc-p-op? ts ")") (if (= depth 1) (rest ts) (self (rest ts) (- depth 1))))
+          (#t (self (rest ts) depth)))))
+    (def open
+      (fn (self ts) (if (%cc-p-op? ts "(") ts (self (rest ts)))))
+    (%cc-p-eat (past (open toks) 0) ";")))
+
 (def %cc-p-stmt-one
   (fn (_ toks)
     (if (%cc-p-op? toks "{")
@@ -1528,6 +1558,8 @@
                             (convert (first (rest (first toks))) %string)))
                         (if (%cc-p-declares-nothing? toks)
                           (pair (list (lit block) ()) (%cc-p-declare-nothing toks))
+                        (if (if (%cc-p-c-type-start? toks) (%cc-p-local-prototype? toks) #f)
+                          (pair (list (lit block) ()) (%cc-p-skip-prototype toks))
                         (if (%cc-p-c-type-start? toks)
                           (let ((r (%cc-p-local-line toks)))
                             (pair (pair (lit decls)
@@ -1538,7 +1570,7 @@
                               (rest r)))
                           (let ((r (%cc-e-comma toks)))
                             (pair (list (lit expr) (first r))
-                              (%cc-p-eat (rest r) ";"))))))))))))))))))))
+                              (%cc-p-eat (rest r) ";")))))))))))))))))))))
 
 ; the parse's garbage goes every 32 statements and declarations, a
 ; function's own among them: nothing collects on its own
