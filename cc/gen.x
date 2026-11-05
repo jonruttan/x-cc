@@ -1438,7 +1438,19 @@
 ; A name's is a frame slot off x19 or a global's room off x22, and one
 ; worked out at run time is the register holding it, at offset 0.
 (def %cc-gen-place (fn (_ base off c-type) (pair base (pair off c-type))))
-(def %cc-gen-place-mem (fn (_ p) (mem (first p) (first (rest p)))))
+; P as a load's or a store's operand.  A load takes twelve bits of offset,
+; in units of its width, and arm64's encoder masks a wider one: past that
+; the address is worked out into x9, which nothing holding a place uses.
+(def %cc-gen-place-mem
+  (fn (_ p)
+    (def k (%cc-gen-place-c-type p))
+    (def off (first (rest p)))
+    (def width (c-type-size (if (%cc-gen-bits? k) (first (rest k)) k)))
+    (if (if (< off 0) #t (if (> off (* 4095 width)) #t (not (= 0 (% off width)))))
+      (do (asm-load-imm64! %cc-gen-asm x9 off)
+          (%cc-gen! (lit add) x9 x9 (first p))
+          (mem x9 0))
+      (mem (first p) off))))
 (def %cc-gen-place-c-type (fn (_ p) (rest (rest p))))
 
 ; Where a name lives, or a refusal naming it.  A local of the same name
@@ -1459,10 +1471,6 @@
           (let ((g (%cc-gen-global-find name)))
             (match
               ((null? g) (%cc-gen-no (string-append "the name " name)))
-              ; a load takes twelve bits of offset, in units of its width,
-              ; and arm64's encoder masks a wider one
-              ((if (%cc-gen-array? (rest g)) #f (> (first g) (* 4095 (c-type-size (rest g)))))
-                (%cc-gen-no "more globals than a load reaches"))
               (#t (%cc-gen-place x22 (first g) (rest g))))))))))
 
 (def %cc-gen-load!
