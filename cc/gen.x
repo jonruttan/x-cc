@@ -1440,16 +1440,18 @@
 (def %cc-gen-place (fn (_ base off c-type) (pair base (pair off c-type))))
 ; P as a load's or a store's operand.  A load takes twelve bits of offset,
 ; in units of its width, and arm64's encoder masks a wider one: past that
-; the address is worked out into x9, which nothing holding a place uses.
+; the address is worked out into REG -- x0 for a load, which its value
+; then takes; x1 for a store, which nothing holding the value it stores
+; uses.  x0, x1, x2 and x8 are all the scratch registers x86-64 maps.
 (def %cc-gen-place-mem
-  (fn (_ p)
+  (fn (_ p reg)
     (def k (%cc-gen-place-c-type p))
     (def off (first (rest p)))
     (def width (c-type-size (if (%cc-gen-bits? k) (first (rest k)) k)))
     (if (if (< off 0) #t (if (> off (* 4095 width)) #t (not (= 0 (% off width)))))
-      (do (asm-load-imm64! %cc-gen-asm x9 off)
-          (%cc-gen! (lit add) x9 x9 (first p))
-          (mem x9 0))
+      (do (asm-load-imm64! %cc-gen-asm reg off)
+          (%cc-gen! (lit add) reg reg (first p))
+          (mem reg 0))
       (mem (first p) off))))
 (def %cc-gen-place-c-type (fn (_ p) (rest (rest p))))
 
@@ -1476,14 +1478,14 @@
 (def %cc-gen-load!
   (fn (_ place)
     (def k (%cc-gen-place-c-type place))
-    (if (%cc-gen-bits? k) (%cc-gen-bits-load! (%cc-gen-place-mem place) k)
-      (%cc-gen! (%cc-gen-load-op k) x0 (%cc-gen-place-mem place)))))
+    (if (%cc-gen-bits? k) (%cc-gen-bits-load! (%cc-gen-place-mem place x0) k)
+      (%cc-gen! (%cc-gen-load-op k) x0 (%cc-gen-place-mem place x0)))))
 
 (def %cc-gen-put!
   (fn (_ place)
     (def k (%cc-gen-place-c-type place))
-    (if (%cc-gen-bits? k) (%cc-gen-bits-put! (%cc-gen-place-mem place) k)
-      (%cc-gen! (%cc-gen-store-op k) x0 (%cc-gen-place-mem place)))))
+    (if (%cc-gen-bits? k) (%cc-gen-bits-put! (%cc-gen-place-mem place x1) k)
+      (%cc-gen! (%cc-gen-store-op k) x0 (%cc-gen-place-mem place x1)))))
 
 ; the load of a bit-field's unit, zero-extended: the field's bits are
 ; taken from it whole
