@@ -31,7 +31,7 @@
 (module cc/cli)
 
 (import cc/prims append byte-at byte-len file-exists? file-read-all file-write filter
-  map reverse string-append substring string=? sys-exit x-write)
+  map reverse string-append substring string=? sys-exit x-write heap-collect)
 (import cc/eval cc-run-with)
 (import cc/gen cc-compile-unit cc-target)
 (import cc/link cc-link)
@@ -251,7 +251,12 @@
 ; file's read -- what a build line links
 (def cc-cli-objects
   (fn (_ paths target)
-    (map (fn (_ p) (if (%cc-c-file? p) (%cc-cli-unit p target) (link-read p)))
+    ; reading an object's records makes some thirty times its bytes in
+    ; garbage, which nothing else collects
+    (map (fn (_ p)
+           (let ((o (if (%cc-c-file? p) (%cc-cli-unit p target) (link-read p))))
+             (heap-collect)
+             o))
       paths)))
 
 ; the first of PATHS that is not a file, or nil

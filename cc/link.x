@@ -25,7 +25,7 @@
 (import x/tool/link link link-undefined link-write! link-read)
 (import cc/prims append byte-at byte-len convert filter length map mem-copy! mem-make mem-ptr
   mem-set-byte! proc-capture reverse sha256-hex-n string-append string-concat string=?
-  substring)
+  substring heap-collect)
 (import cc/gen cc-compile-unit cc-target cc-target-arm64? cc-elf-machine cc-libc-has?)
 (import cc/eval library-trampoline-arm64)
 (import cc/macho macho-write! macho-data-at macho-code-at)
@@ -304,6 +304,9 @@
                            (%cc-link! (lit str) x0 (mem x1 0)))
                        ()))
                 (first (rest (rest (first os)))))
+              ; an engine's tables of functions are thousands of pointers,
+              ; and nothing else collects their garbage
+              (heap-collect)
               (self (rest os) (+ i 1))))))
     (go objects 1)
     (%cc-link! (lit ret))))
@@ -472,7 +475,11 @@
     (def globals (%cc-link-globals units))
     (if (null? (%cc-link-assoc "main" globals)) (%cc-link-no "not built yet: a program without main"))
     (def exports (%cc-link-exports ask globals))
+    ; each link-undefined builds the symbol tables anew, tens of millions
+    ; of objects for an engine's sixty-four units: asked once, and the
+    ; garbage collected at each stage, since nothing else collects it
     (def undefined (link-undefined units))
+    (heap-collect)
     (def slots (%cc-link-asks undefined (lit slot)))
     (map (fn (_ s)
            (let ((g (%cc-link-assoc s globals)))
@@ -487,7 +494,15 @@
     (def jumps (%cc-link-asks undefined (lit jump)))
     (def rt (%cc-link-runtime target units slots thunks jumps))
     (def all (pair (first rt) units))
-    (map (fn (_ n) (%cc-link-no (string-append "undefined: " n))) (link-undefined all))
+    ; what the units leave undefined that the runtime object does not define
+    (def defines
+      (map first (filter (fn (_ s) (not (null? (first (rest s))))) (first (rest (first rt))))))
+    (map (fn (_ n)
+           (if (null? (filter (fn (_ d) (string=? d n)) defines))
+             (%cc-link-no (string-append "undefined: " n))
+             ()))
+      undefined)
+    (heap-collect)
     ; where the container puts the sections: the text at its code offset,
     ; the data on the page after the code
     (def arm64? (cc-target-arm64? target))
