@@ -1176,87 +1176,16 @@
               (#t (self (rest ts) t 0 b (pair t acc))))))))
     (if (null? names) ts (go ts () 0 0 ()))))
 
-; --- objects -------------------------------------------------------------------
-; What cc -c writes for a file: the file preprocessed under the command
-; line's -D and -I, spelled back as C a token at a time on the line it came
-; from, after a first comment naming the file.  It reads as C; cc-lex reads
-; one without -D or -I, which were applied when it was made, under the name
-; the comment gives.
+; --- units ---------------------------------------------------------------------
 
-(def %cc-object-mark "/* x-cc object: ")
-
-; is TEXT an object's
-(def %cc-object?
-  (fn (_ text)
-    (def n (byte-len %cc-object-mark))
-    (if (>= (byte-len text) n) (string=? (substring text 0 n) %cc-object-mark) #f)))
-
-; the raw tokens of a unit's TEXT.  An object's are read a piece of some
-; 8 KB at a time, each ending at a newline, with a collect after each: the
-; Lexer makes some 10 KB of garbage a byte, and an object is preprocessed
-; text, where no token runs past its line.  A file's are read whole, since
-; a comment can.
-(def %cc-unit-tokens
-  (fn (_ text)
-    (def len (byte-len text))
-    ; the end of the piece from I: the first newline at or past I + 8192
-    (def end
-      (fn (self j) (if (>= j len) len (if (= (byte-at text j) 10) (+ j 1) (self (+ j 1))))))
-    (def go
-      (fn (self i acc)
-        (if (>= i len) acc
-          (let ((j (end (if (< (+ i 8192) len) (+ i 8192) len))))
-            (def acc2 (reverse-onto (cc-raw-tokens (substring text i j)) acc))
-            (heap-collect)
-            (self j acc2)))))
-    ; the pieces' tokens come out last first, and are turned a run at a
-    ; time, since nothing collects on its own
-    (def back
-      (fn (self ts acc k)
-        (match
-          ((null? ts) acc)
-          ((< k 4096) (self (rest ts) (pair (first ts) acc) (+ k 1)))
-          (#t (do (heap-collect) (self (rest ts) (pair (first ts) acc) 0))))))
-    (if (%cc-object? text) (back (go 0 ()) () 0) (cc-raw-tokens text))))
-
-; the object for the file PATH, whose text is SRC
-(def cc-pp-object
-  (fn (_ path src)
-    (set! %cc-pp-file path)
-    (def ts (%cc-preprocess (cc-raw-tokens src)))
-    (def ns (reverse %cc-pp-lines))
-    (set! %cc-pp-lines ())
-    ; AT the line being spelled; a token goes on its own line, a newline
-    ; first for each line it is past AT
-    (def go
-      (fn (self ts ns at acc)
-        (def n (if (null? ns) at (first ns)))
-        (match
-          ((null? ts) (string-concat (reverse (pair "\n" acc))))
-          ((if (%cc-tag? (first ts) (lit sp)) #t (%cc-tag? (first ts) (lit nl)))
-            (self (rest ts) (if (null? ns) ns (rest ns)) at acc))
-          ((< at n) (self ts ns (+ at 1) (pair "\n" acc)))
-          (#t (self (rest ts) (if (null? ns) ns (rest ns)) at
-                (pair " " (pair (%cc-text (first ts)) acc)))))))
-    (go ts ns 1 (list " */" path %cc-object-mark))))
-
-; the file an object's TEXT was made from, as its first comment names it,
-; or nil for text that is no object's
-(def cc-pp-object-path
-  (fn (_ text)
-    (def start (byte-len %cc-object-mark))
-    (def go
-      (fn (self i)
-        (match
-          ((> (+ i 3) (byte-len text)) ())
-          ((string=? (substring text i (+ i 3)) " */") (substring text start i))
-          (#t (self (+ i 1))))))
-    (if (%cc-object? text) (go start) ())))
+; the raw tokens of a unit's TEXT, read whole, since a comment can run
+; past a line
+(def %cc-unit-tokens (fn (_ text) (cc-raw-tokens text)))
 
 ; The parser's tokens for SRC: a program's text, or a list of its files,
 ; each (PATH . TEXT), in order.  Each is preprocessed, the blanks out, each
 ; token made the parser's, and a string literal right after another joined
-; to it.  An object's text is preprocessed without the -D and -I.
+; to it.
 (def cc-lex
   (fn (_ src)
     (def units (if (str? src) (list (pair %cc-pp-file src)) src))
@@ -1271,7 +1200,7 @@
       (fn (self us n ts ns)
         (if (null? us) (pair ts ns)
           (do (set! %cc-pp-file (first (first us)))
-              (if (%cc-object? (rest (first us))) (cc-pp-options! () ()) (cc-pp-options! paths defines))
+              (cc-pp-options! paths defines)
               (let ((raw (%cc-preprocess (%cc-unit-tokens (rest (first us))))))
                 (def lines (reverse %cc-pp-lines))
                 (set! %cc-pp-lines ())
@@ -1312,4 +1241,4 @@
     (cc-token-lines! (first r) (rest r))
     (first r)))
 
-(provide cc/pp cc-lex cc-source-name! cc-pp-options! cc-pp-object cc-pp-object-path)
+(provide cc/pp cc-lex cc-source-name! cc-pp-options!)
