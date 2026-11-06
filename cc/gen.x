@@ -2017,13 +2017,27 @@
       ())
     (%cc-gen! %cc-gen-callop (label (%cc-gen-jump-label name)))))
 
-; whether the C library has a function NAME: asked of the library this
-; process has, which is the one the program will load
+; whether the C library has a function NAME: asked of the libraries the
+; executable names (cc/macho, cc/elf), not of this process -- the process
+; is x-bin, which exports the engine's own functions, so an engine source
+; compiled here would find each of its own names "in the C library"
+(def %cc-gen-libc-paths
+  (if os-darwin? (list "/usr/lib/libSystem.B.dylib") (list "libc.so.6" "libm.so.6")))
 (def %cc-gen-libc ())
 (def %cc-gen-libc-has?
   (fn (_ name)
-    (if (null? %cc-gen-libc) (set! %cc-gen-libc ((prim-ref (lit ffi) (lit dlopen)) () 1)) ())
-    (not (null? ((prim-ref (lit ffi) (lit dlsym)) %cc-gen-libc name)))))
+    (if (null? %cc-gen-libc)
+      (set! %cc-gen-libc
+        (filter (fn (_ h) (not (null? h)))
+          (map (fn (_ p) ((prim-ref (lit ffi) (lit dlopen)) p 1)) %cc-gen-libc-paths)))
+      ())
+    (def go
+      (fn (self hs)
+        (match
+          ((null? hs) #f)
+          ((not (null? ((prim-ref (lit ffi) (lit dlsym)) (first hs) name))) #t)
+          (#t (self (rest hs))))))
+    (go %cc-gen-libc)))
 
 ; (V-NAME FIXED) for a variadic function of the C library, else nil
 (def %cc-gen-variadic
