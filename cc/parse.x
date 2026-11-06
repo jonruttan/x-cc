@@ -171,14 +171,21 @@
         #f))))
 
 ; Plain `char`'s C type, which each platform's C ABI picks: signed on macOS
-; and on x86-64, unsigned on arm64 Linux.
-(def plain-char (if (if os-linux? arch-arm64? #f) (lit uchar) (lit char)))
+; and on x86-64, unsigned on arm64 Linux and on 32-bit arm Linux, the
+; 4-byte word this runs on.
+(def plain-char
+  (if (if os-linux? (if arch-arm64? #t (< %word-size 8)) #f) (lit uchar) (lit char)))
 
-; va_list's C type, each platform's C ABI's: a pointer to eight-byte slots
-; on arm64 macOS; on Linux a record, arm64's 32 bytes and x86-64's 24
+; Whether a va_list is a pointer to its slots, one a word wide: on arm64
+; macOS, and on 32-bit arm Linux, where the record the C ABI names holds
+; that pointer alone and is handed on as it
+(def va-pointer? (if os-darwin? #t (< %word-size 8)))
+
+; va_list's C type, each platform's C ABI's: a pointer to its slots
+; (va-pointer?); on 64-bit Linux a record, arm64's 32 bytes and x86-64's 24
 (def %cc-p-va-list
   (match
-    (os-darwin? (list (lit ptr) (lit char)))
+    (va-pointer? (list (lit ptr) (lit char)))
     (arch-arm64? (list (lit array) 4 (lit ulong)))
     (#t (list (lit array) 3 (lit ulong)))))
 
@@ -186,7 +193,7 @@
 ; parameter, "...", holds: the caller's va_list for the arguments past the
 ; fixed ones
 (def %cc-p-va-handed
-  (if os-darwin? %cc-p-va-list (list (lit ptr) (lit ulong))))
+  (if va-pointer? %cc-p-va-list (list (lit ptr) (lit ulong))))
 
 ; The scalar the specifiers name.  `unsigned`/`signed` pick the signedness and
 ; the width keyword picks the width; `long long` is `long`, and specifiers
@@ -261,9 +268,10 @@
 ; rather than keeping a copy.
 (def struct-table (fn (_) %cc-p-structs))
 
-; Sizes in bytes, as the platforms this compiles for count them (LP64):
-; char 1, short 2, int 4, long 8, and every pointer 8.  An array is its
-; count times its element; a struct is what its layout came to.
+; Sizes in bytes, as the platforms this compiles for count them: char 1,
+; short 2, int 4, double 8, and a long and every pointer the word -- 8
+; (LP64), or 4 on a 4-byte word (ILP32).  An array is its count times its
+; element; a struct is what its layout came to.
 (def c-type-size
   (fn (self c-type)
     (if (not (pair? c-type))
@@ -276,8 +284,9 @@
         ((eq? c-type (lit int)) 4)
         ((eq? c-type (lit uint)) 4)
         ((eq? c-type (lit float)) 4)
+        ((eq? c-type (lit double)) 8)
         ((eq? c-type (lit void)) 1)
-        (#t 8))
+        (#t %word-size))
       (match
         ((eq? (first c-type) (lit array))
           (* (first (rest c-type))
@@ -290,7 +299,7 @@
               (first (rest e)))))
         ; a bit-field's unit
         ((eq? (first c-type) (lit bits)) (self (first (rest c-type))))
-        (#t 8)))))
+        (#t %word-size)))))
 
 ; What an address of this C type must be a multiple of: a scalar its own size,
 ; an array its element's, a struct its widest field's.
@@ -309,7 +318,7 @@
                               (self2 (rest fs) (if (> fa a) fa a)))))))
                 (go (rest (rest e)) 1)))))
         ((eq? (first c-type) (lit bits)) (self (first (rest c-type))))
-        (#t 8)))))
+        (#t %word-size)))))
 
 (def round-up (fn (_ n a) (let ((m (+ n (- a 1)))) (- m (% m a)))))
 
@@ -411,6 +420,8 @@
               ((eq? k (lit bool)) (b01 (not (= v 0))))
               ((if (eq? k (lit long)) #t (if (eq? k (lit ulong)) #t (pair? k))) v)
               ((if (eq? k (lit double)) #t (eq? k (lit float))) (no))
+              ; an int on a 4-byte word is the word
+              ((>= (c-type-size k) %word-size) v)
               (#t
                 (let ((m (<< 1 (* 8 (c-type-size k)))))
                   (def w (& v (- m 1)))
@@ -772,20 +783,21 @@
         (go toks ())))))
 
 ; <stdarg.h>'s macros, written out in the C they stand for.  The next
-; argument's slot is the va_list itself on arm64 macOS, and on Linux the
-; record's pointer to its slots -- arm64's first word, x86-64's second --
-; whose register offsets say the registers are used up, as a caller of
-; the program's own variadic function leaves them.
+; argument's slot is the va_list itself where it is a pointer
+; (va-pointer?), and on 64-bit Linux the record's pointer to its slots --
+; arm64's first word, x86-64's second -- whose register offsets say the
+; registers are used up, as a caller of the program's own variadic
+; function leaves them.  A slot is a word.
 (def %cc-va-slot
   (fn (_ ap)
-    (if os-darwin? ap
+    (if va-pointer? ap
       (list (lit idx) (list (lit cast) (list (lit ptr) (list (lit ptr) (lit char))) ap)
         (list (lit num) (if arch-arm64? 0 1))))))
 
 ; the va_list TO made a copy of FROM, a va_list as it is handed on
 (def %cc-va-copy
   (fn (_ to from)
-    (if os-darwin? (list (lit assign) to from)
+    (if va-pointer? (list (lit assign) to from)
       (let ((word (fn (_ e i) (list (lit idx) (list (lit cast) (list (lit ptr) (lit ulong)) e)
                                 (list (lit num) i)))))
         (def go
@@ -817,7 +829,7 @@
           (if (if (pair? k) (eq? (first k) (lit struct)) #f)
             (%cc-p-err "not built yet: a struct from va_arg"))
           (def slot (%cc-va-slot (first ar)))
-          (def step (list (lit num) (round-up (c-type-size k) 8)))
+          (def step (list (lit num) (round-up (c-type-size k) %word-size)))
           (pair (list (lit un) "*"
                   (list (lit cast) (%cc-p-pointer-to k)
                     (list (lit bin) "-"
@@ -1971,5 +1983,5 @@
     (if (not (null? (rest r))) (%cc-p-err "expected a constant expression"))
     (%cc-p-const (first r))))
 
-(provide cc/parse cc-parse cc-parse-const cc-token-lines! cc-lexed-count c-type-size c-type-align plain-char round-up
+(provide cc/parse cc-parse cc-parse-const cc-token-lines! cc-lexed-count c-type-size c-type-align plain-char va-pointer? round-up
   struct-entry struct-table)
