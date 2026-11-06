@@ -474,6 +474,11 @@
               acc)))))
     (go width ())))
 
+; a long's bounds, the word's: 64 bits, or 32 on a 4-byte word
+(def %cc-long-min (if (< %word-size 8) "(-2147483647L-1)" "(-9223372036854775807L-1)"))
+(def %cc-long-max (if (< %word-size 8) "2147483647L" "9223372036854775807L"))
+(def %cc-ulong-max (if (< %word-size 8) "4294967295UL" "18446744073709551615UL"))
+
 (def %cc-headers
   (list (list "stdio.h" "#define EOF (-1)" %cc-null "#define FILE void" %cc-size-t
           (if os-darwin? "#define BUFSIZ 1024" "#define BUFSIZ 8192")
@@ -509,14 +514,14 @@
           "#define INT16_MIN (-32768)" "#define INT16_MAX 32767" "#define UINT16_MAX 65535"
           "#define INT32_MIN (-2147483647-1)" "#define INT32_MAX 2147483647"
           "#define UINT32_MAX 4294967295U"
-          "#define INT64_MIN (-9223372036854775807L-1)" "#define INT64_MAX 9223372036854775807L"
-          "#define UINT64_MAX 18446744073709551615UL"
-          "#define INTPTR_MIN (-9223372036854775807L-1)" "#define INTPTR_MAX 9223372036854775807L"
-          "#define UINTPTR_MAX 18446744073709551615UL"
-          "#define INTMAX_MIN (-9223372036854775807L-1)" "#define INTMAX_MAX 9223372036854775807L"
-          "#define UINTMAX_MAX 18446744073709551615UL"
-          "#define PTRDIFF_MIN (-9223372036854775807L-1)" "#define PTRDIFF_MAX 9223372036854775807L"
-          "#define SIZE_MAX 18446744073709551615UL"
+          (string-append "#define INT64_MIN " %cc-long-min) (string-append "#define INT64_MAX " %cc-long-max)
+          (string-append "#define UINT64_MAX " %cc-ulong-max)
+          (string-append "#define INTPTR_MIN " %cc-long-min) (string-append "#define INTPTR_MAX " %cc-long-max)
+          (string-append "#define UINTPTR_MAX " %cc-ulong-max)
+          (string-append "#define INTMAX_MIN " %cc-long-min) (string-append "#define INTMAX_MAX " %cc-long-max)
+          (string-append "#define UINTMAX_MAX " %cc-ulong-max)
+          (string-append "#define PTRDIFF_MIN " %cc-long-min) (string-append "#define PTRDIFF_MAX " %cc-long-max)
+          (string-append "#define SIZE_MAX " %cc-ulong-max)
           "#define INT8_C(c) c" "#define INT16_C(c) c" "#define INT32_C(c) c"
           "#define UINT8_C(c) c" "#define UINT16_C(c) c" "#define UINT32_C(c) c ## U"
           "#define INT64_C(c) c ## L" "#define UINT64_C(c) c ## UL"
@@ -762,7 +767,7 @@
           "#define DBL_MIN_EXP (-1021)" "#define DBL_MAX_EXP 1024"
           "#define DBL_MIN_10_EXP (-307)" "#define DBL_MAX_10_EXP 308"
           "#define DBL_MIN 2.2250738585072014e-308" "#define DBL_MAX 1.7976931348623157e+308")
-        ; the platforms' C types: long 64 bits, plain char as plain-char says
+        ; the platforms' C types: long the word, plain char as plain-char says
         (list "limits.h"
           "#define CHAR_BIT 8"
           "#define SCHAR_MIN (-128)" "#define SCHAR_MAX 127" "#define UCHAR_MAX 255"
@@ -771,10 +776,10 @@
           "#define SHRT_MIN (-32768)" "#define SHRT_MAX 32767" "#define USHRT_MAX 65535"
           "#define INT_MIN (-2147483647-1)" "#define INT_MAX 2147483647"
           "#define UINT_MAX 4294967295U"
-          "#define LONG_MIN (-9223372036854775807L-1)" "#define LONG_MAX 9223372036854775807L"
-          "#define ULONG_MAX 18446744073709551615UL"
-          "#define LLONG_MIN (-9223372036854775807L-1)" "#define LLONG_MAX 9223372036854775807L"
-          "#define ULLONG_MAX 18446744073709551615UL")))
+          (string-append "#define LONG_MIN " %cc-long-min) (string-append "#define LONG_MAX " %cc-long-max)
+          (string-append "#define ULONG_MAX " %cc-ulong-max)
+          (string-append "#define LLONG_MIN " %cc-long-min) (string-append "#define LLONG_MAX " %cc-long-max)
+          (string-append "#define ULLONG_MAX " %cc-ulong-max))))
 
 ; PATH's directory, up to and with its last /, or "" for a path with none
 (def %cc-dir

@@ -28,7 +28,7 @@
   string-concat string=? substring x-write fx+ fx- fx* fx< fx<< fx>> fx& fx| fx^
   mem-fill! int-ptr heap-count heap-collect evals)
 (import cc/pp cc-lex)
-(import cc/parse cc-parse c-type-size plain-char round-up struct-entry struct-table)
+(import cc/parse cc-parse c-type-size plain-char va-pointer? round-up struct-entry struct-table)
 (import cc/real convert-real real-arith real-compare real-negate real-step real-stub
   real-zero? real?)
 (import x/sys/callback)
@@ -42,15 +42,26 @@
 ; globals, statics and string literals up from its foot
 (def %cc-memsize 67108864)
 (def %cc-base 0)        ; the buffer's address
+; Whether A is in the null page.  An address is the word's bits, so on a
+; 4-byte word the buffer may sit at the top half's addresses, which read
+; as negative numbers; on an 8-byte word none is negative.
+(def %cc-null?
+  (if (< %word-size 8)
+    (fn (_ a) (if (fx< a 4096) (not (fx< a 0)) #f))
+    (fn (_ a) (fx< a 4096))))
+; whether A is no address a load or store takes: null, or on an 8-byte
+; word negative
+(def %cc-unaddressed?
+  (if (< %word-size 8) (fn (_ a) (= a 0)) (fn (_ a) (<= a 0))))
 ; the W bytes at address A: the prim takes a pointer and an offset, and
 ; the buffer's pointer and A's distance from it reach A wherever it is
 (def %cc-raw-ref
   (fn (_ a w)
-    (if (fx< a 4096) (%cc-oops "a read through a null pointer"))
+    (if (%cc-null? a) (%cc-oops "a read through a null pointer"))
     (mem-ref-at %cc-memp (fx- a %cc-base) w)))
 (def %cc-raw-set!
   (fn (_ a v w)
-    (if (fx< a 4096) (%cc-oops "a write through a null pointer"))
+    (if (%cc-null? a) (%cc-oops "a write through a null pointer"))
     (mem-set-at! %cc-memp (fx- a %cc-base) v w)))
 (def %cc-sp 0)          ; stack pointer, grows down
 (def %cc-hp 0)          ; the bump for literals and globals, grows up
@@ -299,16 +310,16 @@
 (def %cc-load
   (fn (_ addr c-type)
     (match
-      ((<= addr 0) (%cc-oops "null or negative address read"))
+      ((%cc-unaddressed? addr) (%cc-oops "null or negative address read"))
       ((%cc-bits? c-type) (%cc-bits-read addr c-type))
       (#t (let ((w (%cc-width c-type)))
             (let ((v (%cc-raw-ref addr w)))
-              (if (if (signed? c-type) (< w 8) #f) (%cc-sext v w) v)))))))
+              (if (if (signed? c-type) (< w %word-size) #f) (%cc-sext v w) v)))))))
 
 (def %cc-store
   (fn (_ addr v c-type)
     (match
-      ((<= addr 0) (%cc-oops "null or negative address write"))
+      ((%cc-unaddressed? addr) (%cc-oops "null or negative address write"))
       ((%cc-bits? c-type) (%cc-bits-write! addr v c-type))
       (#t (%cc-raw-set! addr v (%cc-width c-type))))))
 
@@ -347,7 +358,7 @@
       ((eq? c-type (lit bool)) (if (= v 0) 0 1))
       ((%cc-c-type-decays? c-type) (%cc-oops "a cast to an array or a struct"))
       (#t (let ((w (%cc-width c-type)))
-            (if (>= w 8) v
+            (if (>= w %word-size) v
               (let ((low (& v (- (<< 1 (* 8 w)) 1))))
                 (if (signed? c-type) (%cc-sext low w) low))))))))
 
@@ -594,18 +605,18 @@
           (#t (self (rest es))))))
     (go %cc-libc-syms)))
 
-; ARGS as a va_list on the stack; answers its address
+; ARGS as a va_list on the stack, a word a slot; answers its address
 (def %cc-va-list
   (fn (_ args)
-    (def slots (%cc-alloca (* 8 (length args))))
+    (def slots (%cc-alloca (* %word-size (length args))))
     (def go
       (fn (self as i)
         (if (null? as) ()
-          (do (%cc-raw-set! (+ slots (* 8 i)) (first as) 8)
+          (do (%cc-raw-set! (+ slots (* %word-size i)) (first as) %word-size)
               (self (rest as) (+ i 1))))))
     (go args 0)
     (match
-      (os-darwin? slots)
+      (va-pointer? slots)
       ; an offset of zero or more says its register area is used up
       (arch-arm64?
         (let ((v (%cc-alloca 32)))
@@ -951,7 +962,7 @@
         (first ((real-stub label name) (list (first args)) (list (first (rest args))))))
       ; difftime's two are times, no pointers
       ((string=? name "difftime") ((real-stub label name) (first args) (first (rest args))))
-      ((< (first (if (string=? label "dp->d") (rest args) args)) 4096)
+      ((%cc-null? (first (if (string=? label "dp->d") (rest args) args)))
         (%cc-oops (string-append "a null pointer, handed to " name)))
       ((string=? label "dp->d") ((real-stub label name) (first args) (first (rest args))))
       ; strtod with its end pointer, which may be null
@@ -1017,15 +1028,15 @@
     (if (%cc-bits? k) (fn (_ a) (%cc-bits-read a k))
       (let ((w (%cc-width k)))
         ; %cc-raw-ref's check and read, here, so a read is one call
-        (if (if (signed? k) (< w 8) #f)
+        (if (if (signed? k) (< w %word-size) #f)
           ; the sign bit's value and the width's span, worked out once
           (let ((top (fx<< 1 (fx- (fx* 8 w) 1))) (span (fx<< 1 (fx* 8 w))))
             (fn (_ a)
-              (if (fx< a 4096) (%cc-oops "a read through a null pointer"))
+              (if (%cc-null? a) (%cc-oops "a read through a null pointer"))
               (def v (mem-ref-at %cc-memp (fx- a %cc-base) w))
               (if (fx< v top) v (fx- v span))))
           (fn (_ a)
-            (if (fx< a 4096) (%cc-oops "a read through a null pointer"))
+            (if (%cc-null? a) (%cc-oops "a read through a null pointer"))
             (mem-ref-at %cc-memp (fx- a %cc-base) w)))))))
 
 ; a write of a K at an address
@@ -1034,7 +1045,7 @@
     (if (%cc-bits? k) (fn (_ a v) (%cc-bits-write! a v k))
       (let ((w (%cc-width k)))
         (fn (_ a v)
-          (if (fx< a 4096) (%cc-oops "a write through a null pointer"))
+          (if (%cc-null? a) (%cc-oops "a write through a null pointer"))
           (mem-set-at! %cc-memp (fx- a %cc-base) v w))))))
 
 ; V converted to K as a cast does (%cc-convert)
@@ -1045,7 +1056,7 @@
       ((eq? k (lit bool)) (fn (_ v) (if (= v 0) 0 1)))
       ((%cc-c-type-decays? k) (fn (_ v) (%cc-oops "a cast to an array or a struct")))
       (#t (let ((w (%cc-width k)))
-            (if (>= w 8) %cc-id
+            (if (>= w %word-size) %cc-id
               (let ((m (- (<< 1 (* 8 w)) 1)))
                 (if (signed? k)
                   (let ((top (fx<< 1 (fx- (fx* 8 w) 1))) (span (fx<< 1 (fx* 8 w))))
@@ -2491,7 +2502,7 @@
 ; fpurge on macOS, __fpurge on glibc
 (def %cc-stdin-reset!
   (fn (_)
-    (def stdin (%cc-raw-ref (first (rest (%cc-libc-stream "stdin"))) 8))
+    (def stdin (%cc-raw-ref (first (rest (%cc-libc-stream "stdin"))) %word-size))
     (%cc-libc-do "clearerr" stdin)
     (%cc-libc-do (if os-darwin? "fpurge" "__fpurge") stdin)))
 
@@ -2540,11 +2551,11 @@
                          (let ((a (%cc-heap (+ (byte-len s) 1))))
                            (do (%cc-put-text! a s (byte-len s)) a)))
                     argv)))
-        (def table (%cc-heap (* 8 (+ (length argv) 1))))
+        (def table (%cc-heap (* %word-size (+ (length argv) 1))))
         (def go
           (fn (self ps i)
-            (if (null? ps) (%cc-raw-set! (+ table (* 8 i)) 0 8)
-              (do (%cc-raw-set! (+ table (* 8 i)) (first ps) 8)
+            (if (null? ps) (%cc-raw-set! (+ table (* %word-size i)) 0 %word-size)
+              (do (%cc-raw-set! (+ table (* %word-size i)) (first ps) %word-size)
                   (self (rest ps) (+ i 1))))))
         (go ptrs 0)
         (list (length argv) table)))))
