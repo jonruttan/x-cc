@@ -49,15 +49,6 @@ z=3
 
 ## refused
 
-### the address of a variadic function, compiled
-
-```cc
-(display (guard (e (do (display "refused: ") (write e) ""))
-  (cc-exe-run "int f(int n, ...) { return n; }\nint main(void) { int (*g)(int, ...) = f; return g(1); }\n")))
-```
----
-    refused: #<err:cc cc: compile: not built yet: the address of f, which is variadic>
-
 ### a struct from va_arg
 
 ```cc

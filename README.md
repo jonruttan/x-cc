@@ -139,11 +139,13 @@ arguments past its fixed ones the same way: its caller lays them out as
 the va_list a v- function takes, and hands it over as a last, hidden
 argument, which `va_start` copies.  `va_arg` reads the next eight-byte
 slot as the C type it names, `va_copy` copies, and a `va_list` goes on
-to the library's v- functions or to the program's own.
+to the library's v- functions or to the program's own.  A pointer to a
+variadic function, `int (*g)(int, ...)`, keeps how many parameters come
+before the `...`, and a call through it lays the arguments past those
+out the same way; the C library's, on arm64 macOS, on the stack.
 Anything else refuses by name: `long double`, a call into the C library
 with more than six arguments, a global initialized by something other
-than a constant or an address, a struct through `va_arg`, and the
-address of a variadic function.
+than a constant or an address, and a struct through `va_arg`.
 
     x -l cc -- run prog.c
 

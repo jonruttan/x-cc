@@ -244,7 +244,7 @@
 
 ; --- types, as far as the memory model needs them --------------------------
 ; C types: a scalar's own name (char uchar short ushort int uint long ulong
-; void) | (fnptr RET) | (array N K) | (struct S) | (ptr K).  Sizes are bytes, as the
+; void) | (fnptr RET) | (fnptr RET FIXED), variadic | (array N K) | (struct S) | (ptr K).  Sizes are bytes, as the
 ; platforms this compiles for count them; a struct is its fields at aligned
 ; offsets, padded; an array of K is N*size(K); a pointer is 8 and keeps its
 ; pointee, which is what arithmetic scales by, what a read through it takes
@@ -466,6 +466,24 @@
               (self (rest ts) depth))))))
     (if (%cc-p-op? toks "(") (go toks 0)
       (%cc-p-err "expected a parameter list"))))
+
+; A pointer to a function answering RET, with the parameter list TOKS
+; starts with: (fnptr RET), or (fnptr RET FIXED) when the list ends in
+; "...", FIXED the parameters before it.  A call through it lays the
+; arguments past those out as a variadic call does.
+(def %cc-p-fnptr
+  (fn (_ ret toks)
+    (def go
+      (fn (self ts depth commas)
+        (match
+          ((null? ts) (list (lit fnptr) ret))
+          ((%cc-p-op? ts "(") (self (rest ts) (+ depth 1) commas))
+          ((%cc-p-op? ts ")")
+            (if (= depth 1) (list (lit fnptr) ret) (self (rest ts) (- depth 1) commas)))
+          ((if (= depth 1) (%cc-p-op? ts "...") #f) (list (lit fnptr) ret commas))
+          ((if (= depth 1) (%cc-p-op? ts ",") #f) (self (rest ts) depth (+ commas 1)))
+          (#t (self (rest ts) depth commas)))))
+    (go toks 0 0)))
 
 ; the `(*NAME` of a function-pointer declarator?
 (def %cc-p-fnptr-start?
@@ -745,7 +763,8 @@
 ; a type name, as a cast or sizeof takes it: TYPE, then [N]... for an
 ; array, (*)[N]... for a pointer to one, or (*)(params) for a pointer to a
 ; function, (fnptr RET) with TYPE its RET and the parameters' types not
-; kept, as a declarator's.  (C-TYPE . rest)
+; kept, only how many come before a "..." (%cc-p-fnptr), as a
+; declarator's.  (C-TYPE . rest)
 (def %cc-p-type-name-in
   (fn (_ toks)
     (def tr (%cc-p-c-type toks))
@@ -754,7 +773,7 @@
       (let ((after (%cc-p-eat (rest (rest ts)) ")")))
         (match
           ((%cc-p-op? after "(")
-            (pair (list (lit fnptr) (first tr)) (%cc-p-skip-parens after)))
+            (pair (%cc-p-fnptr (first tr) after) (%cc-p-skip-parens after)))
           ((%cc-p-op? after "[")
             (let ((ar (%cc-p-array-suffix (first tr) after)))
               (pair (%cc-p-pointer-to (first ar)) (rest ar))))
@@ -1117,7 +1136,8 @@
 ; One declarator's name and C type, on the specifiers' BASE: *s NAME
 ; [N]..., the function-pointer form (*NAME [N]...)(params) -- (fnptr RET),
 ; RET the C type the specifiers and stars before it give, the parameters'
-; types not kept -- or a pointer to an array, (*NAME)[N]....
+; types not kept, only how many come before a "..." (%cc-p-fnptr) -- or a
+; pointer to an array, (*NAME)[N]....
 ; (NAME C-TYPE . rest)
 (def %cc-p-declarator-head
   (fn (_ toks base)
@@ -1134,7 +1154,9 @@
           (def after (%cc-p-eat (rest kr) ")"))
           (match
             ((not (%cc-p-op? after "["))
-              (pair (first (rest (first ts2))) (pair (first kr) (%cc-p-skip-parens after))))
+              (pair (first (rest (first ts2)))
+                (pair (first (%cc-p-array-suffix (%cc-p-fnptr (first sr) after) (rest ts2)))
+                  (%cc-p-skip-parens after))))
             ((eq? (first (first kr)) (lit array))
               (%cc-p-err "not built yet: an array of pointers to arrays"))
             (#t

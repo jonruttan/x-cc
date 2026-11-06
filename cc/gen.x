@@ -1623,7 +1623,10 @@
       (match
         ; a function's name is a pointer to it
         ((if (eq? t (lit var)) (%cc-gen-function-name? (first (rest node))) #f)
-          (list (lit fnptr) (%cc-gen-ret-find (first (rest node)))))
+          (let ((name (first (rest node))))
+            (pair (lit fnptr)
+              (pair (%cc-gen-ret-find name)
+                (let ((fixed (%cc-gen-fixed-find name))) (if (null? fixed) () (list fixed)))))))
         ((if (eq? t (lit var)) (not (null? (%cc-gen-library-function-node node))) #f)
           (list (lit fnptr) (library-c-type (first (rest node)))))
         ((if (eq? t (lit var)) (%cc-gen-stream? (first (rest node))) #f)
@@ -2437,20 +2440,22 @@
 
 ; The function NAME's address, into x0, taken from where the instruction
 ; is: its thunk's.  The program's own calls through it take any arguments
-; (%cc-gen-call-through!); the C library's, through the gate, hand over the
+; (%cc-gen-call-through!), a variadic function's laid out by the "..." in
+; the pointer's C type; the C library's, through the gate, hand over the
 ; first three registers, which every callback it takes -- qsort's and
-; bsearch's comparison, a signal handler, an atexit function -- fits.
+; bsearch's comparison, a signal handler, an atexit function -- fits, and
+; none of which is variadic.
 (def %cc-gen-function-address!
   (fn (_ name)
-    (if (not (null? (%cc-gen-fixed-find name)))
-      (%cc-gen-no (string-append "the address of " name ", which is variadic")))
     (%cc-gen! (lit adr) x0 (label (%cc-gen-thunk-label name)))))
 
 ; A call through TARGET, a pointer to a function, with ARGS, made by the
 ; program's own convention: the pointer is a thunk (%cc-gen-thunks!), whose
 ; last instruction, %cc-gen-thunk-direct bytes in, branches to the function
 ; itself.  The pointer's C type names no parameters, so each argument's own
-; C type lays it out, an array going as a pointer.  The address waits on
+; C type lays it out, an array going as a pointer; it does say how many
+; come before a "...", and the arguments past those go through a va_list,
+; as a direct call to a variadic function hands them.  The address waits on
 ; the stack under the arguments and is taken into x19 last, every argument
 ; register being spoken for; x19, the frame's base, waits under it and is
 ; put back once the callee returns, x20 being lower when a variable-length
@@ -2484,6 +2489,17 @@
                (if (%cc-gen-array? ak) (list (lit ptr) (c-type-elem ak)) ak)))
         args))
     (def ret (first (rest k)))
+    ; a pointer to a variadic function: its own takes the arguments past
+    ; the fixed ones through a va_list, as a direct call hands them
+    (def fixed (if (null? (rest (rest k))) () (first (rest (rest k)))))
+    (if (if (null? fixed) #f (< (length args) fixed))
+      (%cc-gen-no "a call through a pointer with too few arguments"))
+    (def own-args
+      (if (null? fixed) args
+        (append (%cc-gen-take fixed args) (list (list (lit va-here))))))
+    (def own-c-types
+      (if (null? fixed) c-types
+        (append (%cc-gen-take fixed c-types) (list (list (lit ptr) (lit char))))))
     (def word? (fn (_ c) (not (if (%cc-gen-real? c) #t (%cc-gen-struct? c)))))
     (def foreign? (if (word? ret) (null? (filter (fn (_ c) (not (word? c))) c-types)) #f))
     (def foreign (%cc-gen-label))
@@ -2499,8 +2515,8 @@
               (%cc-gen! (lit cmp) x0 x1)
               (%cc-gen! (lit b/ge) (label foreign)))
           ())
-        (%cc-gen-call-laid! node args c-types (%cc-gen-struct? ret)
-          (fn (_) ())
+        (%cc-gen-call-laid! node own-args own-c-types (%cc-gen-struct? ret)
+          (fn (_) (if (null? fixed) () (%cc-gen-fill-extras! (%cc-gen-drop fixed args))))
           (fn (_)
             (do (asm-pop! %cc-gen-asm x19)
                 (%cc-gen! (lit add) x19 x19 (imm %cc-gen-thunk-direct))
@@ -2509,7 +2525,7 @@
         (if foreign?
           (do (%cc-gen! (lit b) (label done))
               (asm-label! %cc-gen-asm foreign)
-              (%cc-gen-call-foreign! ret args)
+              (%cc-gen-call-foreign! ret args fixed)
               (asm-label! %cc-gen-asm done))
           ()))))
 
@@ -2518,10 +2534,15 @@
 ; convention: as %cc-gen-libc-call! makes a direct one, the arguments in
 ; the frame's call area, those past the registers in its stack words, the
 ; function in x8 and the trampoline making the call.  The answer is put in
-; the form of RET.
+; the form of RET.  Through a pointer to a variadic function, VFIXED its
+; fixed parameters, arm64 macOS passes the arguments past those on the
+; stack, as it does a direct call's (%cc-gen-libc-regs).
 (def %cc-gen-call-foreign!
-  (fn (_ ret args)
-    (def fixed (%cc-gen-libc-regs "" (length args)))
+  (fn (_ ret args vfixed)
+    (def fixed
+      (if (if os-darwin? (not (null? vfixed)) #f)
+        (if (< (length args) vfixed) (length args) vfixed)
+        (%cc-gen-libc-regs "" (length args))))
     (def nvar (- (length args) fixed))
     (def at (fn (_ off) (mem x19 (+ %cc-gen-ca off))))
     (def push-all
@@ -2564,28 +2585,6 @@
     (def args
       (if (null? fixed) given
         (append (%cc-gen-take fixed given) (list (list (lit va-here))))))
-    ; the extras are evaluated once the other arguments are, so a call
-    ; among those does not disturb the area; a float goes as a double
-    (def fill-extras
-      (fn (_)
-        (def push-all
-          (fn (self as)
-            (if (null? as) ()
-              (do (%cc-gen-expr! (first as))
-                  (let ((k (%cc-gen-c-type-of (first as))))
-                    (if (%cc-gen-struct? k) (%cc-gen-no "a struct handed to a variadic function"))
-                    (if (eq? k (lit float)) (%cc-gen-convert! (lit double) k) ()))
-                  (asm-push! %cc-gen-asm x0)
-                  (self (rest as))))))
-        (def pop-into
-          (fn (self k)
-            (if (< k 0) ()
-              (do (asm-pop! %cc-gen-asm x0)
-                  (%cc-gen! (lit str) x0 (mem x19 (+ %cc-gen-ca (+ %cc-gen-ca-vars (* 8 k)))))
-                  (self (- k 1))))))
-        (do (push-all extras)
-            (pop-into (- (length extras) 1))
-            (%cc-gen-va-record!))))
     ; past the parameters, an argument's own C type says where it goes
     (def c-types
       (let ((go (fn (self as ps)
@@ -2594,8 +2593,34 @@
                       (self (rest as) (if (null? ps) () (rest ps))))))))
         (go args params)))
     (%cc-gen-call-laid! node args c-types (%cc-gen-struct? (%cc-gen-ret-find name))
-      (fn (_) (if (null? fixed) () (fill-extras)))
+      (fn (_) (if (null? fixed) () (%cc-gen-fill-extras! extras)))
       (fn (_) (%cc-gen! %cc-gen-callop (label to))))))
+
+; EXTRAS, the arguments a call to the program's own variadic function
+; passes past its fixed ones, into the call area's slots, and the va_list
+; its "..." takes set up.  They are evaluated once the other arguments
+; are, so a call among those does not disturb the area; a float goes as a
+; double.
+(def %cc-gen-fill-extras!
+  (fn (_ extras)
+    (def push-all
+      (fn (self as)
+        (if (null? as) ()
+          (do (%cc-gen-expr! (first as))
+              (let ((k (%cc-gen-c-type-of (first as))))
+                (if (%cc-gen-struct? k) (%cc-gen-no "a struct handed to a variadic function"))
+                (if (eq? k (lit float)) (%cc-gen-convert! (lit double) k) ()))
+              (asm-push! %cc-gen-asm x0)
+              (self (rest as))))))
+    (def pop-into
+      (fn (self k)
+        (if (< k 0) ()
+          (do (asm-pop! %cc-gen-asm x0)
+              (%cc-gen! (lit str) x0 (mem x19 (+ %cc-gen-ca (+ %cc-gen-ca-vars (* 8 k)))))
+              (self (- k 1))))))
+    (do (push-all extras)
+        (pop-into (- (length extras) 1))
+        (%cc-gen-va-record!))))
 
 ; The arguments ARGS of the call NODE laid out by their C-TYPES, the
 ; callee's parameters' (%cc-gen-homes), then EXTRAS! run and BRANCH! made.
@@ -2704,10 +2729,11 @@
                               (#t
                                 (let ((v (%cc-gen-variadic name)))
                                   (if (null? v) (- n (%cc-gen-libc-regs name n)) (- n (first (rest v)))))))))
-                        ; through a pointer, which may be the library's
+                        ; through a pointer, which may be the library's,
+                        ; or a variadic function's, whose extras are
+                        ; some of the arguments
                         ((eq? (first node) (lit callx))
-                          (let ((n (length (first (rest (rest node))))))
-                            (- n (%cc-gen-libc-regs "" n))))
+                          (length (first (rest (rest node)))))
                         (#t -1))))
             (def go
               (fn (self2 xs best)
