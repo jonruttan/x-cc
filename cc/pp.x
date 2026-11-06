@@ -480,7 +480,8 @@
           "#define _IOFBF 0" "#define _IOLBF 1" "#define _IONBF 2"
           "#define SEEK_SET 0" "#define SEEK_CUR 1" "#define SEEK_END 2"
           (if os-darwin? "#define L_tmpnam 1024" "#define L_tmpnam 20"))
-        (list "stdlib.h" %cc-null %cc-size-t "#define EXIT_SUCCESS 0" "#define EXIT_FAILURE 1")
+        (list "stdlib.h" %cc-null %cc-size-t "#define EXIT_SUCCESS 0" "#define EXIT_FAILURE 1"
+          "#define RAND_MAX 2147483647")
         (list "string.h" %cc-null %cc-size-t)
         (list "stddef.h" %cc-null %cc-size-t "#define ptrdiff_t long"
           "#define offsetof(t, m) ((size_t)&((t *)0)->m)")

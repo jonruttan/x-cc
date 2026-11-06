@@ -60,3 +60,15 @@ through /usr/bin/cc.
 ```output
 (3 3)
 ```
+
+### stdlib.h's RAND_MAX
+
+```cc
+(def src "#include <stdio.h>\n#include <stdlib.h>\nint main(void) {\n  long n = RAND_MAX;\n  printf(\"%ld %d\\n\", n, (int)(n * 255 / RAND_MAX));\n  return n > 32767 ? 4 : 5;\n}\n")
+(display (cc-exe-run src))
+```
+---
+```output
+2147483647 255
+4
+```
