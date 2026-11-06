@@ -139,3 +139,25 @@ hello, world
 ```
 ---
     ("quiet\nhello, x\n" 14 "cc: #include \"/tmp/xcc-spec81/src/greet.h\": no such file")
+
+### a build line's words: a C file is compiled from its path, an object file is read
+
+What cc's own line does with its files, through the same door: the C
+file's object is made from the file at its path, the object file's is
+read back, and the two link.  The line the CLI hands to the compiler
+and this are one function, so a shape this case takes the CLI takes.
+
+```cc
+(import x/tool/link link-write!)
+(cc-pp-options! (list "/tmp/xcc-spec81/inc/") (list "SCALE(x) ((x)*3)"))
+(link-write! "/tmp/xcc-spec81/greet.o"
+  (cc-compile-unit (list (pair "/tmp/xcc-spec81/src/greet.c" (File read-all "/tmp/xcc-spec81/src/greet.c"))) (cc-target)))
+(cc-pp-options! (list "/tmp/xcc-spec81/inc/") (list "WHO \"x\""))
+(def os (cc-cli-objects (list "/tmp/xcc-spec81/src/main.c" "/tmp/xcc-spec81/greet.o") (cc-target)))
+(cc-pp-options! () ())
+(cc-link os (cc-target) "/tmp/xcc-spec81/cli" ())
+(def r (Proc capture (list "/tmp/xcc-spec81/cli")))
+(write (list (List length os) (rest r) (first r)))
+```
+---
+    (2 "quiet\nhello, x\n" 14)

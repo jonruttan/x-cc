@@ -241,14 +241,17 @@
       (do (cc-source-name! (first paths)) (file-read-all (first paths)))
       (map (fn (_ p) (pair p (file-read-all p))) paths))))
 
+; the object of the C file at PATH for TARGET: cc-compile-unit takes a
+; list of (PATH . TEXT), one unit here
+(def %cc-cli-unit
+  (fn (_ p target)
+    (cc-compile-unit (list (pair p (file-read-all p))) target)))
+
 ; the object of each of PATHS for TARGET: a C file's compiled, an object
-; file's read
-(def %cc-cli-objects
+; file's read -- what a build line links
+(def cc-cli-objects
   (fn (_ paths target)
-    (map (fn (_ p)
-           (if (%cc-c-file? p)
-             (cc-compile-unit (pair p (file-read-all p)) target)
-             (link-read p)))
+    (map (fn (_ p) (if (%cc-c-file? p) (%cc-cli-unit p target) (link-read p)))
       paths)))
 
 ; the first of PATHS that is not a file, or nil
@@ -391,7 +394,7 @@
                     (let ((target (cc-target)))
                       (map (fn (_ p)
                              (link-write! (if (null? out) (%cc-cli-object-name p) out)
-                               (cc-compile-unit (pair p (file-read-all p)) target)))
+                               (%cc-cli-unit p target)))
                         paths)))))
               ((eq? label (lit check))
                 (%cc-cli-try "cc: check failed: "
@@ -402,7 +405,7 @@
                 (%cc-cli-try "cc: build failed: "
                   (fn (_)
                     (let ((target (cc-target)))
-                      (cc-link (%cc-cli-objects paths target) target out
+                      (cc-link (cc-cli-objects paths target) target out
                         (%cc-cli-export-names (first (rest (rest (rest (rest (rest plan)))))))))))))))))))
 
-(provide cc/cli cc-main cc-cli-plan cc-refusal cc-usage)
+(provide cc/cli cc-main cc-cli-plan cc-cli-objects cc-refusal cc-usage)

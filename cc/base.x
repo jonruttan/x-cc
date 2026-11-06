@@ -14,7 +14,7 @@
   cc-parse cc-run cc-run-with
   cc-compile-unit cc-target cc-link cc-link-image
   cc-compile cc-compile-image cc-exe-run cc-exe-run-with cc-main
-  cc-cli-plan cc-refusal cc-usage
+  cc-cli-plan cc-cli-objects cc-refusal cc-usage
   %cc-repl-print)
 
 (def cc-version "0.1.0")
@@ -53,4 +53,4 @@
 (import cc/eval cc-run cc-run-with)
 (import cc/gen cc-compile-unit cc-target)
 (import cc/link cc-link cc-link-image cc-compile cc-compile-image cc-exe-run cc-exe-run-with)
-(import cc/cli cc-main cc-cli-plan cc-refusal cc-usage)
+(import cc/cli cc-main cc-cli-plan cc-cli-objects cc-refusal cc-usage)
