@@ -314,9 +314,19 @@
     (let ((u (& v 4294967295)))
       (if (>= u 2147483648) (- u 4294967296) u))))
 
+; REG = V, in one instruction when V fits sixteen bits unsigned, which both
+; backends' mov takes; four (arm64) or ten bytes (x86-64) otherwise.  A
+; relocation site keeps asm-load-imm64!, whose four words the linker
+; re-encodes.
+(def %cc-gen-imm!
+  (fn (_ reg v)
+    (if (if (>= v 0) (< v 65536) #f)
+      (%cc-gen! (lit mov) reg (imm v))
+      (asm-load-imm64! %cc-gen-asm reg v))))
+
 ; a constant into x0, as an int
 (def %cc-gen-const!
-  (fn (_ v) (asm-load-imm64! %cc-gen-asm x0 (%cc-gen-int-of v))))
+  (fn (_ v) (%cc-gen-imm! x0 (%cc-gen-int-of v))))
 
 ; V in the form a value of C-TYPE is held in: cut to the C type's width and
 ; extended by its sign -- an int's from bit 31, an unsigned int's with
@@ -337,7 +347,7 @@
 
 ; a constant of C-TYPE into x0, in that C type's form
 (def %cc-gen-const-c-type!
-  (fn (_ v c-type) (asm-load-imm64! %cc-gen-asm x0 (%cc-gen-form v c-type))))
+  (fn (_ v c-type) (%cc-gen-imm! x0 (%cc-gen-form v c-type))))
 
 ; the C type of a literal: the one the lexer read, an int when it read none
 (def %cc-gen-num-c-type
@@ -1317,9 +1327,7 @@
 (def %cc-gen-scale!
   (fn (_ reg n)
     (if (= n 1) ()
-      (do (if (< n 65536)
-            (%cc-gen! (lit mov) x2 (imm n))
-            (asm-load-imm64! %cc-gen-asm x2 n))
+      (do (%cc-gen-imm! x2 n)
           (%cc-gen! (lit mul) reg reg x2)))))
 
 ; x0 = x0 + or - N.  arm64's add takes twelve bits of immediate and its
@@ -1329,7 +1337,7 @@
     (match
       ((= n 0) ())
       ((<= n 4095) (%cc-gen! (if up (lit add) (lit sub)) x0 x0 (imm n)))
-      (#t (do (asm-load-imm64! %cc-gen-asm x2 n)
+      (#t (do (%cc-gen-imm! x2 n)
               (%cc-gen! (if up (lit add) (lit sub)) x0 x0 x2))))))
 
 ; the registers a call hands its arguments in, in order
@@ -1762,23 +1770,74 @@
                   (rest f)))))
         (#t (%cc-gen-no "the address of something that is not a name, a pointee, an element or a field"))))))
 
+; the operators %cc-gen-fold-bin works out
+(def %cc-gen-fold-ops (list "+" "-" "*" "/" "%" "&" "|" "^" "<<" ">>"))
+
+(def %cc-gen-fold-op?
+  (fn (self op ops)
+    (if (null? ops) #f (if (string=? op (first ops)) #t (self op (rest ops))))))
+
+; Whether NODE is an integer expression of constants alone, which
+; %cc-gen-fold works out now in place of code: literals joined by the
+; operators fold takes, and casts to an integer C type.  A division by a
+; zero is left to run.
+(def %cc-gen-int-constant?
+  (fn (self node)
+    (let ((t (first node)))
+      (match
+        ((eq? t (lit num)) (not (%cc-gen-real? (%cc-gen-num-c-type node))))
+        ((eq? t (lit un))
+          (let ((op (first (rest node))))
+            (if (if (string=? op "-") #t (if (string=? op "~") #t (string=? op "!")))
+              (if (self (first (rest (rest node))))
+                (not (%cc-gen-real? (%cc-gen-c-type-of node)))
+                #f)
+              #f)))
+        ((eq? t (lit bin))
+          (let ((op (first (rest node))) (r (first (rest (rest (rest node))))))
+            (if (%cc-gen-fold-op? op %cc-gen-fold-ops)
+              (if (self r)
+                (if (self (first (rest (rest node))))
+                  (if (if (string=? op "/") #t (string=? op "%"))
+                    (not (= (%cc-gen-fold r) 0))
+                    (let ((k (%cc-gen-c-type-of node)))
+                      (not (if (%cc-gen-real? k) #t (%cc-gen-addr-c-type? k)))))
+                  #f)
+                #f)
+              #f)))
+        ((eq? t (lit cast))
+          (let ((k (first (rest node))))
+            (if (if (eq? k (lit void)) #t
+                  (if (%cc-gen-aggregate? k) #t
+                    (if (%cc-gen-real? k) #t (%cc-gen-addr-c-type? k))))
+              #f
+              (self (first (rest (rest node)))))))
+        (#t #f)))))
+
 ; The address of A[I]: the address A stands for, plus I elements.  C lets
-; either operand be the address, so I[A] is the same element.
+; either operand be the address, so I[A] is the same element.  A constant I
+; moves the address by its bytes, worked out now.
 (def %cc-gen-index!
   (fn (_ a i)
     (def swap (not (%cc-gen-addr-c-type? (%cc-gen-c-type-of a))))
     (def at (if swap i a))
+    (def n (if swap a i))
     (def k (%cc-gen-c-type-of at))
     (if (not (%cc-gen-addr-c-type? k))
       (%cc-gen-no "a subscript of something that is not a pointer or an array"))
-    (do (%cc-gen-expr! at)
-        (asm-push! %cc-gen-asm x0)
-        (%cc-gen-expr! (if swap a i))
-        (%cc-gen-scale! x0 (c-type-size (c-type-elem k)))
-        (%cc-gen! (lit mov) x1 x0)
-        (asm-pop! %cc-gen-asm x0)
-        (%cc-gen! (lit add) x0 x0 x1)
-        (c-type-elem k))))
+    (def size (c-type-size (c-type-elem k)))
+    (if (%cc-gen-int-constant? n)
+      (let ((off (* (%cc-gen-fold n) size)))
+        (do (%cc-gen-expr! at)
+            (%cc-gen-bump! (>= off 0) (if (< off 0) (- 0 off) off))))
+      (do (%cc-gen-expr! at)
+          (asm-push! %cc-gen-asm x0)
+          (%cc-gen-expr! n)
+          (%cc-gen-scale! x0 size)
+          (%cc-gen! (lit mov) x1 x0)
+          (asm-pop! %cc-gen-asm x0)
+          (%cc-gen! (lit add) x0 x0 x1)))
+    (c-type-elem k)))
 
 (def %cc-gen-expr! ())
 (set! %cc-gen-expr!
@@ -1786,6 +1845,9 @@
     (let ((t (first node)))
       (match
         ((eq? t (lit num)) (%cc-gen-const-c-type! (first (rest node)) (%cc-gen-num-c-type node)))
+        ((if (if (eq? t (lit bin)) #t (if (eq? t (lit un)) #t (eq? t (lit cast))))
+           (%cc-gen-int-constant? node) #f)
+          (%cc-gen-imm! x0 (%cc-gen-fold node)))
         ((eq? t (lit str)) (%cc-gen-string-at! (first (rest node))))
         ; a variable-length array's room, taken off the frame stack below
         ; this frame, sixteen-aligned; the frame stack's top, marked and put
