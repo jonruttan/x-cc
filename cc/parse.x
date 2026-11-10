@@ -1835,24 +1835,51 @@
                            (#t (self (+ i 1))))))
     (go 0)))
 
+; the storage class the declaration TOKS gives among its leading
+; specifiers: extern, static, or nil for neither
+(def %cc-p-storage
+  (fn (self ts)
+    (match
+      ((null? ts) ())
+      ((%cc-p-kw? ts (lit extern)) (lit extern))
+      ((%cc-p-kw? ts (lit static)) (lit static))
+      ((eq? (first (first ts)) (lit kw)) (self (rest ts)))
+      (#t ()))))
+
 ; PROG with a global declared more than once -- `extern int n;` before
 ; `int n = 10;`, or `extern int t[];` before `int t[3] = {...};` -- as one
 ; gdecl at its last declaration: the declaration with an initializer, when
-; one has one, or the last.  An array whose size no declaration gives is
-; dropped: `extern const char lua_ident[];` declares what another file
-; defines, and a use of it with no definition fails as an unknown name.
+; one has one, or the last.  The one kept says `extern` when every
+; declaration of the name does: `extern const char lua_ident[];` declares
+; what another unit defines, its array unsized; `static` when any does.
+; An array whose size no declaration gives, and that none declares extern,
+; is dropped: a use of it fails as an unknown name.
 (def %cc-p-merge-globals
   (fn (_ prog)
     (def gdecl? (fn (_ it) (eq? (first it) (lit gdecl))))
     (def name (fn (_ it) (first (rest it))))
     (def c-type (fn (_ it) (first (rest (rest it)))))
     (def init (fn (_ it) (first (rest (rest (rest it))))))
+    (def storage (fn (_ it) (first (rest (rest (rest (rest it)))))))
     (def named? (fn (_ it n) (if (gdecl? it) (string=? (name it) n) #f)))
     (def later?
       (fn (self its n)
         (match
           ((null? its) #f)
           ((named? (first its) n) #t)
+          (#t (self (rest its) n)))))
+    ; is every declaration of N extern; does any say static
+    (def all-extern?
+      (fn (self its n)
+        (match
+          ((null? its) #t)
+          ((if (named? (first its) n) (not (eq? (storage (first its)) (lit extern))) #f) #f)
+          (#t (self (rest its) n)))))
+    (def any-static?
+      (fn (self its n)
+        (match
+          ((null? its) #f)
+          ((if (named? (first its) n) (eq? (storage (first its)) (lit static)) #f) #t)
           (#t (self (rest its) n)))))
     ; the declaration of N that gives its initializer, or nil
     (def chosen
@@ -1874,9 +1901,16 @@
           ((>= k 16) (do (heap-collect) (self its acc 0)))
           ((later? (rest its) (name (first its))) (self (rest its) acc (+ k 1)))
           (#t (let ((it (let ((d (chosen prog (name (first its)) ()))) (if (null? d) (first its) d))))
-                (if (%cc-p-unsized? (c-type it))
+                (def ext? (all-extern? prog (name it)))
+                (if (if (%cc-p-unsized? (c-type it)) (not ext?) #f)
                   (self (rest its) acc (+ k 1))
-                  (self (rest its) (pair it acc) (+ k 1))))))))
+                  (self (rest its)
+                    (pair (list (lit gdecl) (name it) (c-type it) (init it)
+                            (match (ext? (lit extern))
+                                   ((any-static? prog (name it)) (lit static))
+                                   (#t ())))
+                      acc)
+                    (+ k 1))))))))
     (go prog () 0)))
 
 (def cc-parse
@@ -1916,21 +1950,32 @@
                 (%cc-p-err "expected a declaration")
                 (let ((name (if (%cc-p-id? ts2) (first (rest (first ts2))) ())))
                   (if (if (%cc-p-id? ts2) (%cc-p-op? (rest ts2) "(") #f)
-                    ; function: definition, or a prototype to skip
+                    ; function: definition, or a prototype, which is kept
+                    ; as (proto NAME PARAMS () C-TYPES RET-C-TYPE), a
+                    ; definition's shape with no body: what a call to a
+                    ; function of another unit is laid out by
                     (let ((pr (%cc-p-params (rest (rest ts2)))))
                       (if (%cc-p-op? (rest pr) ";")
-                        (self (rest (rest pr)) acc)
+                        (self (rest (rest pr))
+                          (pair (list (lit proto) name (first (first pr)) ()
+                                  (rest (first pr)) (first tr))
+                            acc))
                         (let ((b (do (set! %cc-p-function (%cc-p-c-name name))
                                      (set! %cc-p-vlas %cc-p-param-vlas)
                                      (%cc-p-block (%cc-p-eat (rest pr) "{")))))
-                          ; (fun NAME PARAMS BODY C-TYPES RET-C-TYPE)
+                          ; (fun NAME PARAMS BODY C-TYPES RET-C-TYPE
+                          ; STORAGE), STORAGE static for a function of
+                          ; the unit's own, else nil
                           (self (rest b)
                             (pair (list (lit fun) name (first (first pr))
                                     (%cc-p-scope (first b) (first (first pr)))
-                                    (rest (first pr)) (first tr))
+                                    (rest (first pr)) (first tr) (%cc-p-storage ts))
                               acc)))))
-                    ; globals: reuse the declarator line from ts
-                    (let ((r (do (set! %cc-p-file-scope? #t) (%cc-p-decl-line ts))))
+                    ; globals: reuse the declarator line from ts; each is
+                    ; (gdecl NAME C-TYPE INIT STORAGE), STORAGE extern,
+                    ; static or nil
+                    (let ((r (do (set! %cc-p-file-scope? #t) (%cc-p-decl-line ts)))
+                          (ext? (%cc-p-storage ts)))
                       (set! %cc-p-file-scope? #f)
                       (%cc-p-no-literals 0 "a global's initializer")
                       (self (rest r)
@@ -1939,7 +1984,8 @@
                             (map (fn (_ d)
                                    (list (lit gdecl) (first (rest d))
                                      (first (rest (rest d)))
-                                     (first (rest (rest (rest d))))))
+                                     (first (rest (rest (rest d))))
+                                     ext?))
                               (first r)))
                           acc)))))))))))))
     ; the walk is handed the tokens and this call lets go of them, so each

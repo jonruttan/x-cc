@@ -445,7 +445,7 @@
 
     ; the code, then the data a page later
     (img-code! img codeoff code)
-    (img-pieces! img dataoff (rest data))
+    (img-code! img dataoff data)
 
     ; the chained fixups, and each import's slot in the data as a bind
     (img-bytes! img fixups (first fx))
@@ -540,4 +540,8 @@
     (img-write! img path total)
     total))
 
-(provide cc/macho macho-write! macho-data-at)
+; where the code starts in the file, which the linker lays the text out
+; from: the pages the data's addresses are counted in are the file's
+(def macho-code-at (fn (_) %cc-macho-codeoff))
+
+(provide cc/macho macho-write! macho-data-at macho-code-at)

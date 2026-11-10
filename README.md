@@ -4,15 +4,33 @@
 
 A C compiler on x-lang: a front end (preprocessor subset, lexer,
 recursive-descent parser with all fifteen expression levels), a code
-generator on the platform assembler, and Mach-O and ELF writers, so
+generator on the platform assembler, a linker on x/tool/link, and
+Mach-O and ELF writers, so
 
     x -l cc -- build prog.c -o prog
 
 writes an executable that the operating system runs directly: an arm64
 Mach-O on macOS, an x86-64 or arm64 ELF on Linux, for the platform the
 compiler runs on.  No external assembler, linker or `codesign` is
-involved: the instructions are encoded by x/tool/asm, the container is
-laid out, and the Mach-O's ad-hoc code signature is hashed in x.
+involved: the instructions are encoded by x/tool/asm, the objects are
+laid out by x/tool/link, the container is written, and the Mach-O's
+ad-hoc code signature is hashed in x.
+
+Each C file compiles to an object: its code and data as sections, its
+functions and globals as symbols -- a `static` one the unit's own -- and
+every place that takes a name of another unit's, or one of the linker's
+own, as a relocation.  `cc -c` writes the object to a file, in a format
+of x/tool/link's, and a later `cc` line links object files and C files
+alike.  The link lays the objects out as one program with a runtime
+object of its own in front: the entry, the trampoline into the C
+library, the gate the library comes back in through, one thunk for each
+function whose address is taken, so a function's address is the same in
+every unit, the setjmp and longjmp routines, and the routine that
+writes the addresses the data's pointers start at; and in the data an
+import slot for each function of the C library the units call.  A call
+to a function another unit defines goes through its prototype, by the
+compiler's own convention; a name only a prototype declares that the C
+library also has is the library's.
 
 They are dynamic executables that the system's C library is loaded into:
 the Mach-O names dyld and libSystem, and the ELF names the loader that
@@ -81,20 +99,22 @@ bytes, and a braced initializer fills its fields and zeroes the rest.
 
 The executable has a data segment, mapped readable and writable on the
 page after the code -- `__DATA` in the Mach-O, a second `PT_LOAD` in the
-ELF.  The import slots are at the front of it, `exit`'s first; the
-globals follow, each at its C type's size with the initializer's value
-already in place -- what no initializer reaches is zero in the image,
-never built byte by byte; then the string literals, end to end and each stored
-once.  The entry hands compiled code the data's address the way it
-hands over the trampoline's.  The executable is loaded where the kernel
-chooses and nothing relocates the program's own data, so a global
+ELF.  The import slots are at the front of it, `exit`'s first; each
+unit's data follows, its globals each at their C type's size with the
+initializer's value already in place -- what no initializer reaches is
+zero in the image, never built byte by byte -- then its string literals,
+end to end and each stored once in the unit.  The entry hands compiled
+code the data's address the way it hands over the trampoline's, and
+every offset in the data is one the linker settled, taken through a
+64-bit immediate it re-encoded.  The executable is loaded where the
+kernel chooses and nothing relocates the program's own data, so a global
 pointer that starts at an address -- a string literal, an array, what
 `&` takes of a global or of a static local in scope, any of these moved
-by a constant -- starts as zeros, and main writes the address before
-its body runs.
+by a constant, a function, the C library's function -- starts as zeros,
+and the entry writes the address before main runs.
 
-The calling convention is the compiler's own, since nothing else links
-with what it writes: the first four arguments in registers, unless
+The calling convention is the compiler's own, since nothing but its own
+objects links with what it writes: the first four arguments in registers, unless
 they are structs, and the rest stored where the callee's frame will
 have its top, the answer in one register, and a frame per call taken
 from a four-megabyte region below the machine stack, which one frame may

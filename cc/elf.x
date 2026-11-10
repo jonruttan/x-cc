@@ -186,7 +186,7 @@
     (img-bytes! img %cc-elf-phdrs-end (%cc-elf-ascii interp))
 
     (img-code! img codeoff code)
-    (img-pieces! img dataoff (rest data))
+    (img-code! img dataoff data)
 
     ; the dynamic section
     (def tag!
@@ -252,5 +252,8 @@
     (let ((go (fn (self i) (if (>= i (byte-len s)) () (pair (+ 0 (byte-at s i)) (self (+ i 1)))))))
       (go 0))))
 
-(provide cc/elf elf-write! elf-data-at elf-interpreter elf-machine-aarch64
+; where the code starts in the file, which the linker lays the text out from
+(def elf-code-at (fn (_) (%cc-elf-codeoff)))
+
+(provide cc/elf elf-write! elf-data-at elf-code-at elf-interpreter elf-machine-aarch64
   elf-machine-x86-64)
