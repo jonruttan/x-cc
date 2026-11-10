@@ -40,24 +40,7 @@
 (def convert (fn (_ v target . extra) (apply %cvt (pair v (pair target extra)))))
 
 (def string-append (fn (_ . ss) (Str8 join "" ss)))
-; the strings SS end to end, joined sixty-four at a time and then the
-; joins joined: a pairwise append nested a C frame a string, which an
-; object's thousands of tokens overran, and Str8 join itself appends
-; pairwise below some 300 KB out, so one join of an object's tokens made
-; gigabytes before anything collected
-(def string-concat
-  (fn (self ss)
-    (def chunk
-      (fn (chunk ss part n out)
-        (match
-          ((null? ss) (reverse (if (null? part) out (pair (Str8 join "" (reverse part)) out))))
-          ((= n 64) (chunk ss () 0 (pair (Str8 join "" (reverse part)) out)))
-          (#t (chunk (rest ss) (pair (first ss) part) (+ n 1) out)))))
-    (def joined (chunk ss () 0 ()))
-    (match
-      ((null? joined) "")
-      ((null? (rest joined)) (first joined))
-      (#t (self joined)))))
+(def string-concat (fn (_ ss) (Str8 join "" ss)))
 
 (def length (fn (_ l) (List length l)))
 (def reverse (fn (_ l) (%cc-rev l ())))
