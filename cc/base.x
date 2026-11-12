@@ -22,6 +22,11 @@
 ; before the rebind below, so the write cc/prims keeps is x's own
 (import cc/prims)
 
+; Loading the function compiler compiles x-lang's own hot loops, Hash
+; fnv-1a's among them, the hash under every Dict op on a string or symbol
+; key, which is what x/tool/link keeps its symbols in.
+(import x/tool/fn-compile)
+
 ; token lists render bare
 (def %cc-write ())
 (def %cc-x-write write)

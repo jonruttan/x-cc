@@ -57,7 +57,7 @@ It needs x-lang at the release `lang.xon` declares.
 
 ## Status
 
-Paired with x-lang v0.51.0 (`lang.xon` is the checkable row).  No release
+Paired with x-lang v0.52.0 (`lang.xon` is the checkable row).  No release
 has been cut.  It builds for the platform it runs on: macOS on arm64, and
 Linux on x86-64 and arm64.
 
