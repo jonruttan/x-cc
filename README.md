@@ -2,19 +2,87 @@
 
 <p align="center"><img src="docs/bitwise-banner.svg" alt="x-cc, with Bitwise the owl" width="100%"></p>
 
-A C compiler on x-lang: a front end (preprocessor subset, lexer,
-recursive-descent parser with all fifteen expression levels), a code
-generator on the platform assembler, a linker on x/tool/link, and
-Mach-O and ELF writers, so
+A C compiler on [x-lang](https://github.com/jonruttan/x-lang): a front
+end (preprocessor subset, lexer, recursive-descent parser with all fifteen
+expression levels), a code generator on the platform assembler, a linker
+on x/tool/link, and Mach-O and ELF writers, so
 
-    x -l cc -- build prog.c -o prog
+    x -l cc -- prog.c -o prog
 
 writes an executable that the operating system runs directly: an arm64
 Mach-O on macOS, an x86-64 or arm64 ELF on Linux, for the platform the
 compiler runs on.  No external assembler, linker or `codesign` is
 involved: the instructions are encoded by x/tool/asm, the objects are
 laid out by x/tool/link, the container is written, and the Mach-O's
-ad-hoc code signature is hashed in x.
+ad-hoc code signature is hashed in x.  `run` interprets the same program
+instead of building it.
+
+## Use
+
+    x -l cc -- [-c] [-o OUT] [-D NAME[=VALUE]] [-U NAME] [-I DIR] FILE...
+    x -l cc -- run FILE.c [FILE.c ...] [ARG ...]
+    x -l cc -- --help
+
+The first line builds the FILEs, C files and objects, into an executable
+at OUT, `a.out` when no `-o` is given; `build` before the FILEs is the
+same line.  `-c` writes each FILE.c's object to FILE.o instead, which a
+later line links.  `-D` and `-U` define and undefine a macro, and `-I`
+adds a directory to look for `#include` files in.  `-fsyntax-only` reads
+the files and stops, and `-dumpmachine` names the target.
+
+cc's options that ask for nothing x-cc does differently are taken and
+ignored: `-O`, `-g`, `-W`, `-f`, `-m` and `-l` with whatever follows,
+`-std=`, `-ansi`, `-pedantic`, `-w`, `-MD`, `-MMD`, `-MP`, `-MF FILE`,
+`-MT` and `-MQ TARGET`, `-L DIR`, `-static`, `-s`, `-pipe` and
+`-pthread`.  Of the linker's `-Wl,` words, the executable exports the
+names an `-exported_symbols_list FILE` lists, or with `-export_dynamic`,
+`--export-dynamic`, `-E` or `-rdynamic` every function and global; the
+rest are ignored.
+
+`run` interprets the program and exits with its status.
+
+A program may be several files: `x -l cc -- build main.c lib/vec.c -o
+prog`, or `run` with its files before the program's words, the files
+being the words up to the first not ending in `.c`.  Each file is
+preprocessed on its own, `#include "x.h"` read from the including file's
+directory -- a header's own `#include "..."` from the header's -- and the
+files are one program: a name declared `static` at file scope is that
+file's, and a global one file defines, the others declare `extern`.
+
+## Install
+
+It needs x-lang at the release `lang.xon` declares.
+
+    make install        # into the x on PATH
+
+## Status
+
+Paired with x-lang v0.51.0 (`lang.xon` is the checkable row).  No release
+has been cut.  It builds for the platform it runs on: macOS on arm64, and
+Linux on x86-64 and arm64.
+
+Each of these is refused by name:
+
+- `long double`;
+- a call into the C library with more than six arguments, compiled
+  (seven under `run`);
+- a global initialized by something other than a constant or an address,
+  compiled;
+- a struct through `va_arg`;
+- a compound literal in a loop's condition or step, or in a global's
+  initializer;
+- a variable-length array at file scope, in a struct, a typedef or a
+  cast, with an initializer, or static;
+- under `run`, a callback handed to the C library with more than four
+  arguments, or with a double, a float or a struct among its arguments
+  or as its answer.
+
+A standard header other than the ones listed under `run` below is
+dropped, and a bit-field may not be a `long`.
+
+## Compiled programs
+
+### Objects and linking
 
 Each C file compiles to an object: its code and data as sections, its
 functions and globals as symbols -- a `static` one the unit's own -- and
@@ -32,6 +100,8 @@ to a function another unit defines goes through its prototype, by the
 compiler's own convention; a name only a prototype declares that the C
 library also has is the library's.
 
+### Executables
+
 They are dynamic executables that the system's C library is loaded into:
 the Mach-O names dyld and libSystem, and the ELF names the loader that
 started x itself -- glibc's ld-linux or musl's, read from x's own
@@ -44,6 +114,28 @@ evaluates expressions on a stack machine, and keeps every value in a
 whole register in its C type's form -- an `int` sign-extended from bit
 31, an `unsigned int` zero-extended, a `long` or an `unsigned long` as
 all 64 bits -- so arithmetic wraps as C's does in each C type.
+
+main takes argc and argv as the kernel hands them to the entry: dyld
+calls a Mach-O's entry with both in place, and the ELF's entry loads
+them from the stack the kernel starts it on.
+
+The executable has a data segment, mapped readable and writable on the
+page after the code -- `__DATA` in the Mach-O, a second `PT_LOAD` in the
+ELF.  The import slots are at the front of it, `exit`'s first; each
+unit's data follows, its globals each at their C type's size with the
+initializer's value already in place -- what no initializer reaches is
+zero in the image, never built byte by byte -- then its string literals,
+end to end and each stored once in the unit.  The entry hands compiled
+code the data's address the way it hands over the trampoline's, and
+every offset in the data is one the linker settled, taken through a
+64-bit immediate it re-encoded.  The executable is loaded where the
+kernel chooses and nothing relocates the program's own data, so a global
+pointer that starts at an address -- a string literal, an array, what
+`&` takes of a global or of a static local in scope, any of these moved
+by a constant, a function, the C library's function -- starts as zeros,
+and the entry writes the address before main runs.
+
+### The language
 
 Compiled so far: main and the functions beside it, with integer
 globals, locals (a static one kept once, in the data) and parameters of
@@ -84,10 +176,6 @@ up.  The answer is put in the form of the C type the function's header
 declares.  main's answer goes to the library's `exit`, which writes out
 what the library's streams hold.
 
-main takes argc and argv as the kernel hands them to the entry: dyld
-calls a Mach-O's entry with both in place, and the ELF's entry loads
-them from the stack the kernel starts it on.
-
 A pointer is an eight-byte address: `&` takes one, `*` loads or stores
 through one at the width of what it points at, and `+` and `-` move one
 by whole elements.  An array is its elements end to end, and where it is
@@ -96,22 +184,6 @@ used as a value it stands for its first element's address, so `a[i]` is
 and a union one whose fields all sit at 0; `s.f` and `p->f` are the
 struct's address plus the field's offset, assigning a struct copies its
 bytes, and a braced initializer fills its fields and zeroes the rest.
-
-The executable has a data segment, mapped readable and writable on the
-page after the code -- `__DATA` in the Mach-O, a second `PT_LOAD` in the
-ELF.  The import slots are at the front of it, `exit`'s first; each
-unit's data follows, its globals each at their C type's size with the
-initializer's value already in place -- what no initializer reaches is
-zero in the image, never built byte by byte -- then its string literals,
-end to end and each stored once in the unit.  The entry hands compiled
-code the data's address the way it hands over the trampoline's, and
-every offset in the data is one the linker settled, taken through a
-64-bit immediate it re-encoded.  The executable is loaded where the
-kernel chooses and nothing relocates the program's own data, so a global
-pointer that starts at an address -- a string literal, an array, what
-`&` takes of a global or of a static local in scope, any of these moved
-by a constant, a function, the C library's function -- starts as zeros,
-and the entry writes the address before main runs.
 
 The calling convention is the compiler's own, since nothing but its own
 objects links with what it writes: the first four arguments in registers, unless
@@ -167,6 +239,8 @@ Anything else refuses by name: `long double`, a call into the C library
 with more than six arguments, a global initialized by something other
 than a constant or an address, and a struct through `va_arg`.
 
+## The evaluator
+
     x -l cc -- run prog.c
 
 runs the same front end through an evaluator with a real memory model
@@ -184,7 +258,9 @@ and run.  Under `run`, fib recurses, pointers write through, arrays
 decay into functions, bubble sort sorts, and the output matches the
 real binary byte for byte.
 
-MEMORY IS BYTES, at real addresses: the globals, string literals and
+### Memory
+
+Memory is bytes, at real addresses: the globals, string literals and
 stack are in one 64 MB buffer, anything else is wherever the C library put
 it, and every read and write takes the width of its C type -- `char` 1,
 `short` 2, `int` 4, `long` and pointers 8, with signed C types
@@ -199,7 +275,9 @@ asked, so `run` asks at each call and each pass of a loop, once the live
 objects have doubled since the last collection -- never inside a callback
 the C library is making, whose arguments only C holds.
 
-THE C LIBRARY IS THE SYSTEM'S: a call to a function the program does
+### The C library
+
+The C library is the system's: a call to a function the program does
 not define goes to libc, opened in the process and searched by name,
 with the arguments as the C calling convention passes them -- seven at
 most.  A variadic function goes through its v- form (`printf` through
@@ -212,6 +290,8 @@ program's own functions goes to the library as a callback
 (x/sys/callback): a native function the library calls, which runs the
 program's function here.  It takes up to four arguments, none of them a
 double, a float or a struct, and answers neither.
+
+### The language
 
 Working: int/char/void/pointer/array declarations (specifier soup
 accepted, erased, but for `static` on a local); all C89 operators with
@@ -239,14 +319,6 @@ as the command line gives it, or `<stdin>` for text from no file; // and /* */
 comments.  `x -l cc -- run prog.c ARG ...` hands main the file's name
 and the ARGs as its argv, and fd 0 as its standard input.
 
-A program may be several files: `x -l cc -- build main.c lib/vec.c -o
-prog`, or `run` with its files before the program's words, the files
-being the words up to the first not ending in `.c`.  Each file is
-preprocessed on its own, `#include "x.h"` read from the including file's
-directory -- a header's own `#include "..."` from the header's -- and the
-files are one program: a name declared `static` at file scope is that
-file's, and a global one file defines, the others declare `extern`.
-
 Structs, too: `struct S { ... };`, `typedef struct { ... } T;`,
 fields by `.` and `->`, nested structs, arrays of structs, pointers to
 structs stepping by the struct's size, struct assignment as a byte
@@ -259,6 +331,37 @@ the field's name when exactly one struct has it.
 `switch` runs its matched clause and every clause after it as one
 block -- fallthrough -- until a `break`; `return` and `continue` pass
 through to the function or the enclosing loop.
+
+Enums fold at parse time (`enum { A, B = 1 << 3, C }` -- constant
+expressions, counting on from the last; the C type is a scalar; `case
+RED:` labels).  A scalar here is a C type the specifiers name on their own
+(`int`, `unsigned char`, `double`, `void`); C11's scalar types (6.2.5) are the
+arithmetic and pointer types, so the two sets differ.  A union is a struct
+whose fields all sit at offset 0, sized by its widest -- overlap, copy,
+nesting anonymously in a struct.
+Function pointers: `int (*f)(int, int)` as a local, global, parameter,
+struct field or typedef, arrays of them with initializer lists; a
+function's name is its value (an id above every memory address, never
+NULL), and `f(x)`, `(*f)(x)`, `ops[i](x)`, `p->fn(x)` all dispatch as
+the named call would.
+
+Structs go by value too: a struct parameter takes its size in the
+callee's frame and copies from the argument; a struct returned by
+value moves out of the popped frame into a fresh slot in the caller's
+(alive until the caller returns), so `make(1, 2).x` and `add(make(1,
+2), make(3, 4))` are safe.  In a macro body `#PARAM` is the argument's
+text as a string literal and `A ## B` pastes, the rescan lexing the
+joined token.
+
+Doubles and floats run as they compile: each is its IEEE bits, and each
+operation on one is the machine's, through the platform's stubs
+(x/num/float), made in cc/real.x.
+
+A cast or `sizeof` takes a pointer to a function as a declaration does:
+`(int (*)(const void *, const void *))cmp` is a pointer a call answers an
+`int` through.
+
+## The front end
 
 The source is read into tokens once, by a Lexer (x-lang's
 x/reader/lexer) whose states are compiled to native code; a character
@@ -295,39 +398,6 @@ its [ ]s and sizeof work from those dimensions as it runs, a parameter
 the room back at the top of each time round.  One at file scope, in a
 struct, a typedef or a cast, with an initializer, or static is refused.
 
-Enums fold at parse time (`enum { A, B = 1 << 3, C }` -- constant
-expressions, counting on from the last; the C type is a scalar; `case
-RED:` labels).  A scalar here is a C type the specifiers name on their own
-(`int`, `unsigned char`, `double`, `void`); C11's scalar types (6.2.5) are the
-arithmetic and pointer types, so the two sets differ.  A union is a struct
-whose fields all sit at offset 0, sized by its widest -- overlap, copy,
-nesting anonymously in a struct.
-Function pointers: `int (*f)(int, int)` as a local, global, parameter,
-struct field or typedef, arrays of them with initializer lists; a
-function's name is its value (an id above every memory address, never
-NULL), and `f(x)`, `(*f)(x)`, `ops[i](x)`, `p->fn(x)` all dispatch as
-the named call would.
-
-Structs go by value too: a struct parameter takes its size in the
-callee's frame and copies from the argument; a struct returned by
-value moves out of the popped frame into a fresh slot in the caller's
-(alive until the caller returns), so `make(1, 2).x` and `add(make(1,
-2), make(3, 4))` are safe.  In a macro body `#PARAM` is the argument's
-text as a string literal and `A ## B` pastes, the rescan lexing the
-joined token.
-
-Doubles and floats run as they compile: each is its IEEE bits, and each
-operation on one is the machine's, through the platform's stubs
-(x/num/float), made in cc/real.x.
-
-A cast or `sizeof` takes a pointer to a function as a declaration does:
-`(int (*)(const void *, const void *))cmp` is a pointer a call answers an
-`int` through.
-
-Refused loudly, a recorded pending: `long double`.
-
-Paired with x-lang v0.51.0 (`lang.xon` is the checkable row).
-
 ## Tests
 
     make test           # the suite, loud on any failure
@@ -335,18 +405,25 @@ Paired with x-lang v0.51.0 (`lang.xon` is the checkable row).
 
 ## Layout
 
-    lang.xon          what this bundle IS (self-contained)
-    run.x             the entry: operands mean "be cc"
+    lang.xon          what the bundle is: lang, dialect, required release, entry
+    run.x             the entry
+    cc/base.x         the compiler, assembled
+    cc/prims.x        the platform layer
     cc/tokens.x       C text to tokens: a Lexer (x/reader/lexer), compiled
     cc/pp.x           directives, macros and #if, on tokens; cc-lex
     cc/parse.x        the fifteen-level ladder, declarations, statements
-    cc/eval.x         the machine: memory, frames, calls, builtins
+    cc/eval.x         the evaluator: memory, frames, calls, builtins
     cc/real.x         float and double: conversions and operations
     cc/gen.x          code generation, through x/tool/asm
+    cc/link.x         the linker: objects to an executable
     cc/image.x        the byte image an executable is built in
     cc/macho.x        the macOS executable and its ad-hoc signature
     cc/elf.x          the Linux executable
-    cc/cli.x          run FILE.c... | build FILE.c... [-o OUT]
-    tests/            markdown specs + the platform's runner, vendored nowhere
+    cc/cli.x          the command line
+    tests/            markdown specs, run by the platform's runner
+
+## Licence
+
+MIT No Attribution (MIT-0). See [LICENSE](LICENSE).
 
 <p align="center"><img src="docs/bitwise-mark.svg" alt="Bitwise" width="96"></p>
