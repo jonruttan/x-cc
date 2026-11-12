@@ -1840,6 +1840,40 @@
     (c-type-elem k)))
 
 (def %cc-gen-expr! ())
+
+; Whether NODE's value can be put in x1 with x0 untouched: an integer
+; constant, or a scalar variable, which one load fetches (not a name that
+; is a function's address, which is no load)
+(def %cc-gen-x1-operand?
+  (fn (_ node)
+    (match
+      ((%cc-gen-int-constant? node) #t)
+      ((eq? (first node) (lit var))
+        (let ((name (first (rest node))))
+          (if (match
+                ((%cc-gen-stream? name) #t)
+                ((%cc-gen-function-name? name) #t)
+                (#t (not (null? (%cc-gen-library-function-node node)))))
+            #f
+            (let ((k (%cc-gen-place-c-type (%cc-gen-place-of name))))
+              (not (if (%cc-gen-aggregate? k) #t (%cc-gen-bits? k)))))))
+      (#t #f))))
+
+; A binary operation's right operand NODE into x1, its left waiting in x0:
+; straight there when one load or constant does it, else worked out in x0
+; while the left waits on the stack
+(def %cc-gen-right!
+  (fn (_ node)
+    (match
+      ((%cc-gen-int-constant? node) (%cc-gen-imm! x1 (%cc-gen-fold node)))
+      ((%cc-gen-x1-operand? node)
+        (let ((at (%cc-gen-place-of (first (rest node)))))
+          (%cc-gen! (%cc-gen-load-op (%cc-gen-place-c-type at)) x1 (%cc-gen-place-mem at x1))))
+      (#t (do (asm-push! %cc-gen-asm x0)
+              (%cc-gen-expr! node)
+              (%cc-gen! (lit mov) x1 x0)
+              (asm-pop! %cc-gen-asm x0))))))
+
 (set! %cc-gen-expr!
   (fn (self node)
     (let ((t (first node)))
@@ -1926,10 +1960,7 @@
                   (asm-pop! %cc-gen-asm x0)
                   (if (eq? t (lit cmp)) (%cc-gen-real-compare! op k) (%cc-gen-real-bin! op k)))
               (do (self (first (rest (rest node))))
-                  (asm-push! %cc-gen-asm x0)
-                  (self (first (rest (rest (rest node)))))
-                  (%cc-gen! (lit mov) x1 x0)
-                  (asm-pop! %cc-gen-asm x0)
+                  (%cc-gen-right! (first (rest (rest (rest node)))))
                   ; an int converted to an unsigned int takes that C type's form
                   (if (if (eq? k (lit uint)) (not addr?) #f)
                     (do (%cc-gen-uint!) (%cc-gen-uint-x1!))
