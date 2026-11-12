@@ -6,9 +6,9 @@
 ; @copyright 2026 Jon Ruttan
 ; @license MIT No Attribution (MIT-0)
 ;
-; Not scoped: this file is the lang's seam.  It rebinds `write` so token
-; lists print bare, and defines the REPL printer run.x installs, and both
-; have to be the root's.
+; Not scoped: this file is the lang's seam.  It sets symbols to write bare
+; so token lists print as the specs read them, and defines the REPL printer
+; run.x installs, which has to be the root's.
 
 (provide cc/base cc-version cc-lex cc-source-name! cc-pp-options!
   cc-parse cc-run cc-run-with
@@ -19,30 +19,16 @@
 
 (def cc-version "0.1.0")
 
-; before the rebind below, so the write cc/prims keeps is x's own
 (import cc/prims)
+(import x/repl/lang)
 
-; token lists render bare
-(def %cc-write ())
-(def %cc-x-write write)
-(def %cc-write-items
-  (fn (_ v)
-    (%cc-write (first v))
-    (if (null? (rest v))
-      ()
-      (if (pair? (rest v))
-        (%seq (display " ") (%cc-write-items (rest v)))
-        (%seq (display " . ") (%cc-write (rest v)))))))
-(set! %cc-write
-  (fn (_ v)
-    (if (pair? v)
-      (%seq (display "(") (%seq (%cc-write-items v) (display ")")))
-      (if (symbol? v) (display v) (%cc-x-write v)))))
-(def write %cc-write)
+; Token lists render bare: Lang symbols-bare! writes symbols without x's
+; quote, for write and write-to-str alike.
+(Lang symbols-bare!)
 
 (def %cc-repl-print
   (fn (_ result)
-    (unless (null? result) (%cc-write result))
+    (unless (null? result) (write result))
     (newline)))
 
 ; Each part is a scoped module that imports what it uses from the others;

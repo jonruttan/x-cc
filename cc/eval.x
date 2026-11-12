@@ -25,7 +25,7 @@
 
 (import cc/prims append byte-at byte-len length
   map mem-make mem-ptr mem-ref-at mem-set-at! ptr-int reverse set-first! string-append
-  string-concat string=? substring x-write fx+ fx- fx* fx< fx<< fx>> fx& fx| fx^
+  string-concat string=? substring fx+ fx- fx* fx< fx<< fx>> fx& fx| fx^
   mem-fill! int-ptr heap-count heap-collect evals)
 (import cc/pp cc-lex)
 (import cc/parse cc-parse c-type-size plain-char va-pointer? round-up struct-entry struct-table)
@@ -2488,7 +2488,7 @@
                  ; printed, and answer 1, the loud way
                  (do (%cc-libc-flush!)
                      (display "cc: run failed: ")
-                     (x-write e)
+                     (write e)
                      (newline)
                      1)
                  (& %cc-exit-code 255)))
