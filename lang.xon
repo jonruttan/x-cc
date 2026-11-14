@@ -13,3 +13,7 @@
 (requires-release "v0.53.0")
 
 (entry "run.x")
+
+; The C grammar, for any process that colours a file: cc/syntax
+; imports x-lang libraries and cc/words only.
+(grammar c (module cc/syntax) (files ".c" ".h"))
