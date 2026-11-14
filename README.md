@@ -51,9 +51,21 @@ file's, and a global one file defines, the others declare `extern`.
 
 ## Install
 
-It needs x-lang at the release `lang.xon` declares.
+It needs x-lang at the release `lang.xon` declares.  From any directory,
+nothing cloned:
+
+```bash
+x --install-lang https://github.com/jonruttan/x-cc/releases/latest/download/lang.pin.xon
+x -l cc
+```
+
+x fetches the published pin, then the tarball it names, verifies the digest,
+and installs to `<share>/langs/cc`, where `x -l` looks.  From a checkout:
 
     make install        # into the x on PATH
+
+A `v*` tag publishes a release: `.github/workflows/release.yml` runs the
+suite, then `tools/bundle.sh` rolls the tarball and its pin.
 
 ## Status
 
@@ -423,6 +435,7 @@ struct, a typedef or a cast, with an initializer, or static is refused.
     cc/elf.x          the Linux executable
     cc/cli.x          the command line
     tests/            markdown specs, run by the platform's runner
+    tools/bundle.sh   rolls a release's tarball and its lang.pin.xon
 
 ## Licence
 

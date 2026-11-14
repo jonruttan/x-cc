@@ -1,0 +1,78 @@
+name: Release
+
+# A v* tag publishes a release: the tarball and its sha256, which a consumer's
+# lang.pin.xon verifies. The suite runs first; a red tree publishes nothing.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to roll (dry run -- publishes nothing)'
+        required: true
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # tools/bundle.sh archives FROM a tag
+
+      - name: Check out the x-lang this bundle declares
+        run: |
+          declared=$(sed -n 's/^(requires-release "\(.*\)")$/\1/p' lang.xon)
+          echo "lang.xon declares $declared"
+          git clone --depth 1 --branch "$declared" \
+            https://github.com/jonruttan/x-lang.git .x-lang
+
+      - name: Build the platform
+        working-directory: .x-lang
+        run: |
+          make engine      # acquire the pinned engine
+          make             # x-bin at the repo root -- `make engine` does not build it
+          make boot        # the launcher-free amalgams the harness loads
+
+      # The gate: the last point a bad bundle can be stopped before it gets a
+      # digest and a URL.
+      - name: Run the C specs
+        run: X="$PWD/.x-lang/x.sh" sh tests/spec-gate.sh
+
+      - name: Roll the bundle
+        id: roll
+        run: |
+          TAG="${{ github.event_name == 'push' && github.ref_name || inputs.tag }}"
+          sh tools/bundle.sh "$TAG" dist | tee roll.out
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      # Put the pin in the release notes, next to the URL it belongs to.
+      - name: Publish
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ steps.roll.outputs.tag }}"
+          {
+            echo '## Install'
+            echo
+            echo '```sh'
+            echo "x --install-lang https://github.com/jonruttan/x-cc/releases/download/$TAG/lang.pin.xon"
+            echo '```'
+            echo
+            echo '## Or pin it, for a project'
+            echo
+            echo 'Put this in the project'"'"'s `lang.pin.xon`:'
+            echo
+            echo '```x'
+            sed -n '/^  (lang /,$p' roll.out | sed 's/^  //'
+            echo '```'
+          } > notes.md
+          gh release create "$TAG" \
+            --title "x-cc $TAG" \
+            --notes-file notes.md \
+            "dist/x-cc-$TAG.tar.gz" \
+            "dist/x-cc-$TAG.tar.gz.sha256" \
+            "dist/lang.pin.xon"
