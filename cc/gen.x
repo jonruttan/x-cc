@@ -475,6 +475,24 @@
         (do (%cc-gen-scale! x0 (size kb)) (%cc-gen! (lit add) x0 x0 x1)))
       (#t (%cc-gen-no (string-append "the operator " op " on an address"))))))
 
+; Whether an address OP an integer constant RIGHT, the address on the left
+; in C type KA, is the address moved by a fixed number of bytes
+(def %cc-gen-addr-step?
+  (fn (_ op ka kb right)
+    (if (if (string=? op "+") #t (string=? op "-"))
+      (if (%cc-gen-addr-c-type? ka)
+        (if (%cc-gen-addr-c-type? kb) #f (%cc-gen-int-constant? right))
+        #f)
+      #f)))
+
+; x0, the address, moved by RIGHT's value times the size of its element
+(def %cc-gen-addr-step!
+  (fn (_ op ka right)
+    (let ((n (* (%cc-gen-fold right) (c-type-size (c-type-elem ka)))))
+      (if (< n 0)
+        (%cc-gen-bump! (string=? op "-") (- 0 n))
+        (%cc-gen-bump! (string=? op "+") n)))))
+
 (def %cc-gen-branch
   (fn (_ op)
     (match
@@ -1959,6 +1977,9 @@
                   (%cc-gen! (lit mov) x1 x0)
                   (asm-pop! %cc-gen-asm x0)
                   (if (eq? t (lit cmp)) (%cc-gen-real-compare! op k) (%cc-gen-real-bin! op k)))
+              (if (%cc-gen-addr-step? op ka kb (first (rest (rest (rest node)))))
+                (do (self (first (rest (rest node))))
+                    (%cc-gen-addr-step! op ka (first (rest (rest (rest node))))))
               (do (self (first (rest (rest node))))
                   (%cc-gen-right! (first (rest (rest (rest node)))))
                   ; an int converted to an unsigned int takes that C type's form
@@ -1970,7 +1991,7 @@
                       (do (if addr? (%cc-gen! (lit cmp) x0 x1) (%cc-gen-compare! k))
                           (%cc-gen-flag! (%cc-gen-branch op))))
                     (addr? (%cc-gen-addr-bin! op ka kb))
-                    (#t (%cc-gen-bin! op k)))))))
+                    (#t (%cc-gen-bin! op k))))))))
         ((if (eq? t (lit var)) (%cc-gen-stream? (first (rest node))) #f)
           (%cc-gen-stream-load! (first (rest node))))
         ; the va_list a call to the program's own variadic function hands it
@@ -2709,29 +2730,36 @@
       ((eq? (first init) (lit initlist))
         (let ((items (first (rest init))))
           (if (> (length items) n) (%cc-gen-no "more initializers than an array has elements"))
+          ; the elements after the items, from one zero
+          (def rest-zero
+            (fn (rest-zero i)
+              (if (>= i n) ()
+                (do (%cc-gen-zero-each! (elem i)) (rest-zero (+ i 1))))))
           (def fill
             (fn (fill i is)
               (if (>= i n) ()
-                (do (if (null? is)
-                      (%cc-gen-zero! (elem i))
-                      (let ((item (first is)))
+                (if (null? is)
+                  (do (%cc-gen! (lit mov) x0 (imm 0)) (rest-zero i))
+                  (do (let ((item (first is)))
                         (if (%cc-gen-aggregate? ek)
                           (%cc-gen-init-aggregate! (elem i) item)
                           (do (%cc-gen-expr! item)
                               (%cc-gen-convert-real! ek (%cc-gen-c-type-of item))
-                              (%cc-gen-put! (elem i))))))
-                    (fill (+ i 1) (if (null? is) () (rest is)))))))
+                              (%cc-gen-put! (elem i)))))
+                      (fill (+ i 1) (rest is)))))))
           (fill 0 items)))
       ((if (eq? (first init) (lit str)) (%cc-gen-byte? ek) #f)
         (let ((text (first (rest init))))
           (if (> (byte-len text) n) (%cc-gen-no "a string longer than the array it initializes"))
+          ; a byte the same as the one before it is still in x0
           (def fill
-            (fn (fill i)
+            (fn (fill i prev)
               (if (>= i n) ()
-                (do (%cc-gen-const! (if (< i (byte-len text)) (byte-at text i) 0))
-                    (%cc-gen-put! (elem i))
-                    (fill (+ i 1))))))
-          (fill 0)))
+                (let ((v (if (< i (byte-len text)) (byte-at text i) 0)))
+                  (do (if (= v prev) () (%cc-gen-const! v))
+                      (%cc-gen-put! (elem i))
+                      (fill (+ i 1) v))))))
+          (fill 0 -1)))
       (#t (%cc-gen-no "an array initialized by something other than a list or a string")))))
 
 ; An aggregate in the frame, from its initializer.
@@ -2834,8 +2862,16 @@
                 (self (+ i w)))))))
     (go 0)))
 
-; zeros over the place AT, element by element or field by field
+; zeros over the place AT, element by element or field by field, from one
+; zero in x0
 (def %cc-gen-zero!
+  (fn (_ at)
+    (do (%cc-gen! (lit mov) x0 (imm 0))
+        (%cc-gen-zero-each! at))))
+
+; zeros over AT with x0 already zero.  A bit-field's store merges into its
+; unit through x0, which then takes zero again.
+(def %cc-gen-zero-each!
   (fn (self at)
     (def k (%cc-gen-place-c-type at))
     (def base (first at))
@@ -2856,7 +2892,8 @@
                                   (first (rest (rest (first fs))))))
                           (go (rest fs)))))))
           (go (rest (rest (struct-entry (first (rest k))))))))
-      (#t (do (%cc-gen! (lit mov) x0 (imm 0)) (%cc-gen-put! at))))))
+      ((%cc-gen-bits? k) (do (%cc-gen-put! at) (%cc-gen! (lit mov) x0 (imm 0))))
+      (#t (%cc-gen-put! at)))))
 
 ; a condition, then a branch taken when it is false
 (def %cc-gen-test!
