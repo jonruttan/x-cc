@@ -409,7 +409,9 @@ struct, a typedef or a cast, with an initializer, or static is refused.
     run.x             the entry
     cc/base.x         the compiler, assembled
     cc/prims.x        the platform layer
+    cc/words.x        C's keywords, punctuators and name bytes
     cc/tokens.x       C text to tokens: a Lexer (x/reader/lexer), compiled
+    cc/syntax.x       the C highlighting grammar x/tool/syntax colours with
     cc/pp.x           directives, macros and #if, on tokens; cc-lex
     cc/parse.x        the fifteen-level ladder, declarations, statements
     cc/eval.x         the evaluator: memory, frames, calls, builtins
