@@ -58,6 +58,23 @@ string literal's size counts its NUL.
 (0 0)
 ```
 
+### a constant step, back, forward and from the left
+
+A step by an integer constant moves the address by its bytes, worked out
+at compile time: `e - 2`, `e + -1`, `2 + a`, a constant expression over
+eight-byte elements, and over a struct's.
+
+```cc
+(def src "#include <stdio.h>\nstruct P { int x; int y; };\nint main(void) { int a[6] = {1, 2, 3, 4, 5, 6}; long b[3] = {7, 8, 9}; struct P q[3] = {{1, 2}, {3, 4}, {5, 6}}; int *e = a + 5; printf(\"%d %d %d %ld %d %d\\n\", *(e - 2), *(e + -1), *(2 + a), *(b + (3 - 1)), (q + 2)->y, (int)((q + 2) - q)); return 0; }\n")
+(display (list (cc-run src) (cc-exe-run src)))
+```
+---
+```output
+4 5 3 9 6 2
+4 5 3 9 6 2
+(0 0)
+```
+
 ## arrays
 
 ### elements stored and loaded by subscript
