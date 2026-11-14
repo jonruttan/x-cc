@@ -475,23 +475,21 @@
         (do (%cc-gen-scale! x0 (size kb)) (%cc-gen! (lit add) x0 x0 x1)))
       (#t (%cc-gen-no (string-append "the operator " op " on an address"))))))
 
-; Whether an address OP an integer constant RIGHT, the address on the left
-; in C type KA, is the address moved by a fixed number of bytes
-(def %cc-gen-addr-step?
-  (fn (_ op ka kb right)
-    (if (if (string=? op "+") #t (string=? op "-"))
-      (if (%cc-gen-addr-c-type? ka)
-        (if (%cc-gen-addr-c-type? kb) #f (%cc-gen-int-constant? right))
-        #f)
-      #f)))
-
-; x0, the address, moved by RIGHT's value times the size of its element
-(def %cc-gen-addr-step!
-  (fn (_ op ka right)
-    (let ((n (* (%cc-gen-fold right) (c-type-size (c-type-elem ka)))))
-      (if (< n 0)
-        (%cc-gen-bump! (string=? op "-") (- 0 n))
-        (%cc-gen-bump! (string=? op "+") n)))))
+; A + N, N + A or A - N, for an address A and an integer constant N, as
+; (A . BYTES): A moves by N elements, whose bytes are worked out now.  Nil
+; for any other operation.
+(def %cc-gen-addr-constant
+  (fn (_ op a b ka kb)
+    (def size (fn (_ k) (c-type-size (c-type-elem k))))
+    (match
+      ((if (%cc-gen-addr-c-type? ka) (%cc-gen-int-constant? b) #f)
+        (match
+          ((string=? op "+") (pair a (* (%cc-gen-fold b) (size ka))))
+          ((string=? op "-") (pair a (- 0 (* (%cc-gen-fold b) (size ka)))))
+          (#t ())))
+      ((if (string=? op "+") (if (%cc-gen-addr-c-type? kb) (%cc-gen-int-constant? a) #f) #f)
+        (pair b (* (%cc-gen-fold a) (size kb))))
+      (#t ()))))
 
 (def %cc-gen-branch
   (fn (_ op)
@@ -1967,31 +1965,38 @@
             (def k (if (if (string=? op "<<") #t (string=? op ">>"))
                      (promoted-c-type ka)
                      (common-c-type ka kb)))
-            (if (if (%cc-gen-real? k) (not addr?) #f)
+            (def moved
+              (if (if addr? (eq? t (lit bin)) #f)
+                (%cc-gen-addr-constant op (first (rest (rest node))) (first (rest (rest (rest node)))) ka kb)
+                ()))
+            (match
+              ((not (null? moved))
+                (let ((off (rest moved)))
+                  (do (self (first moved))
+                      (%cc-gen-bump! (>= off 0) (if (< off 0) (- 0 off) off)))))
               ; each operand converted to a double as it is worked out
-              (do (self (first (rest (rest node))))
-                  (%cc-gen-convert! k ka)
-                  (asm-push! %cc-gen-asm x0)
-                  (self (first (rest (rest (rest node)))))
-                  (%cc-gen-convert! k kb)
-                  (%cc-gen! (lit mov) x1 x0)
-                  (asm-pop! %cc-gen-asm x0)
-                  (if (eq? t (lit cmp)) (%cc-gen-real-compare! op k) (%cc-gen-real-bin! op k)))
-              (if (%cc-gen-addr-step? op ka kb (first (rest (rest (rest node)))))
+              ((if (%cc-gen-real? k) (not addr?) #f)
                 (do (self (first (rest (rest node))))
-                    (%cc-gen-addr-step! op ka (first (rest (rest (rest node))))))
-              (do (self (first (rest (rest node))))
-                  (%cc-gen-right! (first (rest (rest (rest node)))))
-                  ; an int converted to an unsigned int takes that C type's form
-                  (if (if (eq? k (lit uint)) (not addr?) #f)
-                    (do (%cc-gen-uint!) (%cc-gen-uint-x1!))
-                    ())
-                  (match
-                    ((eq? t (lit cmp))
-                      (do (if addr? (%cc-gen! (lit cmp) x0 x1) (%cc-gen-compare! k))
-                          (%cc-gen-flag! (%cc-gen-branch op))))
-                    (addr? (%cc-gen-addr-bin! op ka kb))
-                    (#t (%cc-gen-bin! op k))))))))
+                    (%cc-gen-convert! k ka)
+                    (asm-push! %cc-gen-asm x0)
+                    (self (first (rest (rest (rest node)))))
+                    (%cc-gen-convert! k kb)
+                    (%cc-gen! (lit mov) x1 x0)
+                    (asm-pop! %cc-gen-asm x0)
+                    (if (eq? t (lit cmp)) (%cc-gen-real-compare! op k) (%cc-gen-real-bin! op k))))
+              (#t
+                (do (self (first (rest (rest node))))
+                    (%cc-gen-right! (first (rest (rest (rest node)))))
+                    ; an int converted to an unsigned int takes that C type's form
+                    (if (if (eq? k (lit uint)) (not addr?) #f)
+                      (do (%cc-gen-uint!) (%cc-gen-uint-x1!))
+                      ())
+                    (match
+                      ((eq? t (lit cmp))
+                        (do (if addr? (%cc-gen! (lit cmp) x0 x1) (%cc-gen-compare! k))
+                            (%cc-gen-flag! (%cc-gen-branch op))))
+                      (addr? (%cc-gen-addr-bin! op ka kb))
+                      (#t (%cc-gen-bin! op k))))))))
         ((if (eq? t (lit var)) (%cc-gen-stream? (first (rest node))) #f)
           (%cc-gen-stream-load! (first (rest node))))
         ; the va_list a call to the program's own variadic function hands it
