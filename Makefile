@@ -39,10 +39,6 @@ test: ## Run the spec suite (every failure is loud)
 check: ## Run the suite against tests/contract/known-failures.txt -- what CI gates on
 	X="$(X)" sh tests/spec-gate.sh
 
-.PHONY: bundle
-bundle: ## Roll a release tarball and print its pin
-	sh tools/bundle.sh
-
 .PHONY: help
 help: ## Show targets
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z0-9_-]+:.*?## / {printf "  \033[32m%-12s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
