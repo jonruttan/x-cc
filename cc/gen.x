@@ -2735,29 +2735,36 @@
       ((eq? (first init) (lit initlist))
         (let ((items (first (rest init))))
           (if (> (length items) n) (%cc-gen-no "more initializers than an array has elements"))
+          ; the elements after the items, from one zero
+          (def rest-zero
+            (fn (rest-zero i)
+              (if (>= i n) ()
+                (do (%cc-gen-zero-each! (elem i)) (rest-zero (+ i 1))))))
           (def fill
             (fn (fill i is)
               (if (>= i n) ()
-                (do (if (null? is)
-                      (%cc-gen-zero! (elem i))
-                      (let ((item (first is)))
+                (if (null? is)
+                  (do (%cc-gen! (lit mov) x0 (imm 0)) (rest-zero i))
+                  (do (let ((item (first is)))
                         (if (%cc-gen-aggregate? ek)
                           (%cc-gen-init-aggregate! (elem i) item)
                           (do (%cc-gen-expr! item)
                               (%cc-gen-convert-real! ek (%cc-gen-c-type-of item))
-                              (%cc-gen-put! (elem i))))))
-                    (fill (+ i 1) (if (null? is) () (rest is)))))))
+                              (%cc-gen-put! (elem i)))))
+                      (fill (+ i 1) (rest is)))))))
           (fill 0 items)))
       ((if (eq? (first init) (lit str)) (%cc-gen-byte? ek) #f)
         (let ((text (first (rest init))))
           (if (> (byte-len text) n) (%cc-gen-no "a string longer than the array it initializes"))
+          ; a byte the same as the one before it is still in x0
           (def fill
-            (fn (fill i)
+            (fn (fill i prev)
               (if (>= i n) ()
-                (do (%cc-gen-const! (if (< i (byte-len text)) (byte-at text i) 0))
-                    (%cc-gen-put! (elem i))
-                    (fill (+ i 1))))))
-          (fill 0)))
+                (let ((v (if (< i (byte-len text)) (byte-at text i) 0)))
+                  (do (if (= v prev) () (%cc-gen-const! v))
+                      (%cc-gen-put! (elem i))
+                      (fill (+ i 1) v))))))
+          (fill 0 -1)))
       (#t (%cc-gen-no "an array initialized by something other than a list or a string")))))
 
 ; An aggregate in the frame, from its initializer.
@@ -2860,8 +2867,16 @@
                 (self (+ i w)))))))
     (go 0)))
 
-; zeros over the place AT, element by element or field by field
+; zeros over the place AT, element by element or field by field, from one
+; zero in x0
 (def %cc-gen-zero!
+  (fn (_ at)
+    (do (%cc-gen! (lit mov) x0 (imm 0))
+        (%cc-gen-zero-each! at))))
+
+; zeros over AT with x0 already zero.  A bit-field's store merges into its
+; unit through x0, which then takes zero again.
+(def %cc-gen-zero-each!
   (fn (self at)
     (def k (%cc-gen-place-c-type at))
     (def base (first at))
@@ -2882,7 +2897,8 @@
                                   (first (rest (rest (first fs))))))
                           (go (rest fs)))))))
           (go (rest (rest (struct-entry (first (rest k))))))))
-      (#t (do (%cc-gen! (lit mov) x0 (imm 0)) (%cc-gen-put! at))))))
+      ((%cc-gen-bits? k) (do (%cc-gen-put! at) (%cc-gen! (lit mov) x0 (imm 0))))
+      (#t (%cc-gen-put! at)))))
 
 ; a condition, then a branch taken when it is false
 (def %cc-gen-test!
