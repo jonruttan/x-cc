@@ -68,3 +68,21 @@ eight bits of what main returns.
 ```
 ---
     5
+
+## the container
+
+### a Mach-O runs from macOS 12.0 and names SDK 13.0
+
+LC_BUILD_VERSION's minos and sdk words, each 0x00XXYY00 for XX.YY, at
+offsets 604 and 608.  libmalloc gives a program whose SDK is 12.0 or
+older its legacy allocator.
+
+```cc
+(def o (cc-compile-unit "int main(void) { return 0; }\n" (lit macho-arm64)))
+(cc-link (list o) (lit macho-arm64) "/tmp/xcc-spec24-version" ())
+(def b (File read-all "/tmp/xcc-spec24-version"))
+(File unlink "/tmp/xcc-spec24-version")
+(display (List map (fn (_ i) (char->int (str-byte-ref b i))) (list 604 605 606 607 608 609 610 611)))
+```
+---
+    (0 0 12 0 0 0 13 0)
