@@ -422,11 +422,14 @@
     (img-ascii! img 548 "/usr/lib/dyld")
     (img-u32! img 568 0x1B)            ; LC_UUID, filled in once the code is in
     (img-u32! img 572 24)
-    (img-u32! img 592 0x32)            ; LC_BUILD_VERSION: macOS, 12.0, no tools
+    ; LC_BUILD_VERSION: macOS, from 12.0, SDK 13.0, no tools.  libmalloc
+    ; gives a program whose SDK is 12.0 or older its legacy allocator, which
+    ; takes twice the time of the one from 13.0 on.
+    (img-u32! img 592 0x32)
     (img-u32! img 596 24)
     (img-u32! img 600 1)
     (img-u32! img 604 0x000C0000)
-    (img-u32! img 608 0x000C0000)
+    (img-u32! img 608 0x000D0000)
     (img-u32! img 616 0x2A)            ; LC_SOURCE_VERSION
     (img-u32! img 620 16)
     (img-u32! img 632 0x80000028)      ; LC_MAIN
