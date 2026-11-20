@@ -204,11 +204,12 @@
 ; gone by the time a longjmp comes back to it.  Each is a routine of the
 ; compiler's own, called by the program's convention, with the jmp_buf in
 ; x0: setjmp keeps x19 and x20 (the frame's base and the frame stack's
-; top), the machine stack's pointer as the call left it, and the address
-; the call returns to, and answers 0; longjmp, with its value in x1, puts
-; all four back and returns to that address with the value -- 1 for a 0.
-; A function keeps nothing in a register across a call, so those four are
-; the whole of where the setjmp's caller stood.
+; top), the machine stack's pointer as the call left it, the address the
+; call returns to, and the registers a function holds its locals in --
+; arm64's x23 to x28, x86-64's r15 and rbp -- and answers 0; longjmp, with
+; its value in x1, puts them all back and returns to that address with the
+; value -- 1 for a 0.  Those are the whole of where the setjmp's caller
+; stood.
 (def %cc-link-jumps!
   (fn (_ target names)
     (def arm64? (cc-target-arm64? target))
@@ -219,23 +220,30 @@
           (%cc-link-words!
             (if (string=? name "setjmp")
               ; stp x19, x20, [x0]; add x9, sp, #0; stp x9, x30, [x0, #16];
-              ; movz x0, #0; ret
-              (list 0xA9005013 0x910003E9 0xA9017809 0xD2800000 0xD65F03C0)
-              ; ldp x19, x20, [x0]; ldp x9, x30, [x0, #16]; add sp, x9, #0;
-              ; cmp x1, #0; csinc x0, x1, xzr, ne; ret
-              (list 0xA9405013 0xA9417809 0x9100013F 0xF100003F 0x9A9F1420 0xD65F03C0)))
+              ; stp x23, x24, [x0, #32]; stp x25, x26, [x0, #48];
+              ; stp x27, x28, [x0, #64]; movz x0, #0; ret
+              (list 0xA9005013 0x910003E9 0xA9017809 0xA9026017 0xA9036819 0xA904701B
+                    0xD2800000 0xD65F03C0)
+              ; ldp x19, x20, [x0]; ldp x9, x30, [x0, #16];
+              ; ldp x23, x24, [x0, #32]; ldp x25, x26, [x0, #48];
+              ; ldp x27, x28, [x0, #64]; add sp, x9, #0; cmp x1, #0;
+              ; csinc x0, x1, xzr, ne; ret
+              (list 0xA9405013 0xA9417809 0xA9426017 0xA9436819 0xA944701B
+                    0x9100013F 0xF100003F 0x9A9F1420 0xD65F03C0)))
           (%cc-link-raw! #f
             (if (string=? name "setjmp")
               ; mov [rax], rbx; mov [rax+8], r12; lea r11, [rsp+8];
               ; mov [rax+16], r11; mov r11, [rsp]; mov [rax+24], r11;
-              ; xor eax, eax; ret
+              ; mov [rax+32], r15; mov [rax+40], rbp; xor eax, eax; ret
               (list 0x48 0x89 0x18 0x4C 0x89 0x60 0x08 0x4C 0x8D 0x5C 0x24 0x08
                     0x4C 0x89 0x58 0x10 0x4C 0x8B 0x1C 0x24 0x4C 0x89 0x58 0x18
+                    0x4C 0x89 0x78 0x20 0x48 0x89 0x68 0x28
                     0x31 0xC0 0xC3)
-              ; mov rbx, [rax]; mov r12, [rax+8]; mov r11, [rax+24];
-              ; mov rsp, [rax+16]; mov rax, rsi; test rax, rax; jnz +5;
-              ; mov eax, 1; jmp r11
-              (list 0x48 0x8B 0x18 0x4C 0x8B 0x60 0x08 0x4C 0x8B 0x58 0x18
+              ; mov rbx, [rax]; mov r12, [rax+8]; mov r15, [rax+32];
+              ; mov rbp, [rax+40]; mov r11, [rax+24]; mov rsp, [rax+16];
+              ; mov rax, rsi; test rax, rax; jnz +5; mov eax, 1; jmp r11
+              (list 0x48 0x8B 0x18 0x4C 0x8B 0x60 0x08 0x4C 0x8B 0x78 0x20
+                    0x48 0x8B 0x68 0x28 0x4C 0x8B 0x58 0x18
                     0x48 0x8B 0x60 0x10 0x48 0x89 0xF0 0x48 0x85 0xC0 0x75 0x05
                     0xB8 0x01 0x00 0x00 0x00 0x41 0xFF 0xE3))))))
     (map routine names)))
