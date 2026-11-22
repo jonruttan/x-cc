@@ -4,7 +4,7 @@
 # ## tools/bundle.sh -- roll the release tarball, and print the pin it needs
 #
 # @description Builds x-cc-<tag>.tar.gz from a clean tree and prints the
-#   (bundle ...) row a consumer's lang.pin.xon must carry.
+#   (bundle ...) row a consumer's bundle.pin.xon must carry.
 # @author [Jon Ruttan](jonruttan@gmail.com)
 # @copyright 2026 Jon Ruttan
 # @license MIT No Attribution (MIT-0)
@@ -31,7 +31,7 @@ git rev-parse --verify "$TAG" >/dev/null 2>&1 || {
 mkdir -p "$OUT"
 # The prefix is a plain directory name so the archive unpacks into one place.
 #
-# The version stamp is added at roll time: a version row in lang.xon would be
+# The version stamp is added at roll time: a version row in bundle.xon would be
 # true only at the tagged commit, so the tag names the version and the archive
 # carries it as a file the checkout does not have, matching what `make install`
 # writes from git describe. git archive --add-file (2.38+) keeps entries sorted
@@ -51,7 +51,7 @@ else
 	ADD_STAMP=""
 	echo "bundle: git $(git --version | sed 's/.* //') has no --add-file (needs 2.38);" >&2
 	echo "  the tarball will carry no version stamp, so a consumer's" >&2
-	echo "  (requires-lang \"...\" \"$TAG\") cannot be checked against it." >&2
+	echo "  (requires-bundle \"...\" \"$TAG\") cannot be checked against it." >&2
 fi
 
 git archive --format=tar --prefix="$NAME/" $ADD_STAMP "$TAG" \
@@ -64,26 +64,26 @@ else
 fi
 printf '%s  %s\n' "$DG" "$NAME.tar.gz" > "$OUT/$NAME.tar.gz.sha256"
 
-DECLARED=$(sed -n 's/^(lang "\(.*\)")$/\1/p' lang.xon)
+DECLARED=$(sed -n 's/^(name "\(.*\)")$/\1/p' bundle.xon)
 URL="https://github.com/jonruttan/x-cc/releases/download/$TAG/$NAME.tar.gz"
 
-# The pin is a published artifact: `x --install-lang <url>` fetches this file,
+# The pin is a published artifact: `x --install-bundle <url>` fetches this file,
 # reads the digest and tarball URL out of it, and installs, so a release is
 # installable without cloning anything.
 {
-	printf '(lang "%s")\n' "$DECLARED"
+	printf '(name "%s")\n' "$DECLARED"
 	printf '(release "%s")\n' "$TAG"
 	printf '(bundle "sha256:%s" "%s")\n' "$DG" "$URL"
 	printf '(source "https://github.com/jonruttan/x-cc.git")\n'
-} > "$OUT/lang.pin.xon"
+} > "$OUT/bundle.pin.xon"
 
 echo "bundle: $OUT/$NAME.tar.gz"
-echo "bundle: $OUT/lang.pin.xon"
+echo "bundle: $OUT/bundle.pin.xon"
 echo "bundle: $DG"
 echo
 echo "Install it with:"
-echo "  x --install-lang https://github.com/jonruttan/x-cc/releases/download/$TAG/lang.pin.xon"
+echo "  x --install-bundle https://github.com/jonruttan/x-cc/releases/download/$TAG/bundle.pin.xon"
 echo
-echo "Or pin it, by putting $OUT/lang.pin.xon in your project:"
+echo "Or pin it, by putting $OUT/bundle.pin.xon in your project:"
 echo
-sed 's/^/  /' "$OUT/lang.pin.xon"
+sed 's/^/  /' "$OUT/bundle.pin.xon"
