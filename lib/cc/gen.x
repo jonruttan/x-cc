@@ -1905,13 +1905,28 @@
               (not (if (%cc-gen-aggregate? k) #t (%cc-gen-bits? k)))))))
       (#t #f))))
 
+; NODE's value when it is known now, else (): an integer constant, an
+; integer constant cast to an address (NULL is one), or a sizeof
+(def %cc-gen-known-value
+  (fn (self node)
+    (let ((t (first node)))
+      (match
+        ((%cc-gen-int-constant? node) (%cc-gen-fold node))
+        ((eq? t (lit szof))
+          (c-type-size (%cc-gen-c-type-of (first (rest node)))))
+        ((if (eq? t (lit cast)) (%cc-gen-addr-c-type? (first (rest node))) #f)
+          (let ((n (first (rest (rest node)))))
+            (if (%cc-gen-int-constant? n) (%cc-gen-fold n) ())))
+        (#t ())))))
+
 ; A binary operation's right operand NODE into x1, its left waiting in x0:
 ; straight there when one load or constant does it, else worked out in x0
 ; while the left waits on the stack
 (def %cc-gen-right!
   (fn (_ node)
+    (def v (%cc-gen-known-value node))
     (match
-      ((%cc-gen-int-constant? node) (%cc-gen-imm! x1 (%cc-gen-fold node)))
+      ((not (null? v)) (%cc-gen-imm! x1 v))
       ((%cc-gen-x1-operand? node)
         (%cc-gen-load-into! (%cc-gen-place-of (first (rest node))) x1))
       (#t (do (asm-push! %cc-gen-asm x0)
