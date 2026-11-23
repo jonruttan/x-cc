@@ -7,7 +7,7 @@
 ; @license MIT No Attribution (MIT-0)
 ;
 ; Not scoped: this file is the lang's seam.  It rebinds `write` so token
-; lists print bare, and defines the REPL printer run.x installs, and both
+; lists print bare, and defines the REPL printer cc/run installs, and both
 ; have to be the root's.
 
 (provide cc/base cc-version cc-lex cc-source-name! cc-pp-options!
@@ -51,7 +51,7 @@
     (newline)))
 
 ; Each part is a scoped module that imports what it uses from the others;
-; these imports bind the lang's public names in the root, where run.x and
+; these imports bind the lang's public names in the root, where cc/run and
 ; the spec harness reach them.
 (import cc/pp cc-lex cc-source-name! cc-pp-options!)
 (import cc/parse cc-parse)

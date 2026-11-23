@@ -6,9 +6,9 @@
 ; @copyright 2026 Jon Ruttan
 ; @license MIT No Attribution (MIT-0)
 ;
-; The lang kit's generator writes tests/lib/harness.gen.x: the dialect
-; lang.xon declares, the bundle's root on the import path, then this file.
-; It is run.x less the part that starts the lang: the compiler, and the REPL
+; The bundle kit's generator writes tests/lib/harness.gen.x: the dialect
+; bundle.xon declares, the bundle's root on the import path, then this file.
+; It is cc/run less the part that starts the lang: the compiler, and the REPL
 ; printer that shows a token list bare.
 (import cc/base)
 (set! %repl-print %cc-repl-print)

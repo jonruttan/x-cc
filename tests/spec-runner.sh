@@ -42,7 +42,7 @@ SPEC_PATH="${SPEC_PATH:-$BUNDLE/tests/specs}"
 
 # The suite boots from a state image of the harness when the platform can write
 # one. tools/dev/image-build.sh images a child that loaded the harness, keyed on
-# what it depends on (the harness, the platform's lib/, its engine, and cc/), so
+# what it depends on (the harness, the platform's lib/, its engine, and lib/cc/), so
 # an edit to any of them rewrites the image and a current one is reused.
 #
 # The image writer is a checkout tool: an installed tree has none, and a library
@@ -55,7 +55,7 @@ else
 	_builder="$X_ROOT/tools/dev/image-build.sh"
 	if [ ! -f "$_builder" ]; then
 		echo "x-cc: no image writer at $_builder (not a checkout) -- the suite boots from source" >&2
-	elif X_BIN="$X_BIN" sh "$_builder" "$LANG_LIB" "$BUNDLE/tests/lib/.images" "$BUNDLE/cc"; then
+	elif X_BIN="$X_BIN" sh "$_builder" "$LANG_LIB" "$BUNDLE/tests/lib/.images" "$BUNDLE/lib/cc"; then
 		X_IMG_DIR="$BUNDLE/tests/lib/.images"; export X_IMG_DIR
 	else
 		echo "x-cc: no state image -- the suite boots from source" >&2
@@ -70,7 +70,7 @@ export SPEC_SEAM_COLLECT=0
 # One spec file per process, and with it the platform's own 300M-object
 # ceiling rather than a raised one.  Nothing collects between snippets, so a
 # batch's allocation is the sum of its files, and interpreting a C program
-# allocates: on the release lang.xon declares, a batch of eight ran out of
+# allocates: on the release bundle.xon declares, a batch of eight ran out of
 # 300M objects where each file alone needs a fraction of it.  Memory down,
 # not the guard up -- x-r5rs and x-r7rs set the same knob for the same reason.
 export SPEC_BATCH="${SPEC_BATCH:-1}"
