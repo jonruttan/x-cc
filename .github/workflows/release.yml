@@ -1,7 +1,7 @@
 name: Release
 
 # A v* tag publishes a release: the tarball and its sha256, which a consumer's
-# lang.pin.xon verifies. The suite runs first; a red tree publishes nothing.
+# bundle.pin.xon verifies. The suite runs first; a red tree publishes nothing.
 
 on:
   push:
@@ -24,8 +24,8 @@ jobs:
 
       - name: Check out the x-lang this bundle declares
         run: |
-          declared=$(sed -n 's/^(requires-release "\(.*\)")$/\1/p' lang.xon)
-          echo "lang.xon declares $declared"
+          declared=$(sed -n 's/^(requires-release "\(.*\)")$/\1/p' bundle.xon)
+          echo "bundle.xon declares $declared"
           git clone --depth 1 --branch "$declared" \
             https://github.com/jonruttan/x-lang.git .x-lang
 
@@ -59,15 +59,15 @@ jobs:
             echo '## Install'
             echo
             echo '```sh'
-            echo "x --install-lang https://github.com/jonruttan/x-cc/releases/download/$TAG/lang.pin.xon"
+            echo "x --install-bundle https://github.com/jonruttan/x-cc/releases/download/$TAG/bundle.pin.xon"
             echo '```'
             echo
             echo '## Or pin it, for a project'
             echo
-            echo 'Put this in the project'"'"'s `lang.pin.xon`:'
+            echo 'Put this in the project'"'"'s `bundle.pin.xon`:'
             echo
             echo '```x'
-            sed -n '/^  (lang /,$p' roll.out | sed 's/^  //'
+            sed -n '/^  (name /,$p' roll.out | sed 's/^  //'
             echo '```'
           } > notes.md
           gh release create "$TAG" \
@@ -75,4 +75,4 @@ jobs:
             --notes-file notes.md \
             "dist/x-cc-$TAG.tar.gz" \
             "dist/x-cc-$TAG.tar.gz.sha256" \
-            "dist/lang.pin.xon"
+            "dist/bundle.pin.xon"

@@ -2,31 +2,31 @@
 
 ## cc/syntax -- the C highlighting grammar
 
-The bundle's lang.xon declares a grammar, `c`, that x/tool/syntax colours C
+The bundle's bundle.xon declares a grammar, `c`, that x/tool/syntax colours C
 files with. Its module, `cc/syntax`, imports x-lang libraries and cc/words
 only, and registers the grammar as it loads.
 
 The cases share one process, and a registered grammar stays registered, so
-the catalogue's case comes first: it finds the grammar through lang.xon,
+the catalogue's case comes first: it finds the grammar through bundle.xon,
 before anything has imported the module.
 
 ### the catalogue finds c by suffix and by modeline
 
-The langs directory holds this bundle, linked as `cc`. The row comes from
-lang.xon, its module not loaded until a file asks for the grammar, and the
-grammar takes lang.xon's suffixes.
+The bundles directory holds this bundle, linked as `cc`. The row comes from
+bundle.xon, its module not loaded until a file asks for the grammar, and the
+grammar takes bundle.xon's suffixes.
 
 ```cc
 (do (import x/sys/posix) (import x/sys/file) (import x/tool/syntax)
-    (def root (Str8 replace "/cc/syntax.x" "" (%module-resolve-file "cc/syntax.x")))
+    (def root (Str8 replace "/lib/cc/syntax.x" "" (%module-resolve-file "cc/syntax.x")))
     (def tmp (File temp "/tmp/x-cc-spec-langs-"))
     (File close (first tmp))
     (def d (rest tmp))
     (File unlink d)
     (File mkdir d)
     (File symlink root (Str8 append d "/cc"))
-    (def was (Sys getenv "X_LANG_DIR"))
-    (Sys setenv "X_LANG_DIR" d)
+    (def was (Sys getenv "X_BUNDLE_DIR"))
+    (Sys setenv "X_BUNDLE_DIR" d)
     (Syntax forget!)
     (def row (List find (fn (_ r) (eq? (first r) (lit c))) (Syntax catalogue)))
     (def name (fn (_ path . text)
@@ -39,7 +39,7 @@ grammar takes lang.xon's suffixes.
             ((Syntax named (lit c)) files)))
     (File unlink (Str8 append d "/cc"))
     (File rmdir d)
-    (Sys setenv "X_LANG_DIR" (if (null? was) "" was))
+    (Sys setenv "X_BUNDLE_DIR" (if (null? was) "" was))
     (Syntax forget!)
     (write seen))
 ```

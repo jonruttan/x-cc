@@ -9,7 +9,7 @@
 ; @copyright 2026 Jon Ruttan
 ; @license MIT No Attribution (MIT-0)
 ;
-; lang.xon's (grammar c ...) form names this module, and x/tool/syntax
+; bundle.xon's (grammar c ...) form names this module, and x/tool/syntax
 ; imports it the first time a file needs the grammar, in whatever process is
 ; colouring: vi's, a REPL's, an HTML renderer's.  So it imports x-lang
 ; libraries and cc/words only, never the compiler.  Its keywords, punctuators
