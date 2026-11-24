@@ -74,8 +74,7 @@
 ; states, which a program that reads no C should not pay for.  The keyword
 ; table comes before the identifier run, so a keyword wins the tie; a
 ; longer identifier wins over it.  A byte no rule reads is a bad token of
-; its own, last, which cc-token refuses.  The end text is a newline, which
-; ends a last line comment.
+; its own, last, which cc-token refuses.  A line comment may end the text.
 (def %cc-lexer (pair () ()))
 (def %cc-lexer!
   (fn (_)
@@ -83,7 +82,7 @@
       (let ((l (Lexer make
                  (list (Lexer run (lit sp) (list 32 9 13 12 11) (list 32 9 13 12 11))
                        (Lexer until (lit cmt) "/*" "*/")
-                       (Lexer until () "//" "\n")
+                       (Lexer until () "//" "\n" (lit to-end))
                        (Lexer table (lit nl) (list "\n"))
                        (Lexer table (lit kw) cc-keywords)
                        (Lexer run (lit id) cc-name-start cc-name-rest)
@@ -91,8 +90,7 @@
                        (Lexer quoted (lit str) 34 34 92)
                        (Lexer quoted (lit chr) 39 39 92)
                        (Lexer table (lit op) cc-ops)
-                       (Lexer any (lit bad)))
-                 "\n")))
+                       (Lexer any (lit bad))))))
         (set-first! %cc-lexer l)
         l)
       (first %cc-lexer))))
