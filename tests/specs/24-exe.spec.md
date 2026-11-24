@@ -89,3 +89,21 @@ on, and an arm64 program's code does not assemble on x86-64.
 ```
 ---
     (0 0 12 0 0 0 13 0)
+
+### the signature starts at a 16-byte offset, as ld places it
+
+LC_CODE_SIGNATURE's dataoff, at offset 752, is a multiple of 16, as ld
+writes it: strip refuses a signature anywhere else.  Exporting `f` ends
+the string table 8 bytes past a multiple of 16.
+
+```cc
+(import cc/macho macho-write!)
+(import cc/prims mem-make)
+(macho-write! "/tmp/xcc-spec24-sigoff" (pair 4 (mem-make 4)) (pair 0 (mem-make 8)) () (list (pair "f" (pair (lit text) 0))))
+(def b (File read-all "/tmp/xcc-spec24-sigoff"))
+(File unlink "/tmp/xcc-spec24-sigoff")
+(def word (fn (_ i) (+ (char->int (str-byte-ref b i)) (* 256 (+ (char->int (str-byte-ref b (+ i 1))) (* 256 (char->int (str-byte-ref b (+ i 2)))))))))
+(display (% (word 752) 16))
+```
+---
+    0
