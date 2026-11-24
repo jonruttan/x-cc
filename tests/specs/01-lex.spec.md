@@ -44,6 +44,14 @@ The preprocessor and lexer: C text to tokens.
 ---
     ((id "a") (id "b") (id "c") (str "/*not*/"))
 
+### a line comment that ends the text vanishes too
+
+```cc
+(write (cc-lex "a // the last line"))
+```
+---
+    ((id "a"))
+
 ## the preprocessor
 
 ### include drops, define splices
