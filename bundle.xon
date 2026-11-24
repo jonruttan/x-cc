@@ -1,6 +1,6 @@
-; lang.xon -- what this bundle is.
+; bundle.xon -- what this bundle is.
 
-(lang "cc")
+(name "cc")
 
 ; Self-contained: this bundle depends on nothing but the platform.
 ;
@@ -10,6 +10,11 @@
 ; ~9s of every invocation that a tool never uses.
 (dialect he)
 
-(requires-release "v0.51.0")
+; v0.60.0: the bundle shape, lib/cc/ with the entry cc/run.
+(requires-release "v0.60.0")
 
-(entry "run.x")
+(entry run)
+
+; The C grammar, for any process that colours a file: cc/syntax
+; imports x-lang libraries and cc/words only.
+(grammar c (module cc/syntax) (files ".c" ".h"))

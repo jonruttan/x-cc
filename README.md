@@ -51,13 +51,25 @@ file's, and a global one file defines, the others declare `extern`.
 
 ## Install
 
-It needs x-lang at the release `lang.xon` declares.
+It needs x-lang at the release `bundle.xon` declares.  From any directory,
+nothing cloned:
+
+```bash
+x --install-bundle https://github.com/jonruttan/x-cc/releases/latest/download/bundle.pin.xon
+x -l cc
+```
+
+x fetches the published pin, then the tarball it names, verifies the digest,
+and installs to `<share>/bundles/cc`, where `x -l` looks.  From a checkout:
 
     make install        # into the x on PATH
 
+A `v*` tag publishes a release: `.github/workflows/release.yml` runs the
+suite, then `tools/bundle.sh` rolls the tarball and its pin.
+
 ## Status
 
-Paired with x-lang v0.51.0 (`lang.xon` is the checkable row).  No release
+Paired with x-lang v0.60.0 (`bundle.xon` is the checkable row).  No release
 has been cut.  It builds for the platform it runs on: macOS on arm64, and
 Linux on x86-64 and arm64.
 
@@ -355,7 +367,7 @@ joined token.
 
 Doubles and floats run as they compile: each is its IEEE bits, and each
 operation on one is the machine's, through the platform's stubs
-(x/num/float), made in cc/real.x.
+(x/num/float), made in lib/cc/real.x.
 
 A cast or `sizeof` takes a pointer to a function as a declaration does:
 `(int (*)(const void *, const void *))cmp` is a pointer a call answers an
@@ -405,22 +417,25 @@ struct, a typedef or a cast, with an initializer, or static is refused.
 
 ## Layout
 
-    lang.xon          what the bundle is: lang, dialect, required release, entry
-    run.x             the entry
-    cc/base.x         the compiler, assembled
-    cc/prims.x        the platform layer
-    cc/tokens.x       C text to tokens: a Lexer (x/reader/lexer), compiled
-    cc/pp.x           directives, macros and #if, on tokens; cc-lex
-    cc/parse.x        the fifteen-level ladder, declarations, statements
-    cc/eval.x         the evaluator: memory, frames, calls, builtins
-    cc/real.x         float and double: conversions and operations
-    cc/gen.x          code generation, through x/tool/asm
-    cc/link.x         the linker: objects to an executable
-    cc/image.x        the byte image an executable is built in
-    cc/macho.x        the macOS executable and its ad-hoc signature
-    cc/elf.x          the Linux executable
-    cc/cli.x          the command line
+    bundle.xon        what the bundle is: name, dialect, required release, entry
+    lib/cc/run.x      the entry, the module cc/run
+    lib/cc/base.x     the compiler, assembled
+    lib/cc/prims.x    the platform layer
+    lib/cc/words.x    C's keywords, punctuators and name bytes
+    lib/cc/tokens.x   C text to tokens: a Lexer (x/reader/lexer), compiled
+    lib/cc/syntax.x   the C highlighting grammar x/tool/syntax colours with
+    lib/cc/pp.x       directives, macros and #if, on tokens; cc-lex
+    lib/cc/parse.x    the fifteen-level ladder, declarations, statements
+    lib/cc/eval.x     the evaluator: memory, frames, calls, builtins
+    lib/cc/real.x     float and double: conversions and operations
+    lib/cc/gen.x      code generation, through x/tool/asm
+    lib/cc/link.x     the linker: objects to an executable
+    lib/cc/image.x    the byte image an executable is built in
+    lib/cc/macho.x    the macOS executable and its ad-hoc signature
+    lib/cc/elf.x      the Linux executable
+    lib/cc/cli.x      the command line
     tests/            markdown specs, run by the platform's runner
+    tools/bundle.sh   rolls a release's tarball and its bundle.pin.xon
 
 ## Licence
 

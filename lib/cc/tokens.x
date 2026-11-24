@@ -32,20 +32,11 @@
 (import x/num/float Float)
 (import cc/real single)
 (import cc/parse plain-char)
+(import cc/words cc-keywords cc-ops cc-name-start cc-name-rest)
 
 ; The type handle this file asks convert for, fetched by name through the
 ; platform's public door and private to this module.
 (def %symbol (Type named SYMBOL))
-
-; Every C89 keyword, C99's _Bool, inline and restrict, and C11's
-; _Static_assert, so the parser refuses the unimplemented ones by name rather
-; than reading them as identifiers.
-(def %cc-keywords
-  (list "auto" "break" "case" "char" "const" "continue" "default" "do"
-        "double" "else" "enum" "extern" "float" "for" "goto" "if" "int"
-        "long" "register" "return" "short" "signed" "sizeof" "static"
-        "struct" "switch" "typedef" "union" "unsigned" "void" "volatile"
-        "while" "_Bool" "inline" "restrict" "_Static_assert"))
 
 ; A name's bucket among NAME-BUCKETS: of its length and its first and last
 ; bytes, so a table of names is looked in at one short list.  cc/pp's
@@ -73,21 +64,11 @@
               (do (vec-set! t (name-bucket (first ks))
                     (pair (pair (first ks) (convert (first ks) %symbol)) (vec-ref t (name-bucket (first ks)))))
                   (self (rest ks))))))
-        (fill %cc-keywords)
+        (fill cc-keywords)
         (set-first! %cc-keyword-table t))
       ())
     (def go (fn (self ks) (if (string=? (first (first ks)) text) (rest (first ks)) (self (rest ks)))))
     (go (vec-ref (first %cc-keyword-table) (name-bucket text)))))
-
-; C's punctuators, the longest that matches
-(def %cc-ops
-  (list "[" "]" "(" ")" "{" "}" "." "->" "++" "--" "&" "*" "+" "-" "~" "!"
-        "/" "%" "<<" ">>" "<" ">" "<=" ">=" "==" "!=" "^" "|" "&&" "||"
-        "?" ":" ";" "..." "=" "*=" "/=" "%=" "+=" "-=" "<<=" ">>=" "&="
-        "^=" "|=" "," "#" "##"))
-
-(def %cc-name-start (list (pair 97 122) (pair 65 90) 95))
-(def %cc-name-rest (list (pair 97 122) (pair 65 90) (pair 48 57) 95))
 
 ; The lexer, made the first time text is read: making it compiles its
 ; states, which a program that reads no C should not pay for.  The keyword
@@ -104,12 +85,12 @@
                        (Lexer until (lit cmt) "/*" "*/")
                        (Lexer until () "//" "\n")
                        (Lexer table (lit nl) (list "\n"))
-                       (Lexer table (lit kw) %cc-keywords)
-                       (Lexer run (lit id) %cc-name-start %cc-name-rest)
+                       (Lexer table (lit kw) cc-keywords)
+                       (Lexer run (lit id) cc-name-start cc-name-rest)
                        (Lexer number (lit num) "uUlLfF")
                        (Lexer quoted (lit str) 34 34 92)
                        (Lexer quoted (lit chr) 39 39 92)
-                       (Lexer table (lit op) %cc-ops)
+                       (Lexer table (lit op) cc-ops)
                        (Lexer any (lit bad)))
                  "\n")))
         (set-first! %cc-lexer l)

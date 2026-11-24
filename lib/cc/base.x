@@ -8,7 +8,7 @@
 ;
 ; Not scoped: this file is the lang's seam.  It sets symbols to write bare
 ; so token lists print as the specs read them, and defines the REPL printer
-; run.x installs, which has to be the root's.
+; cc/run installs, which has to be the root's.
 
 (provide cc/base cc-version cc-lex cc-source-name! cc-pp-options!
   cc-parse cc-run cc-run-with
@@ -22,6 +22,11 @@
 (import cc/prims)
 (import x/repl/lang)
 
+; Loading the function compiler compiles x-lang's own hot loops, Hash
+; fnv-1a's among them, the hash under every Dict op on a string or symbol
+; key, which is what x/tool/link keeps its symbols in.
+(import x/tool/fn-compile)
+
 ; Token lists render bare: Lang symbols-bare! writes symbols without x's
 ; quote, for write and write-to-str alike.
 (Lang symbols-bare!)
@@ -32,7 +37,7 @@
     (newline)))
 
 ; Each part is a scoped module that imports what it uses from the others;
-; these imports bind the lang's public names in the root, where run.x and
+; these imports bind the lang's public names in the root, where cc/run and
 ; the spec harness reach them.
 (import cc/pp cc-lex cc-source-name! cc-pp-options!)
 (import cc/parse cc-parse)

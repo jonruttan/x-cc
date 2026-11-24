@@ -49,7 +49,7 @@
 (import x/platform/syscall)
 (import cc/prims append byte-at byte-len convert filter length map mem-copy! mem-fill! mem-make
   mem-ptr mem-ref-byte mem-set-byte!
-  proc-capture reverse sha256-hex-n string-append string-concat string=?
+  proc-capture reverse set-first! sha256-hex-n string-append string-concat string=?
   substring heap-collect)
 (import cc/pp cc-lex)
 (import cc/parse cc-parse cc-lexed-count c-type-size c-type-align plain-char round-up struct-entry)
@@ -474,6 +474,22 @@
       ((string=? op "+")
         (do (%cc-gen-scale! x0 (size kb)) (%cc-gen! (lit add) x0 x0 x1)))
       (#t (%cc-gen-no (string-append "the operator " op " on an address"))))))
+
+; A + N, N + A or A - N, for an address A and an integer constant N, as
+; (A . BYTES): A moves by N elements, whose bytes are worked out now.  Nil
+; for any other operation.
+(def %cc-gen-addr-constant
+  (fn (_ op a b ka kb)
+    (def size (fn (_ k) (c-type-size (c-type-elem k))))
+    (match
+      ((if (%cc-gen-addr-c-type? ka) (%cc-gen-int-constant? b) #f)
+        (match
+          ((string=? op "+") (pair a (* (%cc-gen-fold b) (size ka))))
+          ((string=? op "-") (pair a (- 0 (* (%cc-gen-fold b) (size ka)))))
+          (#t ())))
+      ((if (string=? op "+") (if (%cc-gen-addr-c-type? kb) (%cc-gen-int-constant? a) #f) #f)
+        (pair b (* (%cc-gen-fold a) (size kb))))
+      (#t ()))))
 
 (def %cc-gen-branch
   (fn (_ op)
@@ -1296,6 +1312,7 @@
 ; OFF an address in the data, which the linker settles.
 (def %cc-gen-address!
   (fn (_ base off)
+    (if (eq? base (lit reg)) (%cc-gen-no "the address of a local held in a register"))
     (if (eq? base (lit data))
       (%cc-gen-data-address-into! x0 off)
       (do (%cc-gen! (lit mov) x0 base)
@@ -1442,8 +1459,10 @@
 ; register holding it, at offset 0.  A global's or a static local's is in
 ; the data, BASE `data` and OFFSET an address there, which the linker
 ; settles: its memory operand is REG, which takes the address first
-; (%cc-gen-place-mem).
+; (%cc-gen-place-mem).  A local held in a register (%cc-gen-held!) has
+; BASE `reg` and OFFSET the register, and no memory operand.
 (def %cc-gen-place (fn (_ base off c-type) (pair base (pair off c-type))))
+(def %cc-gen-held-place? (fn (_ p) (eq? (first p) (lit reg))))
 ; P as a load's or a store's operand.  A load takes twelve bits of offset,
 ; in units of its width, and arm64's encoder masks a wider one: past that,
 ; and for a place in the data, the address is worked out into REG -- x0
@@ -1459,6 +1478,7 @@
       ((eq? (first p) (lit data))
         (do (%cc-gen-data-address-into! reg off)
             (mem reg 0)))
+      ((%cc-gen-held-place? p) (%cc-gen-no "the address of a local held in a register"))
       ((if (< off 0) #t (if (> off (* 4095 width)) #t (not (= 0 (% off width)))))
         (do (asm-load-imm64! %cc-gen-asm reg off)
             (%cc-gen! (lit add) reg reg (first p))
@@ -1473,7 +1493,7 @@
     (let ((l (%cc-gen-find name)))
       (match
         ; a static local's room in the data (%cc-gen-bind-static!), laid out
-        ; with the globals
+        ; with the globals, or the register a local is held in
         ((if (null? l) #f (pair? (first l)))
           (%cc-gen-place (first (first l)) (rest (first l)) (rest l)))
         ((not (null? l))
@@ -1485,17 +1505,39 @@
             (if (null? g) (%cc-gen-no (string-append "the name " name))
               (%cc-gen-place (lit data) (first g) (rest g)))))))))
 
-(def %cc-gen-load!
-  (fn (_ place)
+; PLACE's value into REG.  A register holds its local in the form its C
+; type is held in, so the value is a move.
+(def %cc-gen-load-into!
+  (fn (_ place reg)
     (def k (%cc-gen-place-c-type place))
-    (if (%cc-gen-bits? k) (%cc-gen-bits-load! (%cc-gen-place-mem place x0) k)
-      (%cc-gen! (%cc-gen-load-op k) x0 (%cc-gen-place-mem place x0)))))
+    (match
+      ((%cc-gen-held-place? place) (%cc-gen! (lit mov) reg (first (rest place))))
+      ((%cc-gen-bits? k) (%cc-gen-bits-load! (%cc-gen-place-mem place reg) k))
+      (#t (%cc-gen! (%cc-gen-load-op k) reg (%cc-gen-place-mem place reg))))))
 
+(def %cc-gen-load! (fn (_ place) (%cc-gen-load-into! place x0)))
+
+; x0 into PLACE.  A store to memory cuts the value to its place's width; a
+; register takes it cut and extended again, as a load would bring it back.
 (def %cc-gen-put!
   (fn (_ place)
     (def k (%cc-gen-place-c-type place))
-    (if (%cc-gen-bits? k) (%cc-gen-bits-put! (%cc-gen-place-mem place x1) k)
-      (%cc-gen! (%cc-gen-store-op k) x0 (%cc-gen-place-mem place x1)))))
+    (match
+      ((%cc-gen-held-place? place)
+        (do (%cc-gen-hold! k) (%cc-gen! (lit mov) (first (rest place)) x0)))
+      ((%cc-gen-bits? k) (%cc-gen-bits-put! (%cc-gen-place-mem place x1) k))
+      (#t (%cc-gen! (%cc-gen-store-op k) x0 (%cc-gen-place-mem place x1))))))
+
+; x0 in the form a value of C-TYPE is held in: extended from its width by
+; its sign, as a load extends it
+(def %cc-gen-hold!
+  (fn (_ k)
+    (match
+      ((%cc-gen-wide? k) ())
+      ((eq? k (lit int)) (%cc-gen-int!))
+      ((eq? k (lit uint)) (%cc-gen-uint!))
+      ((%cc-gen-bool? k) (%cc-gen-narrow! (lit uchar)))
+      (#t (%cc-gen-narrow! k)))))
 
 ; the load of a bit-field's unit, zero-extended: the field's bits are
 ; taken from it whole
@@ -1594,9 +1636,13 @@
 (def %cc-gen-store!
   (fn (_ place from)
     (def k (%cc-gen-place-c-type place))
-    (if (if (%cc-gen-real? k) #t (if (%cc-gen-real? from) #t (%cc-gen-bool? k)))
-      (do (%cc-gen-convert! k from) (%cc-gen-put! place))
-      (do (%cc-gen-put! place) (%cc-gen-convert! k from)))))
+    (match
+      ; a register takes the converted value as it is
+      ((%cc-gen-held-place? place)
+        (do (%cc-gen-convert! k from) (%cc-gen! (lit mov) (first (rest place)) x0)))
+      ((if (%cc-gen-real? k) #t (if (%cc-gen-real? from) #t (%cc-gen-bool? k)))
+        (do (%cc-gen-convert! k from) (%cc-gen-put! place)))
+      (#t (do (%cc-gen-put! place) (%cc-gen-convert! k from))))))
 
 ; x0, of C type FROM, as C-TYPE when either is real or C-TYPE is a _Bool;
 ; any other value is left as it is, for a store to cut
@@ -1859,16 +1905,30 @@
               (not (if (%cc-gen-aggregate? k) #t (%cc-gen-bits? k)))))))
       (#t #f))))
 
+; NODE's value when it is known now, else (): an integer constant, an
+; integer constant cast to an address (NULL is one), or a sizeof
+(def %cc-gen-known-value
+  (fn (self node)
+    (let ((t (first node)))
+      (match
+        ((%cc-gen-int-constant? node) (%cc-gen-fold node))
+        ((eq? t (lit szof))
+          (c-type-size (%cc-gen-c-type-of (first (rest node)))))
+        ((if (eq? t (lit cast)) (%cc-gen-addr-c-type? (first (rest node))) #f)
+          (let ((n (first (rest (rest node)))))
+            (if (%cc-gen-int-constant? n) (%cc-gen-fold n) ())))
+        (#t ())))))
+
 ; A binary operation's right operand NODE into x1, its left waiting in x0:
 ; straight there when one load or constant does it, else worked out in x0
 ; while the left waits on the stack
 (def %cc-gen-right!
   (fn (_ node)
+    (def v (%cc-gen-known-value node))
     (match
-      ((%cc-gen-int-constant? node) (%cc-gen-imm! x1 (%cc-gen-fold node)))
+      ((not (null? v)) (%cc-gen-imm! x1 v))
       ((%cc-gen-x1-operand? node)
-        (let ((at (%cc-gen-place-of (first (rest node)))))
-          (%cc-gen! (%cc-gen-load-op (%cc-gen-place-c-type at)) x1 (%cc-gen-place-mem at x1))))
+        (%cc-gen-load-into! (%cc-gen-place-of (first (rest node))) x1))
       (#t (do (asm-push! %cc-gen-asm x0)
               (%cc-gen-expr! node)
               (%cc-gen! (lit mov) x1 x0)
@@ -1949,28 +2009,38 @@
             (def k (if (if (string=? op "<<") #t (string=? op ">>"))
                      (promoted-c-type ka)
                      (common-c-type ka kb)))
-            (if (if (%cc-gen-real? k) (not addr?) #f)
+            (def moved
+              (if (if addr? (eq? t (lit bin)) #f)
+                (%cc-gen-addr-constant op (first (rest (rest node))) (first (rest (rest (rest node)))) ka kb)
+                ()))
+            (match
+              ((not (null? moved))
+                (let ((off (rest moved)))
+                  (do (self (first moved))
+                      (%cc-gen-bump! (>= off 0) (if (< off 0) (- 0 off) off)))))
               ; each operand converted to a double as it is worked out
-              (do (self (first (rest (rest node))))
-                  (%cc-gen-convert! k ka)
-                  (asm-push! %cc-gen-asm x0)
-                  (self (first (rest (rest (rest node)))))
-                  (%cc-gen-convert! k kb)
-                  (%cc-gen! (lit mov) x1 x0)
-                  (asm-pop! %cc-gen-asm x0)
-                  (if (eq? t (lit cmp)) (%cc-gen-real-compare! op k) (%cc-gen-real-bin! op k)))
-              (do (self (first (rest (rest node))))
-                  (%cc-gen-right! (first (rest (rest (rest node)))))
-                  ; an int converted to an unsigned int takes that C type's form
-                  (if (if (eq? k (lit uint)) (not addr?) #f)
-                    (do (%cc-gen-uint!) (%cc-gen-uint-x1!))
-                    ())
-                  (match
-                    ((eq? t (lit cmp))
-                      (do (if addr? (%cc-gen! (lit cmp) x0 x1) (%cc-gen-compare! k))
-                          (%cc-gen-flag! (%cc-gen-branch op))))
-                    (addr? (%cc-gen-addr-bin! op ka kb))
-                    (#t (%cc-gen-bin! op k)))))))
+              ((if (%cc-gen-real? k) (not addr?) #f)
+                (do (self (first (rest (rest node))))
+                    (%cc-gen-convert! k ka)
+                    (asm-push! %cc-gen-asm x0)
+                    (self (first (rest (rest (rest node)))))
+                    (%cc-gen-convert! k kb)
+                    (%cc-gen! (lit mov) x1 x0)
+                    (asm-pop! %cc-gen-asm x0)
+                    (if (eq? t (lit cmp)) (%cc-gen-real-compare! op k) (%cc-gen-real-bin! op k))))
+              (#t
+                (do (self (first (rest (rest node))))
+                    (%cc-gen-right! (first (rest (rest (rest node)))))
+                    ; an int converted to an unsigned int takes that C type's form
+                    (if (if (eq? k (lit uint)) (not addr?) #f)
+                      (do (%cc-gen-uint!) (%cc-gen-uint-x1!))
+                      ())
+                    (match
+                      ((eq? t (lit cmp))
+                        (do (if addr? (%cc-gen! (lit cmp) x0 x1) (%cc-gen-compare! k))
+                            (%cc-gen-flag! (%cc-gen-branch op))))
+                      (addr? (%cc-gen-addr-bin! op ka kb))
+                      (#t (%cc-gen-bin! op k))))))))
         ((if (eq? t (lit var)) (%cc-gen-stream? (first (rest node))) #f)
           (%cc-gen-stream-load! (first (rest node))))
         ; the va_list a call to the program's own variadic function hands it
@@ -2100,10 +2170,10 @@
 ; So when the program defines neither, each is a routine of the compiler's
 ; own, called by the program's convention, with the jmp_buf in x0:
 ; setjmp keeps x19 and x20 (the frame's base and the frame stack's top),
-; the machine stack's pointer as the call left it, and the address the call
-; returns to, and answers 0; longjmp, with its value in x1, puts all four
-; back and returns to that address with the value -- 1 for a 0.  A function
-; keeps nothing in a register across a call, so those four are the whole of
+; the registers locals are held in (%cc-gen-keep), the machine stack's
+; pointer as the call left it, and the address the call returns to, and
+; answers 0; longjmp, with its value in x1, puts them all back and returns
+; to that address with the value -- 1 for a 0.  Those are the whole of
 ; where the setjmp's caller stood.  The routines name registers the portable
 ; model does not, so each is written out per target by the linker (cc/link),
 ; which defines the symbol a unit's call names.
@@ -2709,29 +2779,36 @@
       ((eq? (first init) (lit initlist))
         (let ((items (first (rest init))))
           (if (> (length items) n) (%cc-gen-no "more initializers than an array has elements"))
+          ; the elements after the items, from one zero
+          (def rest-zero
+            (fn (rest-zero i)
+              (if (>= i n) ()
+                (do (%cc-gen-zero-each! (elem i)) (rest-zero (+ i 1))))))
           (def fill
             (fn (fill i is)
               (if (>= i n) ()
-                (do (if (null? is)
-                      (%cc-gen-zero! (elem i))
-                      (let ((item (first is)))
+                (if (null? is)
+                  (do (%cc-gen! (lit mov) x0 (imm 0)) (rest-zero i))
+                  (do (let ((item (first is)))
                         (if (%cc-gen-aggregate? ek)
                           (%cc-gen-init-aggregate! (elem i) item)
                           (do (%cc-gen-expr! item)
                               (%cc-gen-convert-real! ek (%cc-gen-c-type-of item))
-                              (%cc-gen-put! (elem i))))))
-                    (fill (+ i 1) (if (null? is) () (rest is)))))))
+                              (%cc-gen-put! (elem i)))))
+                      (fill (+ i 1) (rest is)))))))
           (fill 0 items)))
       ((if (eq? (first init) (lit str)) (%cc-gen-byte? ek) #f)
         (let ((text (first (rest init))))
           (if (> (byte-len text) n) (%cc-gen-no "a string longer than the array it initializes"))
+          ; a byte the same as the one before it is still in x0
           (def fill
-            (fn (fill i)
+            (fn (fill i prev)
               (if (>= i n) ()
-                (do (%cc-gen-const! (if (< i (byte-len text)) (byte-at text i) 0))
-                    (%cc-gen-put! (elem i))
-                    (fill (+ i 1))))))
-          (fill 0)))
+                (let ((v (if (< i (byte-len text)) (byte-at text i) 0)))
+                  (do (if (= v prev) () (%cc-gen-const! v))
+                      (%cc-gen-put! (elem i))
+                      (fill (+ i 1) v))))))
+          (fill 0 -1)))
       (#t (%cc-gen-no "an array initialized by something other than a list or a string")))))
 
 ; An aggregate in the frame, from its initializer.
@@ -2834,8 +2911,16 @@
                 (self (+ i w)))))))
     (go 0)))
 
-; zeros over the place AT, element by element or field by field
+; zeros over the place AT, element by element or field by field, from one
+; zero in x0
 (def %cc-gen-zero!
+  (fn (_ at)
+    (do (%cc-gen! (lit mov) x0 (imm 0))
+        (%cc-gen-zero-each! at))))
+
+; zeros over AT with x0 already zero.  A bit-field's store merges into its
+; unit through x0, which then takes zero again.
+(def %cc-gen-zero-each!
   (fn (self at)
     (def k (%cc-gen-place-c-type at))
     (def base (first at))
@@ -2856,7 +2941,8 @@
                                   (first (rest (rest (first fs))))))
                           (go (rest fs)))))))
           (go (rest (rest (struct-entry (first (rest k))))))))
-      (#t (do (%cc-gen! (lit mov) x0 (imm 0)) (%cc-gen-put! at))))))
+      ((%cc-gen-bits? k) (do (%cc-gen-put! at) (%cc-gen! (lit mov) x0 (imm 0))))
+      (#t (%cc-gen-put! at)))))
 
 ; a condition, then a branch taken when it is false
 (def %cc-gen-test!
@@ -2907,12 +2993,18 @@
           ; local of the name wins over a global of it
           (let ((at (%cc-gen-place-of (first (rest node)))))
             (def init (first (rest (rest (rest node)))))
-            (if (%cc-gen-aggregate? (%cc-gen-place-c-type at))
-              (if (null? init) () (%cc-gen-init-aggregate! at init))
-              (do (if (null? init) (%cc-gen-const! 0)
-                    (do (%cc-gen-expr! init)
-                        (%cc-gen-convert-real! (%cc-gen-place-c-type at) (%cc-gen-c-type-of init))))
-                  (%cc-gen-put! at)))))
+            (match
+              ((%cc-gen-aggregate? (%cc-gen-place-c-type at))
+                (if (null? init) () (%cc-gen-init-aggregate! at init)))
+              ((%cc-gen-held-place? at)
+                (if (null? init)
+                  (do (%cc-gen-const! 0) (%cc-gen-store! at (lit int)))
+                  (do (%cc-gen-expr! init) (%cc-gen-store! at (%cc-gen-c-type-of init)))))
+              (#t
+                (do (if (null? init) (%cc-gen-const! 0)
+                      (do (%cc-gen-expr! init)
+                          (%cc-gen-convert-real! (%cc-gen-place-c-type at) (%cc-gen-c-type-of init))))
+                    (%cc-gen-put! at))))))
         ((eq? t (lit expr)) (%cc-gen-expr! (first (rest node))))
         ((eq? t (lit if))
           (let ((other (%cc-gen-label)) (done (%cc-gen-label)))
@@ -3075,6 +3167,131 @@
                         (first (first es))))))))
     (go %cc-gen-labels)))
 
+; --- locals in registers ----------------------------------------------------
+; A function holds its scalar locals and parameters in the registers the C
+; calling convention keeps across calls, as many as the target has
+; (%cc-gen-keep), the ones it names most first: a use weighs eight times as
+; much for each loop it is inside, up to four.  A local stays in the frame
+; when it is a double, a float or an aggregate, or when the function takes
+; its address; all of them stay there in a function that calls setjmp.  A
+; function saves the registers it holds locals in on the machine stack and
+; puts them back as it returns, so its caller's are kept, a C library
+; caller's included, and setjmp and longjmp keep and put back all of them
+; (cc/link).
+(def %cc-gen-keep ())       ; the registers locals are held in, the target's
+(def %cc-gen-held ())       ; ((name . register) ...), the function's
+
+; can a local of C type K be held in a register
+(def %cc-gen-holdable?
+  (fn (_ k)
+    (match
+      ((%cc-gen-ptr? k) #t)
+      ((%cc-gen-fnptr? k) #t)
+      ((pair? k) #f)
+      (#t (not (%cc-gen-real? k))))))
+
+(def %cc-gen-weights ())    ; ((name weight) ...), the walk's tally
+(def %cc-gen-taken ())      ; the names whose address the function takes
+(def %cc-gen-jumps? #f)     ; whether it calls setjmp
+
+(def %cc-gen-weight-of
+  (fn (_ name)
+    (def go (fn (self es)
+              (match
+                ((null? es) ())
+                ((string=? (first (first es)) name) (first es))
+                (#t (self (rest es))))))
+    (go %cc-gen-weights)))
+
+; the name whose address &NODE takes, through the fields of a struct; none
+; for a place reached through a pointer
+(def %cc-gen-taken!
+  (fn (self node)
+    (match
+      ((eq? (first node) (lit var))
+        (set! %cc-gen-taken (pair (first (rest node)) %cc-gen-taken)))
+      ((eq? (first node) (lit dot)) (self (first (rest node))))
+      (#t ()))))
+
+; NODE's uses of the names tallied, each weighing W
+(def %cc-gen-weigh!
+  (fn (self node w)
+    (if (pair? node)
+      (let ((t (first node)))
+        (def each
+          (fn (go xs w2) (if (pair? xs) (do (self (first xs) w2) (go (rest xs) w2)) ())))
+        (match
+          ((eq? t (lit var))
+            (let ((e (%cc-gen-weight-of (first (rest node)))))
+              (if (null? e) () (set-first! (rest e) (+ (first (rest e)) w)))))
+          ((if (eq? t (lit un)) (string=? (first (rest node)) "&") #f)
+            (do (%cc-gen-taken! (first (rest (rest node))))
+                (each (rest node) w)))
+          ((if (eq? t (lit call)) (string=? (first (rest node)) "setjmp") #f)
+            (do (set! %cc-gen-jumps? #t) (each (rest node) w)))
+          ((if (eq? t (lit while)) #t (if (eq? t (lit do)) #t (eq? t (lit for))))
+            (each (rest node) (if (> w 512) w (* w 8))))
+          (#t (each node w))))
+      ())))
+
+; the heaviest of ES, the tally's entries, that weighs anything, or nil
+(def %cc-gen-heaviest
+  (fn (self es best)
+    (match
+      ((null? es) best)
+      ((if (> (first (rest (first es))) 0)
+         (if (null? best) #t (> (first (rest (first es))) (first (rest best))))
+         #f)
+        (self (rest es) (first es)))
+      (#t (self (rest es) best)))))
+
+; ((name . register) ...): the heaviest of ES with the first of REGS each
+(def %cc-gen-choose
+  (fn (self es regs)
+    (if (null? regs) ()
+      (let ((best (%cc-gen-heaviest es ())))
+        (if (null? best) ()
+          (pair (pair (first best) (first regs))
+            (self (filter (fn (_ e) (not (same? e best))) es) (rest regs))))))))
+
+; The locals of the function whose BODY is being compiled that are held in
+; registers, chosen among the frame's scalars (%cc-gen-env) once the scan
+; has given each its slot, and their entries made (name (reg . REGISTER)
+; . C-TYPE), which %cc-gen-place-of answers a place in the register for.
+(def %cc-gen-held!
+  (fn (_ body)
+    (set! %cc-gen-weights
+      (map (fn (_ e) (list (first e) 0))
+        (filter (fn (_ e)
+                  (if (pair? (first (rest e))) #f
+                    (if (< (first (rest e)) 0) #f (%cc-gen-holdable? (rest (rest e))))))
+          %cc-gen-env)))
+    (set! %cc-gen-taken ())
+    (set! %cc-gen-jumps? #f)
+    (%cc-gen-weigh! body 1)
+    (set! %cc-gen-held
+      (if %cc-gen-jumps? ()
+        (%cc-gen-choose
+          (filter (fn (_ e) (not (%cc-gen-name-in? (first e) %cc-gen-taken))) %cc-gen-weights)
+          %cc-gen-keep)))
+    (set! %cc-gen-weights ())
+    (set! %cc-gen-env
+      (map (fn (_ e)
+             (let ((h (%cc-gen-held-find (first e))))
+               (if (null? h) e
+                 (pair (first e) (pair (pair (lit reg) h) (rest (rest e)))))))
+        %cc-gen-env))))
+
+; the register NAME is held in, or nil
+(def %cc-gen-held-find
+  (fn (_ name)
+    (def go (fn (self es)
+              (match
+                ((null? es) ())
+                ((string=? (first (first es)) name) (rest (first es)))
+                (#t (self (rest es))))))
+    (go %cc-gen-held)))
+
 ; --- a function --------------------------------------------------------------
 
 ; Every declaration in the body takes a slot before any code is emitted: the
@@ -3149,7 +3366,7 @@
                     (pair (%cc-gen-c-type! (first ks) "a parameter") (self (rest ks)))))))
         (go c-types)))
     (def homes (%cc-gen-homes pkinds sret?))
-    ; (MEM C-TYPE . HOME) for each parameter but a struct stored above,
+    ; (NAME C-TYPE . HOME) for each parameter but a struct stored above,
     ; which stays where the caller put it
     (def places
       (let ((go (fn (self ps ks hs)
@@ -3157,9 +3374,9 @@
                     (if (if (eq? (first (first hs)) (lit above)) (%cc-gen-struct? (first ks)) #f)
                       (do (%cc-gen-slot-above! (first ps) (first ks) (rest (first hs)))
                           (self (rest ps) (rest ks) (rest hs)))
-                      (pair (pair (mem x19 (%cc-gen-slot! (first ps) (first ks)))
-                              (pair (first ks) (first hs)))
-                        (self (rest ps) (rest ks) (rest hs))))))))
+                      (do (%cc-gen-slot! (first ps) (first ks))
+                          (pair (pair (first ps) (pair (first ks) (first hs)))
+                            (self (rest ps) (rest ks) (rest hs)))))))))
         (go params pkinds homes)))
     (set! %cc-gen-sret-slot (if sret? (%cc-gen-room! (lit long)) 0))
     (%cc-gen-scan! body #f)
@@ -3168,32 +3385,43 @@
     (if (> %cc-gen-frame-bytes 32760) (%cc-gen-no "more locals than a load reaches"))
     (%cc-gen-scan! body #t)
     (%cc-gen-scan-calls! body)
+    (%cc-gen-held! body)
     (def frame
       (+ (round-up %cc-gen-frame-bytes 16) (%cc-gen-above-size homes sret?)))
     (if (> frame %cc-gen-frame-most) (%cc-gen-no "a frame past the four megabytes frames have"))
     (set! %cc-gen-frame-top frame)
     (def home (fn (_ p) (rest (rest p))))
     (def in-reg? (fn (_ p) (eq? (first (home p)) (lit reg))))
+    ; where a parameter goes: its slot, or the register it is held in
+    (def held (fn (_ p) (%cc-gen-held-find (first p))))
+    (def slot (fn (_ p) (mem x19 (first (rest (%cc-gen-place-of (first p)))))))
     (asm-label! %cc-gen-asm (%cc-gen-fun-label (first (rest f))))
     (%cc-gen-symbol! (first (rest f)) (lit text) (asm-pos %cc-gen-asm)
       (%cc-gen-scope (first (rest (rest (rest (rest (rest (rest f)))))))))
     (if (string=? (%cc-gen-linker-name (first (rest f))) (first (rest f))) ()
       (%cc-gen-symbol! (%cc-gen-linker-name (first (rest f))) (lit text) (asm-pos %cc-gen-asm)
         (lit global)))
-    ; prologue: the caller's frame base is saved, this one taken off x20
+    ; prologue: the caller's frame base is saved, and the registers the
+    ; function holds locals in, and this frame taken off x20
     (if (null? %cc-gen-link) () (asm-push! %cc-gen-asm %cc-gen-link))
     (asm-push! %cc-gen-asm x19)
+    (let ((go (fn (self hs)
+                (if (null? hs) ()
+                  (do (asm-push! %cc-gen-asm (rest (first hs))) (self (rest hs)))))))
+      (go %cc-gen-held))
     (%cc-gen-step-x20! (lit sub) frame)
     (%cc-gen! (lit mov) x19 x20)
-    ; the arguments in registers go to their slots first, each narrowed to
-    ; its parameter's C type as it is stored; then the registers are free to
-    ; bring the ones above down, through their address
+    ; the arguments in registers go to their slots or registers first, each
+    ; narrowed to its parameter's C type as it is stored; then the registers
+    ; are free to bring the ones above down, through their address, and to
+    ; put the held ones in the form their C types are held in
     (let ((go (fn (self ps)
                 (if (null? ps) ()
                   (let ((p (first ps)))
-                    (do (if (in-reg? p)
-                          (%cc-gen! (%cc-gen-store-op (first (rest p))) (rest (home p)) (first p))
-                          ())
+                    (do (match
+                          ((not (in-reg? p)) ())
+                          ((null? (held p)) (%cc-gen! (%cc-gen-store-op (first (rest p))) (rest (home p)) (slot p)))
+                          (#t (%cc-gen! (lit mov) (held p) (rest (home p)))))
                         (self (rest ps))))))))
       (go places))
     (let ((go (fn (self ps)
@@ -3202,7 +3430,19 @@
                     (do (if (in-reg? p) ()
                           (do (%cc-gen-address! x19 (- frame (rest (home p))))
                               (%cc-gen! (%cc-gen-load-op (first (rest p))) x0 (mem x0 0))
-                              (%cc-gen! (%cc-gen-store-op (first (rest p))) x0 (first p))))
+                              (if (null? (held p))
+                                (%cc-gen! (%cc-gen-store-op (first (rest p))) x0 (slot p))
+                                (%cc-gen! (lit mov) (held p) x0))))
+                        (self (rest ps))))))))
+      (go places))
+    (let ((go (fn (self ps)
+                (if (null? ps) ()
+                  (let ((p (first ps)))
+                    (do (if (if (in-reg? p) (if (null? (held p)) #f (not (%cc-gen-wide? (first (rest p))))) #f)
+                          (do (%cc-gen! (lit mov) x0 (held p))
+                              (%cc-gen-hold! (first (rest p)))
+                              (%cc-gen! (lit mov) (held p) x0))
+                          ())
                         (self (rest ps))))))))
       (go places))
     (if sret?
@@ -3219,6 +3459,10 @@
     ; variable-length array may have taken room, then above the frame
     (%cc-gen! (lit mov) x20 x19)
     (%cc-gen-step-x20! (lit add) frame)
+    (let ((go (fn (self hs)
+                (if (null? hs) ()
+                  (do (asm-pop! %cc-gen-asm (rest (first hs))) (self (rest hs)))))))
+      (go (reverse %cc-gen-held)))
     (asm-pop! %cc-gen-asm x19)
     (if (null? %cc-gen-link) () (asm-pop! %cc-gen-asm %cc-gen-link))
     (%cc-gen! (lit ret))))
@@ -3305,6 +3549,13 @@
     (set! %cc-gen-nlabels 0)
     (set! %cc-gen-link (if (%cc-gen-arm64? target) %cc-gen-lr ()))
     (set! %cc-gen-callop (if (%cc-gen-arm64? target) (lit bl) (lit call)))
+    ; the registers the C convention keeps that the portable model leaves
+    ; free: arm64's x23 to x28, and x86-64's r15 and rbp, which it does not
+    ; name
+    (set! %cc-gen-keep
+      (if (%cc-gen-arm64? target)
+        (list (reg 23) (reg 24) (reg 25) (reg 26) (reg 27) (reg 28))
+        (list (reg 15) (reg 5))))
     (set! %cc-gen-thunk-direct 12)
     (set! %cc-gen-va-record
       (match
