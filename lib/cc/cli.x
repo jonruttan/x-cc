@@ -31,7 +31,7 @@
 (module cc/cli)
 
 (import cc/prims append byte-at byte-len file-exists? file-read-all file-write filter
-  map reverse string-append substring string=? sys-exit x-write heap-collect)
+  map reverse string-append substring string=? sys-exit heap-collect)
 (import cc/eval cc-run-with)
 (import cc/gen cc-compile-unit cc-target)
 (import cc/link cc-link)
@@ -354,7 +354,7 @@
 ; THUNK's status, 0, or 1 when it raises, with LABEL and the error on stdout
 (def %cc-cli-try
   (fn (_ label thunk)
-    (guard (e (do (display label) (x-write e) (newline) 1))
+    (guard (e (do (display label) (write e) (newline) 1))
       (do (thunk) 0))))
 
 ; Run the operands, (Sys args 'program) past the engine's path, and DO NOT

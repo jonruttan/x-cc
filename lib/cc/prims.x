@@ -150,11 +150,6 @@
 (def sys-exit (fn (_ n) (Sys exit n)))
 (def sys-getenv (fn (_ n) (Sys getenv n)))
 
-; x's own write.  cc/base rebinds the root's to print token lists bare, and
-; loads this module first so the one kept here is the original, which is
-; what an error or a value outside the C program is printed with.
-(def x-write write)
-
 (provide cc/prims
   char->integer integer->char byte-at byte-len
   string-length substring string-append string-concat string=?
@@ -167,4 +162,4 @@
   file-close file-open-read file-read file-read-all file-seek file-exists? file-write
   file-write-exec! file-write-text!
   sha256-hex-n sha256-jit! proc-capture
-  sys-exit sys-getenv x-write)
+  sys-exit sys-getenv)
