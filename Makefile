@@ -43,6 +43,11 @@ check: ## Run the suite against tests/contract/known-failures.txt -- what CI gat
 bundle: ## Roll a release tarball and print its pin
 	sh tools/bundle.sh
 
+.PHONY: card
+card: ## Hold docs/card.md to the card format and run its programs
+	X_BUNDLE_DIR="$${X_BUNDLE_DIR:-$(CURDIR)/..}" BUNDLE=. X="$(X)" \
+		sh "$${CARD_SH:-$$("$(X)" --share-dir)/tools/bundle-kit/card.sh}"
+
 .PHONY: help
 help: ## Show targets
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z0-9_-]+:.*?## / {printf "  \033[32m%-12s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)

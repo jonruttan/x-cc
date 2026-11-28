@@ -372,7 +372,9 @@
     (def symoff (+ starts 8))
     (def stroff (+ symoff (* 16 nsyms)))
     (def strsize (%cc-macho-round-up (length (first strs)) 8))
-    (def sigoff (+ stroff strsize))
+    ; the signature at the next 16-byte offset, as ld places it: strip
+    ; refuses one anywhere else
+    (def sigoff (%cc-macho-round-up (+ stroff strsize) 16))
     (def idlen (+ (byte-len %cc-macho-ident) 1))
     (def nslots (/ (+ sigoff 4095) 4096))
     (def hashoff (+ 88 idlen))

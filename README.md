@@ -414,6 +414,10 @@ struct, a typedef or a cast, with an initializer, or static is refused.
 
     make test           # the suite, loud on any failure
     make check          # judged against tests/contract/known-failures.txt
+    make card           # docs/card.md: its format, its rows and its programs
+
+[docs/card.md](docs/card.md) is the card: the command line, and C as x-cc
+takes it, in tables and programs that `make card` runs.
 
 ## Layout
 
