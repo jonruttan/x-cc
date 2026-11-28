@@ -11,7 +11,7 @@
 (dialect he)
 
 ; v0.60.0: the bundle shape, lib/cc/ with the entry cc/run.
-(requires-release "v0.62.0")
+(requires-release "v0.65.0")
 
 (entry run)
 
